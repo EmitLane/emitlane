@@ -81,3 +81,16 @@ func TestLoadRejectsConnectionCountOverflow(t *testing.T) {
 		t.Fatal("expected connection count overflow error")
 	}
 }
+
+func TestLoadRejectsNonPositiveConnectionLifetime(t *testing.T) {
+	for _, value := range []string{"0", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("EMITLANE_DATABASE_URL", "postgres://localhost/emitlane")
+			t.Setenv("EMITLANE_KAFKA_BROKERS", "localhost:9092")
+			t.Setenv("EMITLANE_DB_MAX_CONN_LIFETIME", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected %q to be rejected", value)
+			}
+		})
+	}
+}

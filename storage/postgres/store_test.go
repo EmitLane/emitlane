@@ -3,6 +3,7 @@ package postgres
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -32,5 +33,28 @@ func TestMapHeadersRejectsNonStringValues(t *testing.T) {
 	}
 	if headers["source"] != "orders" {
 		t.Fatalf("headers %v", headers)
+	}
+}
+
+func TestIntervalMSRoundsPositiveDurationsUp(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   time.Duration
+		want int64
+	}{
+		{name: "negative", in: -time.Nanosecond, want: 0},
+		{name: "zero", in: 0, want: 0},
+		{name: "sub-millisecond", in: time.Nanosecond, want: 1},
+		{name: "exact millisecond", in: time.Millisecond, want: 1},
+		{name: "partial millisecond", in: 1500 * time.Microsecond, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := intervalMS(tt.in); got != tt.want {
+				t.Fatalf("intervalMS(%s) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
 	}
 }

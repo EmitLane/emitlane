@@ -130,6 +130,9 @@ func (c Config) Validate() error {
 	if c.DBMinConns < 0 || c.DBMinConns > c.DBMaxConns {
 		return fmt.Errorf("EMITLANE_DB_MIN_CONNS must be between 0 and EMITLANE_DB_MAX_CONNS")
 	}
+	if c.DBMaxConnLifetime <= 0 {
+		return fmt.Errorf("EMITLANE_DB_MAX_CONN_LIFETIME must be > 0")
+	}
 	return c.Relay.Validate()
 }
 

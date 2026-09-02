@@ -80,9 +80,10 @@ v0.2.0-rc.1
 
 Do not use names such as `release-1`, `prod`, `latest`, `stable`, or date tags for
 Go module releases. The initial tracked Release Please version is `0.0.0`; that is
-automation state, not a published release. The first release should be
-`v0.1.0-alpha.1` for early testers or `v0.1.0` for a coherent usable vertical
-slice. Do not tag an initialization or CI-only commit.
+automation state, not a published release. The current coherent vertical slice
+targets `v0.1.0`. Use an alpha, beta, or release-candidate suffix only when
+intentionally publishing a prerelease for early feedback. Do not tag an
+initialization or CI-only commit.
 
 While the project is on `v0.x`, Release Please is configured to turn a breaking
 commit into the next minor version instead of accidentally declaring `v1.0.0`.

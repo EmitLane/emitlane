@@ -191,9 +191,11 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-EmitLane is currently a v0.1 implementation. APIs and operational defaults may
-still change before the first tagged release. Release tags are created only by
-the maintainers after the release gate is explicitly enabled.
+EmitLane is ready for its first `v0.1.0` release. Its core delivery and recovery
+semantics are covered by real PostgreSQL and Kafka integration tests. As a
+pre-1.0 project, APIs and operational defaults may still change during the
+`v0.x` series. Release tags are created only by maintainers after the release
+gate is explicitly enabled.
 
 ## License
 
