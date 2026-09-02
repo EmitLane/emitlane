@@ -45,6 +45,9 @@ type Relay struct {
 	wake     chan struct{}
 	listener WakeupListener
 	presence RelayPresence
+
+	orderingMu         sync.RWMutex
+	orderingPartitions []OrderingPartition
 }
 
 // Option configures Relay.
@@ -97,6 +100,15 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 	}
 	if cfg.PresenceStaleAfter == 0 {
 		cfg.PresenceStaleAfter = defaults.PresenceStaleAfter
+	}
+	if cfg.OrderingRebalanceInterval == 0 {
+		cfg.OrderingRebalanceInterval = defaults.OrderingRebalanceInterval
+	}
+	if cfg.OrderingLeaseDuration == 0 {
+		cfg.OrderingLeaseDuration = defaults.OrderingLeaseDuration
+	}
+	if cfg.OrderingSafetyMargin == 0 {
+		cfg.OrderingSafetyMargin = defaults.OrderingSafetyMargin
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -179,6 +191,23 @@ func (r *Relay) Run(ctx context.Context) error {
 		}
 		go r.heartbeatLoop(runCtx, presence)
 		defer r.markStopped(presence)
+	}
+	if orderingStore, ok := r.store.(OrderingPartitionStore); ok {
+		orderingDone := make(chan struct{})
+		go func() {
+			defer close(orderingDone)
+			r.orderingLoop(runCtx, orderingStore)
+		}()
+		defer func() {
+			cancel()
+			select {
+			case <-orderingDone:
+			case <-time.After(10 * time.Second):
+				r.log.Warn("timed out stopping ordered partition reconciliation",
+					"relay_instance", r.cfg.InstanceID)
+			}
+			r.releaseOrderingPartitions(orderingStore)
+		}()
 	}
 	go r.statsLoop(runCtx)
 	if r.cfg.Retention > 0 && r.cfg.CleanupInterval > 0 && r.cfg.CleanupBatch > 0 {

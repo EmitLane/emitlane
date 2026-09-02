@@ -27,28 +27,35 @@ type Config struct {
 	Retention          time.Duration
 	CleanupBatch       int
 
+	OrderingRebalanceInterval time.Duration
+	OrderingLeaseDuration     time.Duration
+	OrderingSafetyMargin      time.Duration
+
 	InstanceID string
 }
 
-// DefaultConfig returns production-oriented v0.2 defaults.
+// DefaultConfig returns production-oriented defaults.
 func DefaultConfig() Config {
 	return Config{
-		BatchSize:          100,
-		Concurrency:        4,
-		PollInterval:       5 * time.Second,
-		LeaseDuration:      30 * time.Second,
-		MaxAttempts:        10,
-		BaseDelay:          time.Second,
-		MaxDelay:           30 * time.Minute,
-		PublishTimeout:     10 * time.Second,
-		ShutdownTimeout:    15 * time.Second,
-		StatsInterval:      5 * time.Second,
-		ControlInterval:    2 * time.Second,
-		HeartbeatInterval:  10 * time.Second,
-		PresenceStaleAfter: 30 * time.Second,
-		CleanupInterval:    time.Minute,
-		Retention:          7 * 24 * time.Hour,
-		CleanupBatch:       1000,
+		BatchSize:                 100,
+		Concurrency:               4,
+		PollInterval:              5 * time.Second,
+		LeaseDuration:             30 * time.Second,
+		MaxAttempts:               10,
+		BaseDelay:                 time.Second,
+		MaxDelay:                  30 * time.Minute,
+		PublishTimeout:            10 * time.Second,
+		ShutdownTimeout:           15 * time.Second,
+		StatsInterval:             5 * time.Second,
+		ControlInterval:           2 * time.Second,
+		HeartbeatInterval:         10 * time.Second,
+		PresenceStaleAfter:        30 * time.Second,
+		CleanupInterval:           time.Minute,
+		Retention:                 7 * 24 * time.Hour,
+		CleanupBatch:              1000,
+		OrderingRebalanceInterval: 2 * time.Second,
+		OrderingLeaseDuration:     30 * time.Second,
+		OrderingSafetyMargin:      time.Second,
 	}
 }
 
@@ -116,6 +123,21 @@ func (c Config) Validate() error {
 	}
 	if c.Retention > 0 && c.CleanupBatch == 0 {
 		return fmt.Errorf("relay: cleanup batch must be > 0 when retention is enabled")
+	}
+	if c.OrderingRebalanceInterval <= 0 {
+		return fmt.Errorf("relay: ordering rebalance interval must be > 0")
+	}
+	if c.OrderingLeaseDuration <= 0 {
+		return fmt.Errorf("relay: ordering lease duration must be > 0")
+	}
+	if c.OrderingSafetyMargin <= 0 {
+		return fmt.Errorf("relay: ordering safety margin must be > 0")
+	}
+	if c.OrderingLeaseDuration <= c.PublishTimeout+c.OrderingSafetyMargin {
+		return fmt.Errorf("relay: ordering lease duration must exceed publish timeout plus safety margin")
+	}
+	if c.OrderingRebalanceInterval >= c.OrderingLeaseDuration {
+		return fmt.Errorf("relay: ordering rebalance interval must be less than ordering lease duration")
 	}
 	return nil
 }
