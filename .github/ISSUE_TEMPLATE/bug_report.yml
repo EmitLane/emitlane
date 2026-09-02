@@ -1,0 +1,101 @@
+name: Bug report
+description: Report reproducible incorrect behavior in EmitLane
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve EmitLane. Redact credentials, tokens, event payloads, and personal data before submitting.
+
+  - type: input
+    id: emitlane-version
+    attributes:
+      label: EmitLane version
+      description: Use a semantic version, commit SHA, or "unreleased".
+      placeholder: v0.1.0 or 1a2b3c4
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Paste the output of `go version` when applicable.
+      placeholder: go version go1.x.x linux/amd64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment-mode
+    attributes:
+      label: Deployment mode
+      options:
+        - Standalone relay
+        - Embedded relay
+        - Writer or Inbox SDK only
+        - Design or documentation only
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      placeholder: PostgreSQL 17.1, or not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: broker-version
+    attributes:
+      label: Broker and version
+      description: Include the Kafka distribution when relevant.
+      placeholder: Apache Kafka 4.0, or not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence that demonstrates the problem.
+      placeholder: |
+        1. Configure ...
+        2. Enqueue ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact secrets, credentials, event payloads, and personal data.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: sensitive-data
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I have removed credentials, tokens, private payloads, and personal data.
+          required: true

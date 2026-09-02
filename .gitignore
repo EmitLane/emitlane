@@ -1,0 +1,38 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Go build, test, profiling, and release output
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+*.prof
+*.pprof
+
+# Editor and operating-system metadata
+.DS_Store
+.idea/
+.vscode/
+
+# Internal planning, agent context, and implementation specifications
+#
+# Public project documentation (README, CONTRIBUTING, SECURITY, the technical
+# docs, and the pull request template) remains trackable. Remove an entry from
+# this list deliberately when that document is ready to be published.
+/AGENTS.md
+/EMITLANE_CICD_IMPLEMENTATION.md
+/EMITLANE_V0_1_IMPLEMENTATION.md
+/FULL-SPEC.md
+/docs/00-INDEX.md
+/docs/01-PRODUCT-VISION.md
+/docs/10-ROADMAP.md
+/docs/11-BACKLOG.md
+/docs/12-COMPETITIVE-ANALYSIS.md
+/docs/13-O1A-PROFESSIONAL-STRATEGY.md
+/docs/14-DECISIONS.md
+/docs/15-OPEN-SOURCE-LAUNCH.md
+/docs/16-REFERENCES.md

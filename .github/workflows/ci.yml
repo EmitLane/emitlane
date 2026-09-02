@@ -1,0 +1,285 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: false
+
+      - name: Check Go formatting
+        run: |
+          mapfile -d '' go_files < <(git ls-files -z -- '*.go' ':!vendor/**')
+          if (( ${#go_files[@]} == 0 )); then
+            echo "::notice title=Formatting check pending::No tracked Go source files exist yet."
+            exit 0
+          fi
+
+          unformatted="$(gofmt -l "${go_files[@]}")"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following files are not formatted with gofmt:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=go vet pending::go.mod does not exist yet; go vet was not run."
+          fi
+
+      - name: Run go vet
+        if: steps.go_project.outputs.exists == 'true'
+        run: go vet ./...
+
+  staticcheck:
+    name: staticcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Staticcheck pending::go.mod does not exist yet; Staticcheck was not run."
+          fi
+
+      - name: Run Staticcheck
+        if: steps.go_project.outputs.exists == 'true'
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
+  unit:
+    name: unit (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - "1.27.x"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Unit tests pending::go.mod does not exist yet; unit tests were not run."
+          fi
+
+      - name: Run unit tests
+        if: steps.go_project.outputs.exists == 'true'
+        run: go test -count=1 ./...
+
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Race tests pending::go.mod does not exist yet; race tests were not run."
+          fi
+
+      - name: Run race tests
+        if: steps.go_project.outputs.exists == 'true'
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Integration tests pending::go.mod does not exist yet; integration tests were not run."
+          fi
+
+      - name: Detect integration test suite
+        id: integration_suite
+        if: steps.go_project.outputs.exists == 'true'
+        run: |
+          if git grep -l -E '^//go:build[[:space:]].*integration' -- '*_test.go' >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Integration suite pending::No tests with an integration build tag exist yet."
+          fi
+
+      - name: Run integration tests
+        if: steps.integration_suite.outputs.exists == 'true'
+        run: go test -tags=integration -count=1 -timeout=20m ./...
+
+  vulnerability:
+    name: vulnerability
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Vulnerability scan pending::go.mod does not exist yet; govulncheck was not run."
+          fi
+
+      - name: Run govulncheck
+        if: steps.go_project.outputs.exists == 'true'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect Go module
+        id: go_project
+        run: |
+          if [[ -f go.mod ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Build pending::go.mod does not exist yet; no product build was attempted."
+          fi
+
+      - name: Build CLI and all packages
+        if: steps.go_project.outputs.exists == 'true'
+        run: |
+          go build -trimpath -o /tmp/emitlane ./cmd/emitlane
+          go build ./...

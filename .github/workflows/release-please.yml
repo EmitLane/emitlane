@@ -1,0 +1,91 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+# Releases are intentionally disabled until the repository variable
+# RELEASES_ENABLED is set to the exact value "true". The file checks below are
+# a second guard against enabling releases before a real CLI exists.
+permissions: {}
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release-please:
+    name: Prepare release
+    if: vars.RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify release readiness
+        run: |
+          missing=()
+          [[ -s go.mod ]] || missing+=(go.mod)
+          [[ -s cmd/emitlane/main.go ]] || missing+=(cmd/emitlane/main.go)
+          [[ -s .goreleaser.yaml ]] || missing+=(.goreleaser.yaml)
+
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error title=Release readiness gate::Missing required release file: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Create or update release pull request
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Pull request runs caused by GITHUB_TOKEN require manual approval.
+      # workflow_dispatch is exempt from that recursion guard, so run CI against
+      # the exact Release Please branch without requiring a personal token.
+      - name: Run CI for release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          if ! release_branch="$(jq -er '.headBranchName | select(type == "string" and length > 0)' <<<"$RELEASE_PR_JSON")"; then
+            echo "::error title=Release PR CI::Release Please reported a pull request but did not return its head branch."
+            exit 1
+          fi
+
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$release_branch"
+
+      # Keep this in the same job and use always(): Release Please can create a
+      # tag before a later API operation fails. Its step outputs remain available,
+      # so artifact publication must not become stranded behind a failed job.
+      - name: Start release artifact publication
+        if: always() && steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "::error title=Release publication::Release Please created a release without returning its tag."
+            exit 1
+          fi
+
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_TAG" \
+            --field tag="$RELEASE_TAG"

@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a focused improvement to EmitLane
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        EmitLane prioritizes correctness and explicit failure semantics. For large scope changes, explain why the v0.1 boundaries should change before proposing implementation details.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the operational or developer problem and who experiences it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior, including its boundaries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or simpler approaches you evaluated.
+    validations:
+      required: true
+
+  - type: textarea
+    id: operational-implications
+    attributes:
+      label: Operational implications
+      description: Cover failure modes, delivery semantics, compatibility, observability, and recovery where relevant.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope-check
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not rely on an end-to-end exactly-once delivery claim.
+          required: true
+        - label: I checked the roadmap and existing issues for related work.
+          required: true

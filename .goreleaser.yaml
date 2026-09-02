@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.18.0/www/docs/static/schema.json
+version: 2
+
+project_name: emitlane
+
+builds:
+  - id: emitlane
+    main: ./cmd/emitlane
+    binary: emitlane
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: emitlane
+    ids:
+      - emitlane
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github-native
+
+release:
+  mode: keep-existing
+  prerelease: auto
+  preflight:
+    fail_on_error: true
+
+dockers_v2:
+  - id: emitlane
+    ids: [emitlane]
+    dockerfile: Dockerfile.release
+    images:
+      - ghcr.io/emitlane/emitlane
+    tags:
+      - '{{ replace .Tag "+" "-" }}'
+      - '{{ if not .Prerelease }}v{{ .Major }}.{{ .Minor }}{{ end }}'
+      - '{{ if not .Prerelease }}v{{ .Major }}{{ end }}'
+      - '{{ if not .Prerelease }}latest{{ end }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    flags:
+      - "--pull"
+    labels:
+      org.opencontainers.image.source: https://github.com/EmitLane/emitlane
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"

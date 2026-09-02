@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact semantic-version tag to publish
+        required: true
+        type: string
+
+# GHCR images are published by GoReleaser for tagged releases.
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  goreleaser:
+    name: GoReleaser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Verify release gate
+        env:
+          RELEASES_ENABLED: ${{ vars.RELEASES_ENABLED }}
+        run: |
+          if [[ "$RELEASES_ENABLED" != "true" ]]; then
+            echo "::error title=Release gate closed::Set RELEASES_ENABLED=true only after EmitLane has a usable release candidate."
+            exit 1
+          fi
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Verify tag and release source
+        run: |
+          semver_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "$RELEASE_TAG" =~ $semver_pattern ]]; then
+            echo "::error title=Invalid release tag::$RELEASE_TAG is not a vMAJOR.MINOR.PATCH semantic-version tag."
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          if [[ "$(git rev-parse HEAD)" != "$tag_commit" ]]; then
+            echo "::error title=Release checkout mismatch::The checked-out commit is not $RELEASE_TAG."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error title=Untrusted release tag::$RELEASE_TAG does not point to a commit on main."
+            exit 1
+          fi
+
+          missing=()
+          [[ -s go.mod ]] || missing+=(go.mod)
+          [[ -s cmd/emitlane/main.go ]] || missing+=(cmd/emitlane/main.go)
+          [[ -s .goreleaser.yaml ]] || missing+=(.goreleaser.yaml)
+          [[ -s Dockerfile.release ]] || missing+=(Dockerfile.release)
+
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error title=Release readiness gate::Missing required release file: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Verify releasable CLI
+        run: |
+          module_path="$(go list -mod=readonly -m -f '{{ .Path }}')"
+          if [[ "$module_path" != "github.com/emitlane/emitlane" ]]; then
+            echo "::error title=Unexpected Go module::Expected github.com/emitlane/emitlane, found $module_path."
+            exit 1
+          fi
+
+          package_name="$(go list -mod=readonly -f '{{ .Name }}' ./cmd/emitlane)"
+          if [[ "$package_name" != "main" ]]; then
+            echo "::error title=CLI not runnable::cmd/emitlane must be a Go main package."
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish release artifacts
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}

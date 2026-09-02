@@ -1,0 +1,100 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  extended:
+    name: extended tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Detect extended test suites
+        id: suites
+        run: |
+          module=false
+          integration=false
+          failure_injection=false
+          chaos=false
+          benchmarks=false
+
+          if [[ -f go.mod ]]; then
+            module=true
+
+            if git grep -l -E '^//go:build[[:space:]].*integration' -- '*_test.go' >/dev/null 2>&1; then
+              integration=true
+            else
+              echo "::notice title=Extended integration pending::No tests with an integration build tag exist yet."
+            fi
+
+            if git grep -l -E '^//go:build[[:space:]].*failure_injection' -- '*_test.go' >/dev/null 2>&1; then
+              failure_injection=true
+            else
+              echo "::notice title=Failure-injection suite pending::No tests with a failure_injection build tag exist yet."
+            fi
+
+            if git grep -l -E '^//go:build[[:space:]].*chaos' -- '*_test.go' >/dev/null 2>&1; then
+              chaos=true
+            else
+              echo "::notice title=Chaos suite pending::No tests with a chaos build tag exist yet."
+            fi
+
+            if git grep -l -E '^func[[:space:]]+Benchmark[[:alnum:]_]*[[:space:]]*\(' -- '*_test.go' >/dev/null 2>&1; then
+              benchmarks=true
+            else
+              echo "::notice title=Benchmark smoke pending::No Go benchmark functions exist yet."
+            fi
+          else
+            echo "::notice title=Nightly tests pending::go.mod does not exist yet; no extended suites were run."
+          fi
+
+          {
+            echo "module=$module"
+            echo "integration=$integration"
+            echo "failure_injection=$failure_injection"
+            echo "chaos=$chaos"
+            echo "benchmarks=$benchmarks"
+          } >> "$GITHUB_OUTPUT"
+
+      # The integration suite includes the documented relay crash, broker ACK,
+      # lease takeover, poison-event, and outage-recovery scenarios.
+      - name: Run extended integration tests
+        if: steps.suites.outputs.integration == 'true'
+        run: go test -tags=integration -count=1 -timeout=45m ./...
+
+      - name: Run failure-injection tests
+        if: steps.suites.outputs.failure_injection == 'true'
+        run: go test -tags=integration,failure_injection -count=1 -timeout=45m ./...
+
+      - name: Run chaos tests
+        if: steps.suites.outputs.chaos == 'true'
+        run: go test -tags=integration,chaos -count=1 -timeout=45m ./...
+
+      # A one-iteration smoke run detects broken benchmarks without enforcing a flaky threshold.
+      - name: Run benchmark smoke tests
+        if: steps.suites.outputs.benchmarks == 'true'
+        run: go test -run='^$' -bench=. -benchtime=1x -count=1 ./...
