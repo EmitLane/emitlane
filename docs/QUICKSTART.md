@@ -136,7 +136,7 @@ GRANT INSERT, SELECT ON TABLE emitlane.inbox_events TO emitlane_consumer;
 | `EMITLANE_RETENTION_BATCH` | `1000` | Cleanup batch size |
 | `EMITLANE_DB_MAX_CONNS` | `10` | pgx pool |
 | `EMITLANE_DB_MIN_CONNS` | `2` | pgx pool |
-| `EMITLANE_DB_MAX_CONN_LIFETIME` | `1h` | pgx pool |
+| `EMITLANE_DB_MAX_CONN_LIFETIME` | `1h` | pgx pool; must be greater than zero |
 
 Never commit credentials. Outbox payloads are stored in PostgreSQL as application data.
 

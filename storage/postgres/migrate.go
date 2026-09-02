@@ -33,10 +33,16 @@ func CurrentSchemaVersion() int {
 
 // MigrateUp applies all embedded up migrations that have not been recorded.
 func MigrateUp(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, ensureMigrations); err != nil {
+	tx, err := beginMigration(ctx, pool)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, ensureMigrations); err != nil {
 		return fmt.Errorf("migrate: ensure schema: %w", err)
 	}
-	applied, err := appliedVersions(ctx, pool)
+	applied, err := appliedVersions(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -56,24 +62,41 @@ func MigrateUp(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("migrate: read %s: %w", e.Name(), err)
 		}
-		if err := apply(ctx, pool, version, string(body), false); err != nil {
-			return err
+		if strings.TrimSpace(string(body)) != "" {
+			if _, err := tx.Exec(ctx, string(body)); err != nil {
+				return fmt.Errorf("migrate: apply version %d: %w", version, err)
+			}
 		}
+		if _, err := tx.Exec(ctx, `INSERT INTO emitlane.schema_migrations (version) VALUES ($1)`, version); err != nil {
+			return fmt.Errorf("migrate: record up %d: %w", version, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("migrate: commit up: %w", err)
 	}
 	return nil
 }
 
 // MigrateDown rolls back the latest applied migration.
 func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, ensureMigrations); err != nil {
+	tx, err := beginMigration(ctx, pool)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, ensureMigrations); err != nil {
 		return fmt.Errorf("migrate: ensure schema: %w", err)
 	}
 	var version *int
-	err := pool.QueryRow(ctx, `SELECT MAX(version) FROM emitlane.schema_migrations`).Scan(&version)
+	err = tx.QueryRow(ctx, `SELECT MAX(version) FROM emitlane.schema_migrations`).Scan(&version)
 	if err != nil {
 		return fmt.Errorf("migrate: current version: %w", err)
 	}
 	if version == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("migrate: commit down: %w", err)
+		}
 		return nil
 	}
 	name, err := downMigrationName(*version)
@@ -84,7 +107,15 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("migrate: read down for version %d: %w", *version, err)
 	}
-	return apply(ctx, pool, *version, string(body), true)
+	if strings.TrimSpace(string(body)) != "" {
+		if _, err := tx.Exec(ctx, string(body)); err != nil {
+			return fmt.Errorf("migrate: apply version %d: %w", *version, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("migrate: commit down: %w", err)
+	}
+	return nil
 }
 
 // SchemaVersion returns the current applied migration version, or 0 if none.
@@ -109,47 +140,20 @@ func SchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return *version, nil
 }
 
-func apply(ctx context.Context, pool *pgxpool.Pool, version int, body string, down bool) error {
+func beginMigration(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("migrate: begin: %w", err)
+		return nil, fmt.Errorf("migrate: begin: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockID); err != nil {
-		return fmt.Errorf("migrate: acquire lock: %w", err)
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("migrate: acquire lock: %w", err)
 	}
-
-	if !down {
-		var alreadyApplied bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (
-            SELECT 1 FROM emitlane.schema_migrations WHERE version = $1
-        )`, version).Scan(&alreadyApplied); err != nil {
-			return fmt.Errorf("migrate: check version %d: %w", version, err)
-		}
-		if alreadyApplied {
-			return tx.Commit(ctx)
-		}
-	}
-
-	if strings.TrimSpace(body) != "" {
-		if _, err := tx.Exec(ctx, body); err != nil {
-			return fmt.Errorf("migrate: apply version %d: %w", version, err)
-		}
-	}
-	// Down SQL for v0.1 drops schema emitlane CASCADE, including this table.
-	if !down {
-		if _, err := tx.Exec(ctx, `INSERT INTO emitlane.schema_migrations (version) VALUES ($1)`, version); err != nil {
-			return fmt.Errorf("migrate: record up %d: %w", version, err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("migrate: commit version %d: %w", version, err)
-	}
-	return nil
+	return tx, nil
 }
 
-func appliedVersions(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, error) {
-	rows, err := pool.Query(ctx, `SELECT version FROM emitlane.schema_migrations`)
+func appliedVersions(ctx context.Context, tx pgx.Tx) (map[int]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT version FROM emitlane.schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("migrate: list versions: %w", err)
 	}

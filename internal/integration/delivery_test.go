@@ -870,8 +870,22 @@ func TestMigrationRoundTrip(t *testing.T) {
 	if !applicationTablePreserved {
 		t.Fatal("down migration removed an application-owned table")
 	}
-	if err := pgstore.MigrateUp(ctx, e.pool); err != nil {
-		t.Fatal(err)
+	const migrators = 8
+	errCh := make(chan error, migrators)
+	var wg sync.WaitGroup
+	for range migrators {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- pgstore.MigrateUp(ctx, e.pool)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent migrate up: %v", err)
+		}
 	}
 	version, err = pgstore.SchemaVersion(ctx, e.pool)
 	if err != nil {

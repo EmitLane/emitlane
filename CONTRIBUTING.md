@@ -10,20 +10,20 @@ not in a public issue.
 
 ## Before you start
 
-Read `AGENTS.md` and:
+Start with these public design and operations documents:
 
 - `docs/02-ARCHITECTURE.md`;
 - `docs/03-DATABASE.md`;
 - `docs/04-GO-API.md`;
 - `docs/05-DELIVERY-SEMANTICS.md`;
+- `docs/06-ORDERING.md`;
+- `docs/07-OBSERVABILITY-OPERABILITY.md`;
+- `docs/08-SECURITY-DEPLOYMENT.md`;
+- `docs/09-TESTING-BENCHMARKS.md`;
 - `docs/DELIVERY_GUARANTEES.md`;
-- `docs/FAILURE_MODES.md`;
-- `docs/10-ROADMAP.md`.
+- `docs/FAILURE_MODES.md`.
 
-For v0.1 scope, `EMITLANE_V0_1_IMPLEMENTATION.md` has priority over broader
-roadmap documents. Propose large or behavior-changing work in an issue first.
-If source-of-truth documents disagree, record the decision in
-`docs/14-DECISIONS.md` before changing behavior.
+Propose large or behavior-changing work in an issue before implementing it.
 
 ## Branches and commits
 

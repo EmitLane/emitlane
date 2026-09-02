@@ -48,9 +48,12 @@ func sanitizeError(msg string) string {
 }
 
 func intervalMS(d time.Duration) int64 {
-	ms := d.Milliseconds()
-	if ms < 0 {
-		ms = 0
+	if d <= 0 {
+		return 0
+	}
+	ms := int64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		ms++
 	}
 	return ms
 }
