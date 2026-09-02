@@ -78,17 +78,19 @@ type rowScanner interface {
 
 func scanEvent(row rowScanner) (relay.Event, error) {
 	var (
-		e          relay.Event
-		key        []byte
-		headers    []byte
-		corr       *string
-		caus       *string
-		tp         *string
-		ts         *string
-		owner      *string
-		lastErr    *string
-		leaseUntil *time.Time
-		delivered  *time.Time
+		e            relay.Event
+		key          []byte
+		headers      []byte
+		corr         *string
+		caus         *string
+		tp           *string
+		ts           *string
+		owner        *string
+		lastErr      *string
+		leaseUntil   *time.Time
+		delivered    *time.Time
+		replayedFrom *uuid.UUID
+		replayBatch  *uuid.UUID
 	)
 	err := row.Scan(
 		&e.ID,
@@ -111,6 +113,8 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 		&lastErr,
 		&e.CreatedAt,
 		&delivered,
+		&replayedFrom,
+		&replayBatch,
 	)
 	if err != nil {
 		return relay.Event{}, err
@@ -128,6 +132,8 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 	e.LeaseUntil = leaseUntil
 	e.LastError = deref(lastErr)
 	e.DeliveredAt = delivered
+	e.ReplayedFromEventID = replayedFrom
+	e.ReplayBatchID = replayBatch
 	return e, nil
 }
 
@@ -158,7 +164,9 @@ const eventColumns = `
     lease_until,
     last_error,
     created_at,
-    delivered_at`
+    delivered_at,
+    replayed_from_event_id,
+    replay_batch_id`
 
 // Claim marks a bounded batch inflight and commits before returning.
 // Eligible rows are pending (available now) or inflight with an expired lease.
@@ -191,6 +199,10 @@ WITH picked AS (
     SELECT id
     FROM emitlane.outbox_events
     WHERE available_at <= NOW()
+	  AND EXISTS (
+	      SELECT 1 FROM emitlane.runtime_control
+	      WHERE singleton = TRUE AND paused = FALSE
+	  )
       AND (
             status = 'pending'
          OR (status = 'inflight' AND lease_until IS NOT NULL AND lease_until <= NOW())
@@ -226,7 +238,9 @@ RETURNING
     e.lease_until,
     e.last_error,
     e.created_at,
-    e.delivered_at`
+    e.delivered_at,
+    e.replayed_from_event_id,
+    e.replay_batch_id`
 
 	rows, err := tx.Query(ctx, sql, limit, owner, intervalMS(lease))
 	if err != nil {
@@ -394,7 +408,9 @@ SELECT
     lease_until,
     last_error,
     created_at,
-    delivered_at
+    delivered_at,
+    replayed_from_event_id,
+    replay_batch_id
 FROM emitlane.outbox_events
 WHERE status = 'dead'
 ORDER BY created_at DESC
@@ -428,21 +444,47 @@ FROM emitlane.outbox_events WHERE id = $1`
 
 // StatsSnapshot returns queue gauges.
 func (s *Store) StatsSnapshot(ctx context.Context) (relay.Stats, error) {
+	return s.StatsSnapshotWithPresence(ctx, 30*time.Second)
+}
+
+// StatsSnapshotWithPresence uses the configured stale threshold when
+// classifying relay heartbeats.
+func (s *Store) StatsSnapshotWithPresence(ctx context.Context, staleAfter time.Duration) (relay.Stats, error) {
 	const sql = `
+WITH queue AS (
 SELECT
-    COUNT(*) FILTER (WHERE status = 'pending') AS pending,
-    COUNT(*) FILTER (WHERE status = 'inflight') AS inflight,
-    COUNT(*) FILTER (WHERE status = 'dead') AS dead,
-    COALESCE(
-        EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'pending'))),
-        0
-    ) AS oldest_pending_seconds
-FROM emitlane.outbox_events`
+    (SELECT COUNT(*) FROM emitlane.outbox_events WHERE status = 'pending') AS pending,
+    (SELECT COUNT(*) FROM emitlane.outbox_events WHERE status = 'inflight') AS inflight,
+    (SELECT COUNT(*) FROM emitlane.outbox_events WHERE status = 'dead') AS dead,
+    COALESCE((
+        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))
+        FROM emitlane.outbox_events WHERE status = 'pending'
+    ), 0) AS oldest_pending_seconds
+), relays AS (
+SELECT
+    COUNT(*) FILTER (WHERE stopped_at IS NULL AND last_heartbeat_at >= NOW() - ($1 * INTERVAL '1 millisecond')) AS active,
+    COUNT(*) FILTER (WHERE stopped_at IS NULL AND last_heartbeat_at < NOW() - ($1 * INTERVAL '1 millisecond')) AS stale
+FROM emitlane.relay_instances
+)
+SELECT queue.pending, queue.inflight, queue.dead, queue.oldest_pending_seconds,
+       control.paused, relays.active, relays.stale
+FROM queue, relays, emitlane.runtime_control AS control
+WHERE control.singleton = TRUE`
 	var st relay.Stats
-	if err := s.pool.QueryRow(ctx, sql).Scan(&st.Pending, &st.Inflight, &st.Dead, &st.OldestPendingSeconds); err != nil {
+	if err := s.pool.QueryRow(ctx, sql, intervalMS(staleAfter)).Scan(&st.Pending, &st.Inflight, &st.Dead, &st.OldestPendingSeconds,
+		&st.Paused, &st.RelaysActive, &st.RelaysStale); err != nil {
 		return relay.Stats{}, fmt.Errorf("stats: %w", err)
 	}
 	return st, nil
+}
+
+// RelayPaused returns the durable cluster-wide pause state.
+func (s *Store) RelayPaused(ctx context.Context) (bool, error) {
+	var paused bool
+	if err := s.pool.QueryRow(ctx, `SELECT paused FROM emitlane.runtime_control WHERE singleton = TRUE`).Scan(&paused); err != nil {
+		return false, fmt.Errorf("read relay pause state: %w", err)
+	}
+	return paused, nil
 }
 
 // CleanupDelivered deletes a bounded batch of delivered events older than the

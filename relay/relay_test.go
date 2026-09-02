@@ -27,6 +27,22 @@ type memoryStore struct {
 	cleanupInvoked int
 }
 
+type failingPresenceStore struct {
+	*memoryStore
+}
+
+func (*failingPresenceStore) RegisterRelay(context.Context, RelayPresence) error {
+	return errors.New("presence unavailable")
+}
+
+func (*failingPresenceStore) HeartbeatRelay(context.Context, string) error {
+	return errors.New("presence unavailable")
+}
+
+func (*failingPresenceStore) MarkRelayStopped(context.Context, string) error {
+	return errors.New("presence unavailable")
+}
+
 func (s *memoryStore) Claim(_ context.Context, owner string, limit int, _ time.Duration) ([]Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -153,6 +169,38 @@ func testRelay(t *testing.T, store Store, pub broker.Publisher, mutate func(*Con
 	return rly
 }
 
+func TestPresenceDefaultsAreAppliedAfterOptions(t *testing.T) {
+	rly := testRelay(t, &memoryStore{}, &trackingPublisher{}, nil, WithPresenceInfo("", ""))
+	if rly.presence.Hostname == "" {
+		t.Fatal("empty hostname option must fall back to a usable hostname")
+	}
+	if rly.presence.Version != "dev" {
+		t.Fatalf("presence version %q, want dev", rly.presence.Version)
+	}
+	if rly.presence.InstanceID != rly.cfg.InstanceID {
+		t.Fatalf("presence instance id %q, want %q", rly.presence.InstanceID, rly.cfg.InstanceID)
+	}
+}
+
+func TestNewBackfillsV02ConfigFieldsForV01Callers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.InstanceID = "v01-caller"
+	cfg.ControlInterval = 0
+	cfg.HeartbeatInterval = 0
+	cfg.PresenceStaleAfter = 0
+
+	rly, err := New(cfg, &memoryStore{}, &trackingPublisher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults := DefaultConfig()
+	if rly.cfg.ControlInterval != defaults.ControlInterval ||
+		rly.cfg.HeartbeatInterval != defaults.HeartbeatInterval ||
+		rly.cfg.PresenceStaleAfter != defaults.PresenceStaleAfter {
+		t.Fatalf("operational defaults not applied: %#v", rly.cfg)
+	}
+}
+
 func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 	store := &memoryStore{}
 	for range 5 {
@@ -197,6 +245,29 @@ func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 		if msg.Headers[broker.HeaderAttempt] != "1" {
 			t.Fatalf("attempt header %q, want 1", msg.Headers[broker.HeaderAttempt])
 		}
+	}
+}
+
+func TestPresenceFailureDoesNotStopDelivery(t *testing.T) {
+	eventID := uuid.Must(uuid.NewV7())
+	base := &memoryStore{events: []Event{{
+		ID: eventID, Destination: "orders.events", Type: "order.created",
+		SchemaVersion: 1, CreatedAt: time.Now(),
+	}}}
+	store := &failingPresenceStore{memoryStore: base}
+	rly := testRelay(t, store, &trackingPublisher{}, func(cfg *Config) {
+		cfg.HeartbeatInterval = 10 * time.Millisecond
+		cfg.PresenceStaleAfter = 50 * time.Millisecond
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := rly.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	base.mu.Lock()
+	defer base.mu.Unlock()
+	if len(base.delivered) != 1 || base.delivered[0] != eventID {
+		t.Fatalf("presence failure blocked delivery: %v", base.delivered)
 	}
 }
 

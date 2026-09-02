@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	adminapi "github.com/emitlane/emitlane/internal/admin"
+	"github.com/emitlane/emitlane/relay"
 	"github.com/emitlane/emitlane/storage/postgres"
 )
 
@@ -52,14 +55,23 @@ func deadCmd(args []string) error {
 		}
 		return nil
 	case "retry":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: emitlane dead retry <event-id>")
+		if len(args) < 2 {
+			return fmt.Errorf("usage: emitlane dead retry <event-id> [--reason reason]")
 		}
 		id, err := uuid.Parse(args[1])
 		if err != nil {
 			return fmt.Errorf("event-id must be a UUID")
 		}
-		if err := store.RetryDead(ctx, id); err != nil {
+		fs := flag.NewFlagSet("dead retry", flag.ContinueOnError)
+		reason := fs.String("reason", "", "operator reason")
+		if err := fs.Parse(args[2:]); err != nil || fs.NArg() != 0 {
+			return fmt.Errorf("usage: emitlane dead retry <event-id> [--reason reason]")
+		}
+		service, err := adminapi.NewService(store, relay.DefaultConfig().PresenceStaleAfter, nil)
+		if err != nil {
+			return err
+		}
+		if err := service.RetryDead(ctx, id, adminapi.Mutation{Actor: "cli", Reason: *reason}); err != nil {
 			return err
 		}
 		fmt.Printf("event %s moved to pending\n", id)

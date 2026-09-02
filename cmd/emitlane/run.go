@@ -19,6 +19,7 @@ import (
 
 	"github.com/emitlane/emitlane/broker/kafka"
 	"github.com/emitlane/emitlane/config"
+	adminapi "github.com/emitlane/emitlane/internal/admin"
 	"github.com/emitlane/emitlane/relay"
 	"github.com/emitlane/emitlane/storage/postgres"
 	"github.com/emitlane/emitlane/telemetry"
@@ -72,12 +73,27 @@ func runCmd(args []string) error {
 		relay.WithLogger(log),
 		relay.WithMetrics(metrics),
 		relay.WithWakeupListener(postgres.NewListener(cfg.DatabaseURL, log)),
+		relay.WithPresenceInfo("", version),
 	)
 	if err != nil {
 		return err
 	}
 
 	httpSrv := newHTTPServer(cfg.HTTPAddr, pool, pub)
+	var adminSrv *http.Server
+	if cfg.Admin.Enabled {
+		service, err := adminapi.NewService(store, cfg.Relay.PresenceStaleAfter, metrics)
+		if err != nil {
+			return err
+		}
+		adminSrv, err = adminapi.NewHTTPServer(adminapi.HTTPConfig{
+			Addr: cfg.Admin.Addr, Token: cfg.Admin.Token,
+			ExposePayload: cfg.Admin.ExposePayload, Logger: log,
+		}, service)
+		if err != nil {
+			return err
+		}
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -96,6 +112,21 @@ func runCmd(args []string) error {
 	g.Go(func() error {
 		return rly.Run(gctx)
 	})
+	if adminSrv != nil {
+		g.Go(func() error {
+			log.Info("admin server listening", "addr", cfg.Admin.Addr, "payload_exposure", cfg.Admin.ExposePayload)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		})
+		g.Go(func() error {
+			<-gctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Relay.ShutdownTimeout)
+			defer cancel()
+			return adminSrv.Shutdown(shutdownCtx)
+		})
+	}
 	return g.Wait()
 }
 

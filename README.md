@@ -41,6 +41,8 @@ relay instances.
   database transaction as the consumer's effects.
 - **Operable by default** — structured logs, Prometheus metrics, OpenTelemetry,
   health endpoints, diagnostics, migrations, and dead-letter commands.
+- **Controlled recovery** — durable cluster pause/resume, relay presence,
+  redacted event inspection, audited retry, and bounded replay operations.
 
 ## Quickstart
 
@@ -65,6 +67,8 @@ Then check the relay:
 curl -sS http://localhost:8080/healthz
 curl -sS http://localhost:8080/readyz
 curl -sS http://localhost:8080/metrics | grep emitlane_
+curl -sS http://localhost:8082/v1/stats \
+  -H 'Authorization: Bearer emitlane-local-admin'
 ```
 
 See the [complete quickstart](docs/QUICKSTART.md) for port overrides, a manual
@@ -123,7 +127,7 @@ The important boundaries are intentional:
 - an unacknowledged event remains recoverable after a crash;
 - an acknowledged event can be published twice in the relay crash window;
 - failed events are retained and become `dead` after retry exhaustion;
-- strict or global ordering is not guaranteed in v0.1.
+- strict or global ordering is not guaranteed in v0.2.
 
 Read [delivery guarantees](docs/DELIVERY_GUARANTEES.md) and
 [failure modes](docs/FAILURE_MODES.md) before adopting EmitLane in a critical path.
@@ -145,6 +149,13 @@ emitlane doctor
 emitlane run
 emitlane dead list
 emitlane dead retry <event-id>
+emitlane stats [--json]
+emitlane events list [filters]
+emitlane events inspect <event-id> [--json] [--payload]
+emitlane relay status|pause|resume
+emitlane replay event <event-id> --reason "..."
+emitlane replay range [filters] --reason "..." [--execute]
+emitlane audit list [--json]
 emitlane version
 ```
 
@@ -153,6 +164,15 @@ Runtime endpoints:
 - `GET /healthz` — process liveness;
 - `GET /readyz` — PostgreSQL and Kafka readiness;
 - `GET /metrics` — Prometheus metrics.
+
+The versioned Admin API uses a separate listener, is disabled by default, and
+requires bearer authentication for any non-loopback bind. See the
+[Admin API](docs/ADMIN_API.md) and [operations guide](docs/OPERATIONS.md).
+
+> [!WARNING]
+> Replay creates a new event identity and can intentionally execute downstream
+> business logic again. Batch replay previews by default and execution is capped
+> at 1000 events per atomic request.
 
 The minimum runtime configuration is:
 
@@ -187,15 +207,20 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Observability and operations](docs/07-OBSERVABILITY-OPERABILITY.md)
 - [Security and deployment](docs/08-SECURITY-DEPLOYMENT.md)
 - [Testing and benchmarks](docs/09-TESTING-BENCHMARKS.md)
+- [Admin API](docs/ADMIN_API.md)
+- [Replay safety](docs/REPLAY.md)
+- [Operations runbook](docs/OPERATIONS.md)
+- [Benchmark harness](docs/BENCHMARKING.md)
+- [Upgrading](docs/UPGRADING.md)
 - [Release process](docs/RELEASING.md)
 
 ## Project status
 
-EmitLane is ready for its first `v0.1.0` release. Its core delivery and recovery
-semantics are covered by real PostgreSQL and Kafka integration tests. As a
-pre-1.0 project, APIs and operational defaults may still change during the
-`v0.x` series. Release tags are created only by maintainers after the release
-gate is explicitly enabled.
+`v0.1.0` is the released delivery baseline. The repository now contains the
+v0.2 operability and controlled-recovery implementation: additive schema v2,
+durable pause, relay discovery, redacted inspection, audited retry/replay,
+Admin API, expanded CLI, and a real benchmark harness. As a pre-1.0 project,
+APIs and operational defaults may still change during the `v0.x` series.
 
 ## License
 

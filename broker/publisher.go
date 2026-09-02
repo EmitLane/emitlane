@@ -11,6 +11,8 @@ const (
 	HeaderEventType     = "emitlane-event-type"
 	HeaderSchemaVersion = "emitlane-schema-version"
 	HeaderAttempt       = "emitlane-attempt"
+	HeaderOriginalEvent = "emitlane-original-event-id"
+	HeaderReplayBatch   = "emitlane-replay-batch-id"
 	HeaderTraceparent   = "traceparent"
 	HeaderTracestate    = "tracestate"
 )

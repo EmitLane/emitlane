@@ -25,7 +25,7 @@ func NewListener(databaseURL string, log *slog.Logger) *Listener {
 	return &Listener{databaseURL: databaseURL, log: log}
 }
 
-// Run listens on emitlane_events using a dedicated connection.
+// Run listens for event and runtime-control changes using a dedicated connection.
 // Notification failure never stops durable delivery; the relay always polls.
 func (l *Listener) Run(ctx context.Context, wake chan<- struct{}) {
 	backoff := time.Second
@@ -68,7 +68,10 @@ func (l *Listener) listenOnce(ctx context.Context, wake chan<- struct{}) (bool, 
 	if _, err := conn.Exec(ctx, `LISTEN emitlane_events`); err != nil {
 		return false, fmt.Errorf("listen: %w", err)
 	}
-	l.log.Info("listening for outbox notifications", "channel", notifyChannel)
+	if _, err := conn.Exec(ctx, `LISTEN emitlane_control`); err != nil {
+		return false, fmt.Errorf("listen control: %w", err)
+	}
+	l.log.Info("listening for emitlane notifications", "channels", []string{notifyChannel, "emitlane_control"})
 
 	for {
 		n, err := conn.WaitForNotification(ctx)

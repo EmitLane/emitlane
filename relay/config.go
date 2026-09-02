@@ -17,32 +17,38 @@ type Config struct {
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration
 
-	PublishTimeout  time.Duration
-	ShutdownTimeout time.Duration
-	StatsInterval   time.Duration
-	CleanupInterval time.Duration
-	Retention       time.Duration
-	CleanupBatch    int
+	PublishTimeout     time.Duration
+	ShutdownTimeout    time.Duration
+	StatsInterval      time.Duration
+	ControlInterval    time.Duration
+	HeartbeatInterval  time.Duration
+	PresenceStaleAfter time.Duration
+	CleanupInterval    time.Duration
+	Retention          time.Duration
+	CleanupBatch       int
 
 	InstanceID string
 }
 
-// DefaultConfig returns v0.1 defaults.
+// DefaultConfig returns production-oriented v0.2 defaults.
 func DefaultConfig() Config {
 	return Config{
-		BatchSize:       100,
-		Concurrency:     4,
-		PollInterval:    5 * time.Second,
-		LeaseDuration:   30 * time.Second,
-		MaxAttempts:     10,
-		BaseDelay:       time.Second,
-		MaxDelay:        30 * time.Minute,
-		PublishTimeout:  10 * time.Second,
-		ShutdownTimeout: 15 * time.Second,
-		StatsInterval:   5 * time.Second,
-		CleanupInterval: time.Minute,
-		Retention:       7 * 24 * time.Hour,
-		CleanupBatch:    1000,
+		BatchSize:          100,
+		Concurrency:        4,
+		PollInterval:       5 * time.Second,
+		LeaseDuration:      30 * time.Second,
+		MaxAttempts:        10,
+		BaseDelay:          time.Second,
+		MaxDelay:           30 * time.Minute,
+		PublishTimeout:     10 * time.Second,
+		ShutdownTimeout:    15 * time.Second,
+		StatsInterval:      5 * time.Second,
+		ControlInterval:    2 * time.Second,
+		HeartbeatInterval:  10 * time.Second,
+		PresenceStaleAfter: 30 * time.Second,
+		CleanupInterval:    time.Minute,
+		Retention:          7 * 24 * time.Hour,
+		CleanupBatch:       1000,
 	}
 }
 
@@ -80,6 +86,15 @@ func (c Config) Validate() error {
 	}
 	if c.StatsInterval < 0 {
 		return fmt.Errorf("relay: stats interval must be >= 0")
+	}
+	if c.ControlInterval <= 0 {
+		return fmt.Errorf("relay: control interval must be > 0")
+	}
+	if c.HeartbeatInterval <= 0 {
+		return fmt.Errorf("relay: heartbeat interval must be > 0")
+	}
+	if c.PresenceStaleAfter <= c.HeartbeatInterval {
+		return fmt.Errorf("relay: presence stale threshold must be greater than heartbeat interval")
 	}
 	if c.CleanupInterval < 0 {
 		return fmt.Errorf("relay: cleanup interval must be >= 0")

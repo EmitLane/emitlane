@@ -3,7 +3,9 @@ package relay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -42,6 +44,7 @@ type Relay struct {
 	hooks    FailureHooks
 	wake     chan struct{}
 	listener WakeupListener
+	presence RelayPresence
 }
 
 // Option configures Relay.
@@ -68,10 +71,32 @@ func WithWakeupListener(listener WakeupListener) Option {
 	return func(r *Relay) { r.listener = listener }
 }
 
+// WithPresenceInfo supplies process metadata for relay discovery. Empty values
+// are replaced with safe local defaults.
+func WithPresenceInfo(hostname, version string) Option {
+	return func(r *Relay) {
+		r.presence.Hostname = hostname
+		r.presence.Version = version
+	}
+}
+
 // New constructs a Relay. Config is validated.
 func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay, error) {
 	if cfg.InstanceID == "" {
 		cfg.InstanceID = NewInstanceID()
+	}
+	// These fields were added in v0.2. Treat their zero value as "use the v0.2
+	// default" so callers that construct a complete v0.1 Config literal remain
+	// source-compatible when passed to New. Negative values still fail Validate.
+	defaults := DefaultConfig()
+	if cfg.ControlInterval == 0 {
+		cfg.ControlInterval = defaults.ControlInterval
+	}
+	if cfg.HeartbeatInterval == 0 {
+		cfg.HeartbeatInterval = defaults.HeartbeatInterval
+	}
+	if cfg.PresenceStaleAfter == 0 {
+		cfg.PresenceStaleAfter = defaults.PresenceStaleAfter
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -83,19 +108,30 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 		return nil, errors.New("relay: publisher is required")
 	}
 	r := &Relay{
-		cfg:   cfg,
-		store: store,
-		pub:   pub,
-		log:   slog.Default(),
-		clock: clock.System{},
-		rnd:   newLockedRand(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()^0xdeadbeef)),
-		wake:  make(chan struct{}, 1),
+		cfg:      cfg,
+		store:    store,
+		pub:      pub,
+		log:      slog.Default(),
+		clock:    clock.System{},
+		rnd:      newLockedRand(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()^0xdeadbeef)),
+		wake:     make(chan struct{}, 1),
+		presence: RelayPresence{InstanceID: cfg.InstanceID},
 	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(r)
 		}
 	}
+	if r.presence.Hostname == "" {
+		r.presence.Hostname, _ = os.Hostname()
+		if r.presence.Hostname == "" {
+			r.presence.Hostname = "unknown"
+		}
+	}
+	if r.presence.Version == "" {
+		r.presence.Version = "dev"
+	}
+	r.presence.InstanceID = cfg.InstanceID
 	if r.log == nil {
 		r.log = slog.Default()
 	}
@@ -135,12 +171,25 @@ func (r *Relay) Run(ctx context.Context) error {
 	if r.listener != nil {
 		go r.listener.Run(runCtx, r.wake)
 	}
+	if presence, ok := r.store.(PresenceStore); ok {
+		r.presence.StartedAt = r.clock.Now()
+		if err := presence.RegisterRelay(runCtx, r.presence); err != nil {
+			r.log.Warn("relay presence registration failed; delivery continues", "error", err, "relay_instance", r.cfg.InstanceID)
+			r.metrics.IncPresenceFailure("register")
+		}
+		go r.heartbeatLoop(runCtx, presence)
+		defer r.markStopped(presence)
+	}
 	go r.statsLoop(runCtx)
 	if r.cfg.Retention > 0 && r.cfg.CleanupInterval > 0 && r.cfg.CleanupBatch > 0 {
 		go r.cleanupLoop(runCtx)
 	}
 
-	timer := time.NewTimer(r.cfg.PollInterval)
+	tickInterval := r.cfg.PollInterval
+	if _, ok := r.store.(PauseState); ok {
+		tickInterval = min(tickInterval, r.cfg.ControlInterval)
+	}
+	timer := time.NewTimer(tickInterval)
 	defer timer.Stop()
 
 	r.log.Info("relay started",
@@ -161,7 +210,7 @@ func (r *Relay) Run(ctx context.Context) error {
 			default:
 			}
 		}
-		timer.Reset(r.cfg.PollInterval)
+		timer.Reset(tickInterval)
 
 		select {
 		case <-runCtx.Done():
@@ -187,6 +236,17 @@ func drain(ch <-chan struct{}) {
 func (r *Relay) tick(claimCtx, workCtx context.Context) error {
 	claimLimit := min(r.cfg.BatchSize, r.cfg.Concurrency)
 	for claimCtx.Err() == nil {
+		if pauseState, ok := r.store.(PauseState); ok {
+			paused, err := pauseState.RelayPaused(claimCtx)
+			if err != nil {
+				r.metrics.IncControlFailure()
+				return fmt.Errorf("read relay pause state: %w", err)
+			}
+			r.metrics.SetRelayPaused(paused)
+			if paused {
+				return nil
+			}
+		}
 		events, err := r.store.Claim(claimCtx, r.cfg.InstanceID, claimLimit, r.cfg.LeaseDuration)
 		if err != nil {
 			return err
@@ -400,13 +460,48 @@ func (r *Relay) statsLoop(ctx context.Context) {
 }
 
 func (r *Relay) refreshStats(ctx context.Context) {
-	st, err := r.store.StatsSnapshot(ctx)
+	var (
+		st  Stats
+		err error
+	)
+	if store, ok := r.store.(StatsWithPresence); ok {
+		st, err = store.StatsSnapshotWithPresence(ctx, r.cfg.PresenceStaleAfter)
+	} else {
+		st, err = r.store.StatsSnapshot(ctx)
+	}
 	if err != nil {
 		r.log.Warn("stats snapshot failed", "error", err)
 		return
 	}
 	r.metrics.SetQueueDepth(float64(st.Pending), float64(st.Inflight), float64(st.Dead))
 	r.metrics.SetOldestPending(st.OldestPendingSeconds)
+	r.metrics.SetRelayPaused(st.Paused)
+	r.metrics.SetRelayInstances(float64(st.RelaysActive), float64(st.RelaysStale))
+}
+
+func (r *Relay) heartbeatLoop(ctx context.Context, store PresenceStore) {
+	ticker := time.NewTicker(r.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := store.HeartbeatRelay(ctx, r.cfg.InstanceID); err != nil && ctx.Err() == nil {
+				r.log.Warn("relay heartbeat failed; delivery continues", "error", err, "relay_instance", r.cfg.InstanceID)
+				r.metrics.IncPresenceFailure("heartbeat")
+			}
+		}
+	}
+}
+
+func (r *Relay) markStopped(store PresenceStore) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.MarkRelayStopped(ctx, r.cfg.InstanceID); err != nil {
+		r.log.Warn("mark relay stopped failed", "error", err, "relay_instance", r.cfg.InstanceID)
+		r.metrics.IncPresenceFailure("stop")
+	}
 }
 
 func (r *Relay) cleanupLoop(ctx context.Context) {
@@ -438,12 +533,20 @@ func toMessage(ev Event) broker.Message {
 	delete(headers, broker.HeaderEventType)
 	delete(headers, broker.HeaderSchemaVersion)
 	delete(headers, broker.HeaderAttempt)
+	delete(headers, broker.HeaderOriginalEvent)
+	delete(headers, broker.HeaderReplayBatch)
 	delete(headers, broker.HeaderTraceparent)
 	delete(headers, broker.HeaderTracestate)
 	headers[broker.HeaderEventID] = ev.ID.String()
 	headers[broker.HeaderEventType] = ev.Type
 	headers[broker.HeaderSchemaVersion] = strconv.Itoa(ev.SchemaVersion)
 	headers[broker.HeaderAttempt] = strconv.Itoa(ev.Attempts)
+	if ev.ReplayedFromEventID != nil {
+		headers[broker.HeaderOriginalEvent] = ev.ReplayedFromEventID.String()
+	}
+	if ev.ReplayBatchID != nil {
+		headers[broker.HeaderReplayBatch] = ev.ReplayBatchID.String()
+	}
 	if ev.Traceparent != "" {
 		headers[broker.HeaderTraceparent] = ev.Traceparent
 	}

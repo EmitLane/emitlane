@@ -19,6 +19,14 @@ type Metrics struct {
 	deliveryDuration prometheus.Histogram
 	publishDuration  prometheus.Histogram
 	oldestPending    prometheus.Gauge
+	relayPaused      prometheus.Gauge
+	relaysActive     prometheus.Gauge
+	relaysStale      prometheus.Gauge
+	replayBatches    prometheus.Counter
+	replayedEvents   prometheus.Counter
+	adminMutations   *prometheus.CounterVec
+	controlFailures  prometheus.Counter
+	presenceFailures *prometheus.CounterVec
 }
 
 // NewMetrics registers instruments with reg. The only label is the bounded
@@ -85,12 +93,59 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Name:      "oldest_pending_seconds",
 			Help:      "Age in seconds of the oldest pending outbox event.",
 		}),
+		relayPaused: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "relay_paused",
+			Help:      "Whether durable cluster-wide relay pause is enabled (1) or disabled (0).",
+		}),
+		relaysActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "relay_instances_active",
+			Help:      "Relay instances with a recent heartbeat and no stopped marker.",
+		}),
+		relaysStale: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "relay_instances_stale",
+			Help:      "Relay instances whose heartbeat is older than the stale threshold.",
+		}),
+		replayBatches: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "replay_batches_total",
+			Help:      "Successfully committed single-event and batch replay operations.",
+		}),
+		replayedEvents: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "replayed_events_total",
+			Help:      "New outbox events created by successfully committed replay operations.",
+		}),
+		adminMutations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "admin_mutations_total",
+			Help:      "Administrative mutation attempts by bounded action and result.",
+		}, []string{"action", "result"}),
+		controlFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "control_read_failures_total",
+			Help:      "Failures reading durable relay control state.",
+		}),
+		presenceFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "relay_presence_failures_total",
+			Help:      "Best-effort relay presence failures by operation.",
+		}, []string{"operation"}),
 	}
 	// CounterVec collectors are otherwise absent from exposition until their
 	// first observation. Initialize the complete, bounded label set so operators
 	// can alert on these series before the first failure occurs.
 	m.failed.WithLabelValues("retryable")
 	m.failed.WithLabelValues("permanent")
+	for _, action := range []string{"relay.pause", "relay.resume", "event.retry", "event.replay", "replay.batch"} {
+		m.adminMutations.WithLabelValues(action, "success")
+		m.adminMutations.WithLabelValues(action, "failure")
+	}
+	for _, operation := range []string{"register", "heartbeat", "stop"} {
+		m.presenceFailures.WithLabelValues(operation)
+	}
 	collectors := []prometheus.Collector{
 		m.enqueued,
 		m.delivered,
@@ -103,6 +158,14 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.deliveryDuration,
 		m.publishDuration,
 		m.oldestPending,
+		m.relayPaused,
+		m.relaysActive,
+		m.relaysStale,
+		m.replayBatches,
+		m.replayedEvents,
+		m.adminMutations,
+		m.controlFailures,
+		m.presenceFailures,
 	}
 	registered := make([]prometheus.Collector, 0, len(collectors))
 	for _, c := range collectors {
@@ -206,4 +269,52 @@ func (m *Metrics) SetOldestPending(seconds float64) {
 		seconds = 0
 	}
 	m.oldestPending.Set(seconds)
+}
+
+func (m *Metrics) SetRelayPaused(paused bool) {
+	if m == nil {
+		return
+	}
+	if paused {
+		m.relayPaused.Set(1)
+		return
+	}
+	m.relayPaused.Set(0)
+}
+
+func (m *Metrics) SetRelayInstances(active, stale float64) {
+	if m == nil {
+		return
+	}
+	m.relaysActive.Set(max(0, active))
+	m.relaysStale.Set(max(0, stale))
+}
+
+func (m *Metrics) RecordReplay(events int) {
+	if m == nil || events <= 0 {
+		return
+	}
+	m.replayBatches.Inc()
+	m.replayedEvents.Add(float64(events))
+}
+
+func (m *Metrics) IncAdminMutation(action, result string) {
+	if m == nil {
+		return
+	}
+	m.adminMutations.WithLabelValues(action, result).Inc()
+}
+
+func (m *Metrics) IncControlFailure() {
+	if m == nil {
+		return
+	}
+	m.controlFailures.Inc()
+}
+
+func (m *Metrics) IncPresenceFailure(operation string) {
+	if m == nil {
+		return
+	}
+	m.presenceFailures.WithLabelValues(operation).Inc()
 }

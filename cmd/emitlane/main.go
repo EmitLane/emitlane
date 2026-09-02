@@ -31,6 +31,16 @@ func main() {
 		err = versionCmd(args)
 	case "dead":
 		err = deadCmd(args)
+	case "stats":
+		err = statsCmd(args)
+	case "events":
+		err = eventsCmd(args)
+	case "relay":
+		err = relayCmd(args)
+	case "replay":
+		err = replayCmd(args)
+	case "audit":
+		err = auditCmd(args)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return
@@ -55,6 +65,13 @@ Usage:
   emitlane doctor
   emitlane dead list
   emitlane dead retry <event-id>
+  emitlane stats [--json]
+  emitlane events list [filters]
+  emitlane events inspect <event-id> [--json] [--payload]
+  emitlane relay status|pause|resume
+  emitlane replay event <event-id> --reason reason
+  emitlane replay range [filters] --reason reason [--execute]
+  emitlane audit list [--json]
   emitlane version
 
 Configuration is read from EMITLANE_* environment variables.

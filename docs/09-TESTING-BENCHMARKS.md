@@ -208,3 +208,16 @@ Desired evidence:
 - low idle database load;
 - low event-start latency after commit.
 
+## v0.2 reproducible harness
+
+The harness lives at `benchmarks/cmd/emitlane-bench` and runs against real
+PostgreSQL and, for delivery scenarios, real Kafka. It supports enqueue overhead,
+steady state, backlog drain, horizontal scaling, idle overhead, outage recovery,
+and the broker-ACK crash window. Every run emits JSON with runtime,
+configuration, duration, and throughput metadata. CI only performs a small
+functional smoke run; it does not enforce noisy throughput thresholds.
+
+The integration suite additionally verifies v1→v2 data preservation, atomic
+pause gating, in-flight completion, presence classification, redaction, keyset
+pagination, audited retry, replay provenance/system headers, and atomic rejection
+of replay selections above the 1000-event cap.
