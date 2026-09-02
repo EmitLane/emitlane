@@ -79,20 +79,18 @@ v0.2.0-rc.1
 ```
 
 Do not use names such as `release-1`, `prod`, `latest`, `stable`, or date tags for
-Go module releases. The manifest starts at `0.0.0`; that is automation state, not
-a published release. Without a previous tag, Release Please would otherwise
-default the first release to `1.0.0`. The config sets `initial-version` to
-`0.1.0` so the first Release PR is `v0.1.0`. Use an alpha, beta, or
-release-candidate suffix only when intentionally publishing a prerelease for
-early feedback. Do not tag an initialization or CI-only commit.
+Go module releases. The initial tracked Release Please version is `0.0.0`; that is
+automation state, not a published release. The current coherent vertical slice
+targets `v0.1.0`. Use an alpha, beta, or release-candidate suffix only when
+intentionally publishing a prerelease for early feedback. Do not tag an
+initialization or CI-only commit.
 
-While the project is on `v0.x`, `bump-minor-pre-major` turns a breaking commit
-into the next minor version instead of accidentally declaring `v1.0.0`. That flag
-does not choose the first version; `initial-version` does. Before an intentional
-stable v1 release, maintainers must deliberately revisit that pre-major setting
-and review the chosen stable version. Generated changelog sections retain
-user-visible features, fixes, performance, documentation, dependencies, and other
-changes; routine CI, test, and chore commits are omitted.
+While the project is on `v0.x`, Release Please is configured to turn a breaking
+commit into the next minor version instead of accidentally declaring `v1.0.0`.
+Before an intentional stable v1 release, maintainers must deliberately revisit
+that pre-major setting and review the chosen stable version. Generated changelog
+sections retain user-visible features, fixes, performance, documentation,
+dependencies, and other changes; routine CI, test, and chore commits are omitted.
 
 Versions `v0` and `v1` use the current module path:
 
