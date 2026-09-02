@@ -287,6 +287,15 @@ func (e *env) newRelay(t *testing.T, cfg relay.Config, pub broker.Publisher, hoo
 	if cfg.PresenceStaleAfter == 0 {
 		cfg.PresenceStaleAfter = 500 * time.Millisecond
 	}
+	if cfg.OrderingRebalanceInterval == 0 {
+		cfg.OrderingRebalanceInterval = 50 * time.Millisecond
+	}
+	if cfg.OrderingLeaseDuration == 0 {
+		cfg.OrderingLeaseDuration = 15 * time.Second
+	}
+	if cfg.OrderingSafetyMargin == 0 {
+		cfg.OrderingSafetyMargin = 100 * time.Millisecond
+	}
 	opts = append(opts,
 		relay.WithLogger(e.log),
 		relay.WithFailureHooks(hooks),

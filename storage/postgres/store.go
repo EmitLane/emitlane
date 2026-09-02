@@ -94,6 +94,7 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 		orderingKey       *string
 		orderingSeq       *int64
 		orderingPartition *int16
+		orderingEpoch     *int64
 	)
 	err := row.Scan(
 		&e.ID,
@@ -121,6 +122,7 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 		&orderingKey,
 		&orderingSeq,
 		&orderingPartition,
+		&orderingEpoch,
 	)
 	if err != nil {
 		return relay.Event{}, err
@@ -145,6 +147,9 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 		e.OrderingSequence = *orderingSeq
 	}
 	e.OrderingPartition = orderingPartition
+	if orderingEpoch != nil {
+		e.OrderingEpoch = *orderingEpoch
+	}
 	return e, nil
 }
 
@@ -180,7 +185,8 @@ const eventColumns = `
     replay_batch_id,
     ordering_key,
     ordering_sequence,
-    ordering_partition`
+    ordering_partition,
+    NULL::BIGINT AS ordering_epoch`
 
 // Claim marks a bounded batch inflight and commits before returning.
 // Eligible rows are pending (available now) or inflight with an expired lease.
@@ -258,7 +264,8 @@ RETURNING
     e.replay_batch_id,
     e.ordering_key,
     e.ordering_sequence,
-    e.ordering_partition`
+    e.ordering_partition,
+    NULL::BIGINT AS ordering_epoch`
 
 	rows, err := tx.Query(ctx, sql, limit, owner, intervalMS(lease))
 	if err != nil {
@@ -431,7 +438,8 @@ SELECT
     replay_batch_id,
     ordering_key,
     ordering_sequence,
-    ordering_partition
+    ordering_partition,
+    NULL::BIGINT AS ordering_epoch
 FROM emitlane.outbox_events
 WHERE status = 'dead'
 ORDER BY created_at DESC

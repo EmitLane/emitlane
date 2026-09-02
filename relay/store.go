@@ -35,6 +35,7 @@ type Event struct {
 	OrderingKey         string
 	OrderingSequence    int64
 	OrderingPartition   *int16
+	OrderingEpoch       int64
 }
 
 // Stats is a point-in-time snapshot of durable relay state.
@@ -59,6 +60,16 @@ type Store interface {
 	MarkDead(ctx context.Context, id uuid.UUID, owner string, lastError string) error
 	StatsSnapshot(ctx context.Context) (Stats, error)
 	CleanupDelivered(ctx context.Context, retention time.Duration, limit int) (int64, error)
+}
+
+// OrderedDeliveryStore is the schema-v3 ordered state-machine capability.
+// Every transition is fenced by both event lease ownership and partition epoch.
+type OrderedDeliveryStore interface {
+	ClaimOrdered(ctx context.Context, owner string, limit int, eventLease, minimumPartitionLease time.Duration) ([]Event, error)
+	BeginOrderedAttempt(ctx context.Context, id uuid.UUID, owner string, epoch int64, maxAttempts int, minimumPartitionLease time.Duration) (int, error)
+	MarkOrderedDelivered(ctx context.Context, event Event, owner string) error
+	MarkOrderedRetry(ctx context.Context, event Event, owner string, delay time.Duration, lastError string) error
+	MarkOrderedDead(ctx context.Context, event Event, owner string, lastError string) error
 }
 
 // WakeupListener turns an optional low-latency signal into relay wake-ups.
