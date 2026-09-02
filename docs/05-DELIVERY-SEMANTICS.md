@@ -200,3 +200,18 @@ possible silent event loss
 ```
 
 EmitLane chooses the duplicate and makes deduplication explicit.
+
+## Pause, retry, and replay
+
+Pause prevents new claims across v0.2 PostgreSQL relays. Work already claimed may
+finish, including the delivered acknowledgement after Kafka ACK. Paused relays
+remain healthy; pause is operator state, not a dependency failure.
+
+Retry is the same logical event and keeps its ID. It is allowed only from `dead`,
+resets attempts, and returns the row to `pending`.
+
+Replay is intentionally different: it creates a new UUIDv7 event identity with a
+new delivery lifecycle. The source remains unchanged. A replay can therefore run
+downstream business logic again, and Inbox correctly treats it as a new event.
+Replay still has at-least-once semantics and can itself be duplicated in the
+Kafka-ACK/database-ACK crash window.

@@ -119,3 +119,22 @@ objects exist in the `emitlane` schema, they and the schema are preserved.
 
 No normal writer, relay, Inbox, or migration path requires PostgreSQL
 superuser privileges.
+
+## Schema version 2
+
+Migration `000002_operability` is additive to the released v1 schema. It adds
+nullable `replayed_from_event_id` and `replay_batch_id` columns without foreign
+keys, so retention of an original row cannot make a replay row undeletable.
+
+It also adds:
+
+- `runtime_control`: one durable pause/resume row;
+- `relay_instances`: best-effort presence and clean-stop timestamps;
+- `admin_audit_log`: payload-free audit records for operator mutations;
+- indexes for `(created_at,id)` keyset pagination, status and destination/type
+  filters, replay batch lookup and audit pagination.
+
+Retry updates the existing dead row. Replay inserts a new pending row with a new
+UUIDv7 and provenance. Pause/resume, retry, and replay write their audit record
+in the same transaction as the state mutation. The v1 migration files are
+immutable.

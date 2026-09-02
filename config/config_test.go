@@ -94,3 +94,32 @@ func TestLoadRejectsNonPositiveConnectionLifetime(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateAdminBindingSafety(t *testing.T) {
+	t.Parallel()
+	for _, addr := range []string{"127.0.0.1:8081", "localhost:8081", "[::1]:8081"} {
+		if err := ValidateAdmin(AdminConfig{Enabled: true, Addr: addr}); err != nil {
+			t.Errorf("loopback %s: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{":8081", "0.0.0.0:8081", "[::]:8081", "admin.internal:8081"} {
+		if err := ValidateAdmin(AdminConfig{Enabled: true, Addr: addr}); err == nil {
+			t.Errorf("unsafe unauthenticated binding %s was accepted", addr)
+		}
+		if err := ValidateAdmin(AdminConfig{Enabled: true, Addr: addr, Token: "secret"}); err != nil {
+			t.Errorf("authenticated binding %s: %v", addr, err)
+		}
+	}
+}
+
+func TestAdminIsDisabledByDefault(t *testing.T) {
+	t.Setenv("EMITLANE_DATABASE_URL", "postgres://localhost/emitlane")
+	t.Setenv("EMITLANE_KAFKA_BROKERS", "localhost:9092")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Admin.Enabled {
+		t.Fatal("admin listener must be disabled by default")
+	}
+}

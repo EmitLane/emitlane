@@ -13,7 +13,7 @@ import (
 	"github.com/emitlane/emitlane/migrations"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 const migrationLockID int64 = 0x454d49544c414e45 // "EMITLANE"
 
@@ -212,13 +212,58 @@ func downMigrationName(version int) (string, error) {
 	return "", fmt.Errorf("migrate: down migration for version %d not found", version)
 }
 
-// RequiredIndexes are the v0.1 index names doctor must see.
+// RequiredIndexes are the indexes this binary relies on for delivery and
+// bounded operational queries.
 func RequiredIndexes() []string {
 	return []string{
 		"outbox_pending_idx",
 		"outbox_inflight_lease_idx",
 		"outbox_dead_idx",
+		"outbox_created_idx",
+		"outbox_status_created_idx",
+		"outbox_destination_type_created_idx",
+		"outbox_replay_batch_idx",
+		"admin_audit_created_idx",
 	}
+}
+
+func RequiredTables() []string {
+	return []string{
+		"outbox_events",
+		"inbox_events",
+		"runtime_control",
+		"relay_instances",
+		"admin_audit_log",
+	}
+}
+
+func TableExists(ctx context.Context, pool *pgxpool.Pool, tableName string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'emitlane' AND table_name = $1
+    )`, tableName).Scan(&exists)
+	return exists, err
+}
+
+// ColumnExists reports whether columnName exists on a table in the emitlane
+// schema. Doctor uses this to detect a migration record that does not match the
+// actual v0.2 schema.
+func ColumnExists(ctx context.Context, pool *pgxpool.Pool, tableName, columnName string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'emitlane' AND table_name = $1 AND column_name = $2
+    )`, tableName, columnName).Scan(&exists)
+	return exists, err
+}
+
+func RuntimeControlExists(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `SELECT EXISTS (
+        SELECT 1 FROM emitlane.runtime_control WHERE singleton = TRUE
+    )`).Scan(&exists)
+	return exists, err
 }
 
 // IndexExists reports whether indexName exists in the emitlane schema.
@@ -264,6 +309,29 @@ func PingListenNotify(ctx context.Context, databaseURL string) error {
 	return nil
 }
 
+// PingControlNotify verifies the low-latency pause/resume notification path.
+func PingControlNotify(ctx context.Context, databaseURL string) error {
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer closeConnection(ctx, conn)
+	if _, err := conn.Exec(ctx, `LISTEN emitlane_control`); err != nil {
+		return fmt.Errorf("LISTEN control: %w", err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_notify('emitlane_control', 'doctor')`); err != nil {
+		return fmt.Errorf("NOTIFY control: %w", err)
+	}
+	n, err := conn.WaitForNotification(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for control notification: %w", err)
+	}
+	if n == nil || n.Channel != "emitlane_control" {
+		return fmt.Errorf("unexpected control notification")
+	}
+	return nil
+}
+
 // RelayPrivileges reports the table privileges needed by the standalone relay.
 // Delete is required only when delivered-event cleanup is enabled.
 type RelayPrivileges struct {
@@ -271,6 +339,17 @@ type RelayPrivileges struct {
 	Select      bool
 	Update      bool
 	Delete      bool
+}
+
+type OperabilityPrivileges struct {
+	ControlSelect  bool
+	ControlUpdate  bool
+	PresenceSelect bool
+	PresenceInsert bool
+	PresenceUpdate bool
+	OutboxInsert   bool
+	AuditSelect    bool
+	AuditInsert    bool
 }
 
 // CheckRelayPrivileges inspects the current PostgreSQL role without mutating
@@ -286,6 +365,26 @@ SELECT
 `).Scan(&p.SchemaUsage, &p.Select, &p.Update, &p.Delete)
 	if err != nil {
 		return RelayPrivileges{}, fmt.Errorf("check relay privileges: %w", err)
+	}
+	return p, nil
+}
+
+func CheckOperabilityPrivileges(ctx context.Context, pool *pgxpool.Pool) (OperabilityPrivileges, error) {
+	var p OperabilityPrivileges
+	err := pool.QueryRow(ctx, `
+SELECT
+    has_table_privilege(current_user, 'emitlane.runtime_control', 'SELECT'),
+    has_table_privilege(current_user, 'emitlane.runtime_control', 'UPDATE'),
+    has_table_privilege(current_user, 'emitlane.relay_instances', 'SELECT'),
+    has_table_privilege(current_user, 'emitlane.relay_instances', 'INSERT'),
+    has_table_privilege(current_user, 'emitlane.relay_instances', 'UPDATE'),
+    has_table_privilege(current_user, 'emitlane.outbox_events', 'INSERT'),
+    has_table_privilege(current_user, 'emitlane.admin_audit_log', 'SELECT'),
+    has_table_privilege(current_user, 'emitlane.admin_audit_log', 'INSERT')
+`).Scan(&p.ControlSelect, &p.ControlUpdate, &p.PresenceSelect, &p.PresenceInsert,
+		&p.PresenceUpdate, &p.OutboxInsert, &p.AuditSelect, &p.AuditInsert)
+	if err != nil {
+		return OperabilityPrivileges{}, fmt.Errorf("check operability privileges: %w", err)
 	}
 	return p, nil
 }

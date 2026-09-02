@@ -1,0 +1,51 @@
+name: Benchmark smoke
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - "relay/**"
+      - "storage/**"
+      - ".github/workflows/benchmark-smoke.yml"
+  workflow_dispatch:
+    inputs:
+      events:
+        description: Number of smoke events
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - name: Start benchmark dependencies
+        run: docker compose -f docker-compose.example.yml up -d --wait postgres kafka
+      - name: Apply EmitLane migrations
+        run: |
+          docker compose -f docker-compose.example.yml build emitlane-migrate
+          docker compose -f docker-compose.example.yml run --rm emitlane-migrate
+      - name: Run real steady-state smoke
+        env:
+          EMITLANE_DATABASE_URL: postgres://emitlane:emitlane@localhost:5432/emitlane?sslmode=disable
+          EMITLANE_KAFKA_BROKERS: localhost:19092
+          EVENTS: ${{ inputs.events || '100' }}
+        run: go run ./benchmarks/cmd/emitlane-bench --scenario steady-state --events "$EVENTS" --output benchmark-smoke.json
+      - name: Upload result
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-smoke
+          path: benchmark-smoke.json
+      - name: Stop dependencies
+        if: always()
+        run: docker compose -f docker-compose.example.yml down -v

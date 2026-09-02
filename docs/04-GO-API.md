@@ -164,3 +164,17 @@ their processing span.
 
 The module path is `github.com/emitlane/emitlane`. v0.1 is pre-1.0, so API
 changes remain possible; exported surface is kept intentionally small.
+
+## v0.2 relay capabilities
+
+The required `relay.Store` interface is unchanged. v0.2 discovers optional
+capabilities with type assertions:
+
+- `relay.PauseState` for durable control checks;
+- `relay.PresenceStore` for register/heartbeat/stopped visibility;
+- `relay.StatsWithPresence` for metrics using the configured stale threshold.
+
+This preserves source compatibility for custom v0.1 stores. The PostgreSQL store
+implements all capabilities and atomically gates its `Claim` SQL on the durable
+pause row. `relay.WithPresenceInfo` can attach hostname/version metadata without
+affecting delivery behavior.

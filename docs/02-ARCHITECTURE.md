@@ -280,3 +280,20 @@ Do not let core packages depend on Kafka-specific types.
 - tracing: OpenTelemetry;
 - integration environments: Testcontainers;
 - Docker for demo/runtime packaging.
+
+## v0.2 operational plane
+
+The operational plane is deliberately PostgreSQL-backed and separate from the
+delivery port. `runtime_control` is the durable cluster-wide pause state;
+`LISTEN emitlane_control` only accelerates propagation and a two-second control
+poll remains the fallback. The PostgreSQL `Claim` statement also checks that
+pause is false, closing the read/claim race across processes.
+
+Relay heartbeat rows are visibility data, not ownership or correctness data.
+Failure to register or heartbeat is observable but never stops delivery. Active,
+stale and stopped are derived from timestamps and the configured stale threshold.
+
+The Admin API and CLI call the same service. Mutations and their audit record
+commit in one PostgreSQL transaction. Replay clones raw stored bytes into a new
+UUIDv7 event and never performs broker I/O in that transaction. The ordinary
+relay later publishes the clone under the existing at-least-once protocol.

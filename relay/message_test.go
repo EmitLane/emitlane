@@ -12,6 +12,8 @@ import (
 func TestToMessageMapping(t *testing.T) {
 	t.Parallel()
 	id := uuid.Must(uuid.NewV7())
+	sourceID := uuid.Must(uuid.NewV7())
+	batchID := uuid.Must(uuid.NewV7())
 	ev := Event{
 		ID:            id,
 		Destination:   "orders.events",
@@ -27,9 +29,13 @@ func TestToMessageMapping(t *testing.T) {
 			broker.HeaderAttempt:       "999",
 			broker.HeaderTraceparent:   "spoofed",
 			broker.HeaderTracestate:    "spoofed",
+			broker.HeaderOriginalEvent: "spoofed",
+			broker.HeaderReplayBatch:   "spoofed",
 		},
-		Traceparent:   "00-trace-01",
-		CorrelationID: "c1",
+		Traceparent:         "00-trace-01",
+		CorrelationID:       "c1",
+		ReplayedFromEventID: &sourceID,
+		ReplayBatchID:       &batchID,
 	}
 	msg := toMessage(ev)
 	if msg.Destination != "orders.events" || string(msg.Key) != "ord-1" {
@@ -49,6 +55,9 @@ func TestToMessageMapping(t *testing.T) {
 	}
 	if _, exists := msg.Headers[broker.HeaderTracestate]; exists {
 		t.Fatal("user tracestate must not survive without stored trace state")
+	}
+	if msg.Headers[broker.HeaderOriginalEvent] != sourceID.String() || msg.Headers[broker.HeaderReplayBatch] != batchID.String() {
+		t.Fatal("durable replay provenance must override user headers")
 	}
 }
 

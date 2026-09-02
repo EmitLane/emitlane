@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,14 @@ type Config struct {
 	DBMaxConns        int32
 	DBMinConns        int32
 	DBMaxConnLifetime time.Duration
+	Admin             AdminConfig
+}
+
+type AdminConfig struct {
+	Enabled       bool
+	Addr          string
+	Token         string
+	ExposePayload bool
 }
 
 // Load reads EMITLANE_* environment variables and applies defaults.
@@ -38,6 +47,7 @@ func Load() (Config, error) {
 		DBMaxConns:        10,
 		DBMinConns:        2,
 		DBMaxConnLifetime: time.Hour,
+		Admin:             AdminConfig{Addr: "127.0.0.1:8081"},
 	}
 	cfg.KafkaBrokers = splitCSV(os.Getenv("EMITLANE_KAFKA_BROKERS"))
 	if cfg.AutoCreateTopics, err = envBool("EMITLANE_KAFKA_AUTO_CREATE_TOPICS", cfg.AutoCreateTopics); err != nil {
@@ -79,6 +89,15 @@ func Load() (Config, error) {
 	if cfg.Relay.StatsInterval, err = envDuration("EMITLANE_STATS_INTERVAL", cfg.Relay.StatsInterval); err != nil {
 		return Config{}, err
 	}
+	if cfg.Relay.ControlInterval, err = envDuration("EMITLANE_CONTROL_CHECK_INTERVAL", cfg.Relay.ControlInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.Relay.HeartbeatInterval, err = envDuration("EMITLANE_RELAY_HEARTBEAT_INTERVAL", cfg.Relay.HeartbeatInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.Relay.PresenceStaleAfter, err = envDuration("EMITLANE_RELAY_STALE_AFTER", cfg.Relay.PresenceStaleAfter); err != nil {
+		return Config{}, err
+	}
 	if cfg.Relay.Retention, err = envDuration("EMITLANE_RETENTION_DELIVERED", cfg.Relay.Retention); err != nil {
 		return Config{}, err
 	}
@@ -99,6 +118,14 @@ func Load() (Config, error) {
 		cfg.DBMinConns = n
 	}
 	if cfg.DBMaxConnLifetime, err = envDuration("EMITLANE_DB_MAX_CONN_LIFETIME", cfg.DBMaxConnLifetime); err != nil {
+		return Config{}, err
+	}
+	if cfg.Admin.Enabled, err = envBool("EMITLANE_ADMIN_ENABLED", false); err != nil {
+		return Config{}, err
+	}
+	cfg.Admin.Addr = envOr("EMITLANE_ADMIN_ADDR", cfg.Admin.Addr)
+	cfg.Admin.Token = os.Getenv("EMITLANE_ADMIN_TOKEN")
+	if cfg.Admin.ExposePayload, err = envBool("EMITLANE_ADMIN_EXPOSE_PAYLOAD", false); err != nil {
 		return Config{}, err
 	}
 
@@ -133,7 +160,33 @@ func (c Config) Validate() error {
 	if c.DBMaxConnLifetime <= 0 {
 		return fmt.Errorf("EMITLANE_DB_MAX_CONN_LIFETIME must be > 0")
 	}
+	if err := ValidateAdmin(c.Admin); err != nil {
+		return err
+	}
 	return c.Relay.Validate()
+}
+
+// ValidateAdmin rejects accidental unauthenticated exposure. It does not
+// require the listener to be enabled.
+func ValidateAdmin(c AdminConfig) error {
+	if !c.Enabled {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(c.Addr)
+	if err != nil {
+		return fmt.Errorf("EMITLANE_ADMIN_ADDR must be host:port: %w", err)
+	}
+	loopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		loopback = ip.IsLoopback()
+	}
+	if !loopback && c.Token == "" {
+		return fmt.Errorf("EMITLANE_ADMIN_TOKEN is required when EMITLANE_ADMIN_ADDR is not loopback")
+	}
+	if len(c.Token) > 4096 || strings.ContainsAny(c.Token, "\r\n") {
+		return fmt.Errorf("EMITLANE_ADMIN_TOKEN is invalid")
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {

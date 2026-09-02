@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/emitlane/emitlane/broker/kafka"
+	"github.com/emitlane/emitlane/config"
 	"github.com/emitlane/emitlane/storage/postgres"
 )
 
@@ -36,6 +37,16 @@ func doctorCmd(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	loadedConfig, configErr := config.Load()
+	if configErr != nil {
+		check("configuration", configErr, "")
+	} else {
+		detail := "admin API disabled"
+		if loadedConfig.Admin.Enabled {
+			detail = "admin API enabled on " + loadedConfig.Admin.Addr
+		}
+		check("configuration", nil, detail)
+	}
 
 	url, urlErr := requireDatabaseURL()
 	var pool *pgxpool.Pool
@@ -88,6 +99,34 @@ func doctorCmd(args []string) error {
 			}
 			check(idx, nil, "")
 		}
+		for _, table := range postgres.RequiredTables() {
+			ok, tableErr := postgres.TableExists(ctx, pool, table)
+			if tableErr != nil {
+				check("table "+table, tableErr, "")
+			} else if !ok {
+				check("table "+table, fmt.Errorf("missing"), "")
+			} else {
+				check("table "+table, nil, "")
+			}
+		}
+		for _, column := range []string{"replayed_from_event_id", "replay_batch_id"} {
+			ok, columnErr := postgres.ColumnExists(ctx, pool, "outbox_events", column)
+			if columnErr != nil {
+				check("outbox_events."+column, columnErr, "")
+			} else if !ok {
+				check("outbox_events."+column, fmt.Errorf("missing"), "")
+			} else {
+				check("outbox_events."+column, nil, "")
+			}
+		}
+		controlExists, controlErr := postgres.RuntimeControlExists(ctx, pool)
+		if controlErr != nil {
+			check("runtime control singleton", controlErr, "")
+		} else if !controlExists {
+			check("runtime control singleton", fmt.Errorf("missing"), "")
+		} else {
+			check("runtime control singleton", nil, "")
+		}
 		privileges, err := postgres.CheckRelayPrivileges(ctx, pool)
 		if err != nil {
 			check("relay database permissions", err, "")
@@ -111,9 +150,40 @@ func doctorCmd(args []string) error {
 				fmt.Println("! delivered cleanup permission\n  DELETE is unavailable; set EMITLANE_RETENTION_DELIVERED=0 or grant DELETE")
 			}
 		}
+		operability, operabilityErr := postgres.CheckOperabilityPrivileges(ctx, pool)
+		if operabilityErr != nil {
+			check("v0.2 runtime database permissions", operabilityErr, "")
+		} else {
+			missing := make([]string, 0, 8)
+			if !operability.ControlSelect {
+				missing = append(missing, "SELECT runtime_control")
+			}
+			if !operability.PresenceSelect || !operability.PresenceInsert || !operability.PresenceUpdate {
+				missing = append(missing, "SELECT/INSERT/UPDATE relay_instances")
+			}
+			if loadedConfig.Admin.Enabled {
+				if !operability.ControlUpdate {
+					missing = append(missing, "UPDATE runtime_control")
+				}
+				if !operability.OutboxInsert {
+					missing = append(missing, "INSERT outbox_events")
+				}
+				if !operability.AuditSelect || !operability.AuditInsert {
+					missing = append(missing, "SELECT/INSERT admin_audit_log")
+				}
+			}
+			if len(missing) > 0 {
+				check("v0.2 runtime database permissions", fmt.Errorf("missing %s", strings.Join(missing, ", ")), "")
+			} else {
+				check("v0.2 runtime database permissions", nil, "available")
+			}
+		}
 		nctx, ncancel := context.WithTimeout(ctx, 5*time.Second)
 		check("LISTEN/NOTIFY", postgres.PingListenNotify(nctx, url), "")
 		ncancel()
+		controlCtx, controlCancel := context.WithTimeout(ctx, 5*time.Second)
+		check("control LISTEN/NOTIFY", postgres.PingControlNotify(controlCtx, url), "")
+		controlCancel()
 	}
 
 	brokers := strings.TrimSpace(os.Getenv("EMITLANE_KAFKA_BROKERS"))

@@ -199,7 +199,12 @@ func startEnv(t *testing.T) *env {
 	reset := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, err := shared.pool.Exec(ctx, `TRUNCATE public.business_orders, public.business_payments, emitlane.outbox_events, emitlane.inbox_events`)
+		_, err := shared.pool.Exec(ctx, `
+TRUNCATE public.business_orders, public.business_payments, emitlane.outbox_events,
+         emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances;
+UPDATE emitlane.runtime_control
+SET paused = FALSE, reason = NULL, updated_at = NOW(), updated_by = 'integration-reset'
+WHERE singleton = TRUE`)
 		return err
 	}
 	if err := reset(); err != nil {
@@ -268,6 +273,15 @@ func (e *env) newRelay(t *testing.T, cfg relay.Config, pub broker.Publisher, hoo
 	}
 	if cfg.StatsInterval == 0 {
 		cfg.StatsInterval = time.Hour
+	}
+	if cfg.ControlInterval == 0 {
+		cfg.ControlInterval = 50 * time.Millisecond
+	}
+	if cfg.HeartbeatInterval == 0 {
+		cfg.HeartbeatInterval = 100 * time.Millisecond
+	}
+	if cfg.PresenceStaleAfter == 0 {
+		cfg.PresenceStaleAfter = 500 * time.Millisecond
 	}
 	opts = append(opts,
 		relay.WithLogger(e.log),
@@ -853,6 +867,9 @@ func TestMigrationRoundTrip(t *testing.T) {
 			t.Errorf("drop migration test sentinel: %v", err)
 		}
 	})
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
 		t.Fatal(err)
 	}
