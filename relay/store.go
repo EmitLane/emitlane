@@ -32,6 +32,9 @@ type Event struct {
 	DeliveredAt         *time.Time
 	ReplayedFromEventID *uuid.UUID
 	ReplayBatchID       *uuid.UUID
+	OrderingKey         string
+	OrderingSequence    int64
+	OrderingPartition   *int16
 }
 
 // Stats is a point-in-time snapshot of durable relay state.
@@ -91,4 +94,7 @@ type RelayPresence struct {
 	Hostname   string
 	Version    string
 	StartedAt  time.Time
+	// OrderingCapable is persisted for safe schema-v3 rolling upgrades. A
+	// released v0.2 Relay omits the column and therefore remains false.
+	OrderingCapable bool
 }

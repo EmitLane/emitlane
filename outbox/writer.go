@@ -3,14 +3,17 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	internalordering "github.com/emitlane/emitlane/internal/ordering"
 	"github.com/emitlane/emitlane/telemetry"
 )
 
@@ -81,6 +84,31 @@ func (w *Writer) Enqueue(ctx context.Context, tx pgx.Tx, event Event) (string, e
 		return "", err
 	}
 
+	var orderingPartition any
+	var orderingSequence any
+	if event.OrderingKey != "" {
+		partition := internalordering.Partition(event.Destination, event.OrderingKey)
+		start := event.OrderingStartSequence
+		if start == 0 {
+			start = 1
+		}
+		if err := initializeOrderingStream(ctx, tx, event, partition, start); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return "", err
+		}
+		if len(event.Key) == 0 {
+			event.Key = []byte(event.OrderingKey)
+		}
+		orderingPartition = partition
+		orderingSequence = event.Sequence
+		span.SetAttributes(
+			attribute.String("emitlane.ordering_key", event.OrderingKey),
+			attribute.Int64("emitlane.ordering_sequence", event.Sequence),
+			attribute.Int("emitlane.ordering_partition", int(partition)),
+		)
+	}
+
 	id := event.ID
 	if id == "" {
 		generated, err := w.idFn()
@@ -147,9 +175,13 @@ INSERT INTO emitlane.outbox_events (
     causation_id,
     traceparent,
     tracestate,
-    available_at
+    available_at,
+    ordering_key,
+    ordering_sequence,
+    ordering_partition
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, NOW())
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, NOW()),
+    $14, $15, $16
 )`
 
 	if _, err := tx.Exec(ctx, insertSQL,
@@ -166,7 +198,14 @@ INSERT INTO emitlane.outbox_events (
 		nullString(traceparent),
 		nullString(tracestate),
 		availableAt,
+		nullString(event.OrderingKey),
+		orderingSequence,
+		orderingPartition,
 	); err != nil {
+		if duplicateOrderingSequence(err) {
+			err = fmt.Errorf("%w: destination %q key %q sequence %d", ErrDuplicateSequence,
+				event.Destination, event.OrderingKey, event.Sequence)
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("outbox: insert event %s: %w", id, err)
@@ -182,6 +221,47 @@ INSERT INTO emitlane.outbox_events (
 
 	w.metrics.IncEnqueued()
 	return id, nil
+}
+
+func initializeOrderingStream(ctx context.Context, tx pgx.Tx, event Event, partition int16, start int64) error {
+	const initializeSQL = `
+INSERT INTO emitlane.ordering_streams (
+    destination, ordering_key, partition_id, start_sequence, next_sequence
+) VALUES ($1, $2, $3, $4, $4)
+ON CONFLICT (destination, ordering_key) DO NOTHING`
+	if _, err := tx.Exec(ctx, initializeSQL, event.Destination, event.OrderingKey, partition, start); err != nil {
+		return fmt.Errorf("outbox: initialize ordering stream: %w", err)
+	}
+
+	const inspectSQL = `
+SELECT partition_id, start_sequence, next_sequence
+FROM emitlane.ordering_streams
+WHERE destination = $1 AND ordering_key = $2
+FOR UPDATE`
+	var storedPartition int16
+	var storedStart, next int64
+	if err := tx.QueryRow(ctx, inspectSQL, event.Destination, event.OrderingKey).Scan(&storedPartition, &storedStart, &next); err != nil {
+		return fmt.Errorf("outbox: inspect ordering stream: %w", err)
+	}
+	if storedPartition != partition {
+		return fmt.Errorf("%w: destination %q key %q partition is %d, calculated %d",
+			ErrOrderingConflict, event.Destination, event.OrderingKey, storedPartition, partition)
+	}
+	if event.OrderingStartSequence > 0 && storedStart != event.OrderingStartSequence {
+		return fmt.Errorf("%w: destination %q key %q starts at %d, requested %d",
+			ErrOrderingConflict, event.Destination, event.OrderingKey, storedStart, event.OrderingStartSequence)
+	}
+	if event.Sequence < next {
+		return fmt.Errorf("%w: destination %q key %q expects %d, received %d",
+			ErrSequenceAlreadyPassed, event.Destination, event.OrderingKey, next, event.Sequence)
+	}
+	return nil
+}
+
+func duplicateOrderingSequence(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "outbox_ordering_sequence_unique_idx"
 }
 
 func nullString(s string) any {

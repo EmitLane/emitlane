@@ -13,7 +13,7 @@ import (
 	"github.com/emitlane/emitlane/migrations"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 const migrationLockID int64 = 0x454d49544c414e45 // "EMITLANE"
 
@@ -224,6 +224,9 @@ func RequiredIndexes() []string {
 		"outbox_destination_type_created_idx",
 		"outbox_replay_batch_idx",
 		"admin_audit_created_idx",
+		"outbox_ordering_sequence_unique_idx",
+		"outbox_ordered_claim_idx",
+		"ordering_stream_partition_idx",
 	}
 }
 
@@ -234,6 +237,8 @@ func RequiredTables() []string {
 		"runtime_control",
 		"relay_instances",
 		"admin_audit_log",
+		"ordering_streams",
+		"ordering_partitions",
 	}
 }
 

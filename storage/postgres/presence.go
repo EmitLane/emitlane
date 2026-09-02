@@ -15,15 +15,17 @@ import (
 func (s *Store) RegisterRelay(ctx context.Context, presence relay.RelayPresence) error {
 	const query = `
 INSERT INTO emitlane.relay_instances
-    (instance_id, hostname, version, started_at, last_heartbeat_at, stopped_at)
-VALUES ($1, $2, $3, $4, NOW(), NULL)
+    (instance_id, hostname, version, started_at, last_heartbeat_at, stopped_at, ordering_capable)
+VALUES ($1, $2, $3, $4, NOW(), NULL, $5)
 ON CONFLICT (instance_id) DO UPDATE SET
     hostname = EXCLUDED.hostname,
     version = EXCLUDED.version,
     started_at = EXCLUDED.started_at,
     last_heartbeat_at = NOW(),
-    stopped_at = NULL`
-	if _, err := s.pool.Exec(ctx, query, presence.InstanceID, presence.Hostname, presence.Version, presence.StartedAt); err != nil {
+    stopped_at = NULL,
+    ordering_capable = EXCLUDED.ordering_capable`
+	if _, err := s.pool.Exec(ctx, query, presence.InstanceID, presence.Hostname, presence.Version,
+		presence.StartedAt, presence.OrderingCapable); err != nil {
 		return fmt.Errorf("register relay presence: %w", err)
 	}
 	return nil

@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
@@ -43,6 +44,13 @@ type Event struct {
 	CausationID   string
 
 	AvailableAt time.Time
+
+	// OrderingKey and Sequence opt this event into destination-scoped ordered
+	// delivery. OrderingStartSequence is used only to initialize a new stream;
+	// zero defaults that new stream to sequence 1.
+	OrderingKey           string
+	Sequence              int64
+	OrderingStartSequence int64
 }
 
 func (e Event) validate() error {
@@ -76,6 +84,33 @@ func (e Event) validate() error {
 		if name == "" {
 			return fmt.Errorf("%w: header name must not be empty", ErrInvalidEvent)
 		}
+	}
+	if e.OrderingKey == "" {
+		if e.Sequence != 0 {
+			return fmt.Errorf("%w: sequence requires an ordering key", ErrInvalidEvent)
+		}
+		if e.OrderingStartSequence != 0 {
+			return fmt.Errorf("%w: ordering start sequence requires an ordering key", ErrInvalidEvent)
+		}
+		return nil
+	}
+	if strings.TrimSpace(e.OrderingKey) == "" {
+		return fmt.Errorf("%w: ordering key must not be blank", ErrInvalidEvent)
+	}
+	if e.OrderingKey != strings.TrimSpace(e.OrderingKey) {
+		return fmt.Errorf("%w: ordering key must not have surrounding whitespace", ErrInvalidEvent)
+	}
+	if e.Sequence <= 0 {
+		return fmt.Errorf("%w: ordered sequence must be > 0", ErrInvalidEvent)
+	}
+	if e.OrderingStartSequence < 0 {
+		return fmt.Errorf("%w: ordering start sequence must be >= 0", ErrInvalidEvent)
+	}
+	if e.OrderingStartSequence > e.Sequence {
+		return fmt.Errorf("%w: ordering start sequence must not exceed sequence", ErrInvalidEvent)
+	}
+	if len(e.Key) > 0 && !bytes.Equal(e.Key, []byte(e.OrderingKey)) {
+		return fmt.Errorf("%w: message key must equal ordering key for ordered events", ErrInvalidEvent)
 	}
 	return nil
 }

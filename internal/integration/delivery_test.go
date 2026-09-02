@@ -201,10 +201,14 @@ func startEnv(t *testing.T) *env {
 		defer cancel()
 		_, err := shared.pool.Exec(ctx, `
 TRUNCATE public.business_orders, public.business_payments, emitlane.outbox_events,
-         emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances;
+         emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances,
+         emitlane.ordering_streams;
 UPDATE emitlane.runtime_control
 SET paused = FALSE, reason = NULL, updated_at = NOW(), updated_by = 'integration-reset'
-WHERE singleton = TRUE`)
+WHERE singleton = TRUE;
+UPDATE emitlane.ordering_partitions
+SET lease_owner = NULL, lease_until = NULL, epoch = 0,
+    handoff_not_before = NULL, publish_timeout_ms = NULL, updated_at = NOW()`)
 		return err
 	}
 	if err := reset(); err != nil {
@@ -867,6 +871,9 @@ func TestMigrationRoundTrip(t *testing.T) {
 			t.Errorf("drop migration test sentinel: %v", err)
 		}
 	})
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
 		t.Fatal(err)
 	}

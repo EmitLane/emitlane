@@ -115,7 +115,7 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 		clock:    clock.System{},
 		rnd:      newLockedRand(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()^0xdeadbeef)),
 		wake:     make(chan struct{}, 1),
-		presence: RelayPresence{InstanceID: cfg.InstanceID},
+		presence: RelayPresence{InstanceID: cfg.InstanceID, OrderingCapable: true},
 	}
 	for _, opt := range opts {
 		if opt != nil {

@@ -32,7 +32,7 @@ func adminService(t *testing.T, e *env, staleAfter time.Duration) *adminapi.Serv
 	return service
 }
 
-func TestMigrationV1ToV2PreservesReleasedData(t *testing.T) {
+func TestMigrationV1ToV3PreservesReleasedData(t *testing.T) {
 	e := startEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -40,10 +40,13 @@ func TestMigrationV1ToV2PreservesReleasedData(t *testing.T) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 		if err := pgstore.MigrateUp(cleanupCtx, e.pool); err != nil {
-			t.Errorf("restore v2 schema: %v", err)
+			t.Errorf("restore v3 schema: %v", err)
 		}
 	})
 
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +85,7 @@ VALUES ($1, 'migration.events', 'migration.test', $2, $3,
 		t.Fatal(err)
 	}
 	version, err = pgstore.SchemaVersion(ctx, e.pool)
-	if err != nil || version != 2 {
+	if err != nil || version != pgstore.CurrentSchemaVersion() {
 		t.Fatalf("schema version after upgrade = %d, err=%v", version, err)
 	}
 	var outboxCount, inboxCount int
@@ -107,7 +110,7 @@ VALUES ($1, 'migration.events', 'migration.test', $2, $3,
 	for _, table := range pgstore.RequiredTables() {
 		exists, err := pgstore.TableExists(ctx, e.pool, table)
 		if err != nil || !exists {
-			t.Fatalf("required v2 table %s: exists=%t err=%v", table, exists, err)
+			t.Fatalf("required v3 table %s: exists=%t err=%v", table, exists, err)
 		}
 	}
 	runRelay(t, e.newRelay(t, relay.Config{InstanceID: "migration-relay"}, e.publisher(t), relay.FailureHooks{}))
