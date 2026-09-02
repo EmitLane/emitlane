@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/EmitLane/emitlane/compare/v0.1.0...v0.2.0) (2026-09-02)
+
+
+### Features
+
+* **operability:** add admin API, replay and relay controls ([#8](https://github.com/EmitLane/emitlane/issues/8)) ([07a209a](https://github.com/EmitLane/emitlane/commit/07a209a54832a3b120befeeda1c6b2f7e33748a5))
+
 ## 0.1.0 (2026-09-02)
 
 
