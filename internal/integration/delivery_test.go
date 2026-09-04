@@ -447,6 +447,10 @@ func enqueueOrder(t *testing.T, e *env, orderID, topic string, amount int, commi
 }
 
 func (e *env) ensureTopic(t *testing.T, topic string) {
+	e.ensureTopicPartitions(t, topic, 1)
+}
+
+func (e *env) ensureTopicPartitions(t *testing.T, topic string, partitions int32) {
 	t.Helper()
 	cl, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...), kgo.AllowAutoTopicCreation())
 	if err != nil {
@@ -456,7 +460,7 @@ func (e *env) ensureTopic(t *testing.T, topic string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	adm := kadm.NewClient(cl)
-	res, err := adm.CreateTopics(ctx, 1, 1, nil, topic)
+	res, err := adm.CreateTopics(ctx, partitions, 1, nil, topic)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -16,6 +18,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/emitlane/emitlane/broker"
+	adminapi "github.com/emitlane/emitlane/internal/admin"
+	internalordering "github.com/emitlane/emitlane/internal/ordering"
 	"github.com/emitlane/emitlane/outbox"
 	"github.com/emitlane/emitlane/relay"
 )
@@ -169,6 +173,29 @@ func TestBlockedOrderedStreamDoesNotBlockIndependentStream(t *testing.T) {
 	}
 }
 
+func TestOrderedFutureSequenceRemainsDurableUntilGapCloses(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	future := enqueueOrdered(t, e, topic, "order:future", 3)
+	runRelay(t, e.newRelay(t, orderedRelayConfig("future-relay"), e.publisher(t), relay.FailureHooks{}))
+	time.Sleep(400 * time.Millisecond)
+	blocked := e.getEvent(t, future)
+	if blocked.Status != "pending" || blocked.Attempts != 0 {
+		t.Fatalf("future sequence was not durably blocked: status=%s attempts=%d", blocked.Status, blocked.Attempts)
+	}
+	second := enqueueOrdered(t, e, topic, "order:future", 2)
+	first := enqueueOrdered(t, e, topic, "order:future", 1)
+	e.waitStatus(t, first, "delivered", 20*time.Second)
+	e.waitStatus(t, second, "delivered", 20*time.Second)
+	e.waitStatus(t, future, "delivered", 20*time.Second)
+	records := consumeTopicRecords(t, e.brokers, topic, 3, 15*time.Second)
+	for i, record := range records {
+		if got, want := recordSequence(t, record), int64(i+1); got != want {
+			t.Fatalf("future-gap sequence[%d]=%d, want %d", i, got, want)
+		}
+	}
+}
+
 type sequencePublisher struct {
 	mu              sync.Mutex
 	failuresLeft    int
@@ -176,7 +203,38 @@ type sequencePublisher struct {
 	successful      []int64
 	acknowledged    chan struct{}
 	acknowledgeOnce sync.Once
+	failed          chan struct{}
+	failureOnce     sync.Once
 }
+
+type transientKafkaPublisher struct {
+	inner    broker.Publisher
+	mu       sync.Mutex
+	failures int
+	delay    time.Duration
+}
+
+func (p *transientKafkaPublisher) Publish(ctx context.Context, message broker.Message) error {
+	if p.delay > 0 {
+		timer := time.NewTimer(p.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	p.mu.Lock()
+	if p.failures > 0 {
+		p.failures--
+		p.mu.Unlock()
+		return errors.New("injected randomized transient failure")
+	}
+	p.mu.Unlock()
+	return p.inner.Publish(ctx, message)
+}
+
+func (*transientKafkaPublisher) Close() error { return nil }
 
 func (p *sequencePublisher) Publish(_ context.Context, message broker.Message) error {
 	sequence, _ := strconv.ParseInt(message.Headers[broker.HeaderSequence], 10, 64)
@@ -185,6 +243,9 @@ func (p *sequencePublisher) Publish(_ context.Context, message broker.Message) e
 	if p.alwaysFail || p.failuresLeft > 0 {
 		if p.failuresLeft > 0 {
 			p.failuresLeft--
+		}
+		if p.failed != nil {
+			p.failureOnce.Do(func() { close(p.failed) })
 		}
 		return errors.New("injected ordered publish failure")
 	}
@@ -209,11 +270,44 @@ func TestOrderedRetryAndDeadBlockLaterSequence(t *testing.T) {
 		topic := topicName(t, e)
 		first := enqueueOrdered(t, e, topic, "order:retry", 1)
 		second := enqueueOrdered(t, e, topic, "order:retry", 2)
-		publisher := &sequencePublisher{failuresLeft: 1}
+		publisher := &sequencePublisher{failuresLeft: 1, failed: make(chan struct{})}
 		cfg := orderedRelayConfig("retry-relay")
-		cfg.BaseDelay = 100 * time.Millisecond
-		cfg.MaxDelay = 100 * time.Millisecond
+		cfg.BaseDelay = 750 * time.Millisecond
+		cfg.MaxDelay = 750 * time.Millisecond
 		runRelay(t, e.newRelay(t, cfg, publisher, relay.FailureHooks{}))
+		select {
+		case <-publisher.failed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("ordered failure did not occur")
+		}
+		service := adminService(t, e, time.Second)
+		if _, err := service.SetPaused(context.Background(), true, adminapi.Mutation{Actor: "integration", Reason: "inspect retry wait"}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			event := e.getEvent(t, first)
+			if event.Status == "pending" && event.Attempts == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("first ordered event did not enter retry wait: %+v", event)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if _, err := e.pool.Exec(context.Background(), `UPDATE emitlane.outbox_events SET available_at=NOW()+INTERVAL '1 minute' WHERE id=$1`, mustUUID(t, first)); err != nil {
+			t.Fatal(err)
+		}
+		stream, err := service.InspectOrderingStream(context.Background(), topic, "order:retry")
+		if err != nil || stream.State != "retry_wait" || stream.NextSequence != 1 || stream.NextEventAttempts != 1 {
+			t.Fatalf("retry-wait stream = %+v err=%v", stream, err)
+		}
+		if _, err := service.SetPaused(context.Background(), false, adminapi.Mutation{Actor: "integration", Reason: "retry inspected"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.pool.Exec(context.Background(), `UPDATE emitlane.outbox_events SET available_at=NOW() WHERE id=$1`, mustUUID(t, first)); err != nil {
+			t.Fatal(err)
+		}
 		e.waitStatus(t, first, "delivered", 15*time.Second)
 		e.waitStatus(t, second, "delivered", 15*time.Second)
 		got := publisher.sequences()
@@ -234,6 +328,10 @@ func TestOrderedRetryAndDeadBlockLaterSequence(t *testing.T) {
 		cfg.MaxDelay = 5 * time.Millisecond
 		stop := runRelay(t, e.newRelay(t, cfg, failing, relay.FailureHooks{}))
 		e.waitStatus(t, first, "dead", 15*time.Second)
+		stream, err := adminService(t, e, time.Second).InspectOrderingStream(context.Background(), topic, "order:dead")
+		if err != nil || stream.State != "dead_blocked" || stream.NextSequence != 1 {
+			t.Fatalf("dead-blocked stream = %+v err=%v", stream, err)
+		}
 		time.Sleep(200 * time.Millisecond)
 		blocked := e.getEvent(t, second)
 		if blocked.Status != "pending" || blocked.Attempts != 0 {
@@ -338,6 +436,358 @@ WHERE destination=$1 AND ordering_key='order:stale'`, topic).Scan(&next); err !=
 	}
 	if next != 1 {
 		t.Fatalf("stale owner advanced stream to %d", next)
+	}
+}
+
+func TestOrderedExplicitStartAndRetentionPreserveProgress(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := enqueueOrderedInTx(t, e, tx, topic, "order:start-50", 50, 50)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second := enqueueOrdered(t, e, topic, "order:start-50", 51)
+	runRelay(t, e.newRelay(t, orderedRelayConfig("start-retention-relay"), e.publisher(t), relay.FailureHooks{}))
+	e.waitStatus(t, first, "delivered", 20*time.Second)
+	e.waitStatus(t, second, "delivered", 20*time.Second)
+	records := consumeTopicRecords(t, e.brokers, topic, 2, 15*time.Second)
+	if recordSequence(t, records[0]) != 50 || recordSequence(t, records[1]) != 51 {
+		t.Fatalf("explicit-start broker sequence = %d,%d", recordSequence(t, records[0]), recordSequence(t, records[1]))
+	}
+
+	if _, err := e.pool.Exec(ctx, `UPDATE emitlane.outbox_events SET delivered_at=NOW()-INTERVAL '1 hour' WHERE id=ANY($1)`,
+		[]uuid.UUID{mustUUID(t, first), mustUUID(t, second)}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := e.store.CleanupDelivered(ctx, time.Minute, 10)
+	if err != nil || deleted != 2 {
+		t.Fatalf("cleanup deleted=%d err=%v", deleted, err)
+	}
+	var next int64
+	if err := e.pool.QueryRow(ctx, `SELECT next_sequence FROM emitlane.ordering_streams WHERE destination=$1 AND ordering_key=$2`,
+		topic, "order:start-50").Scan(&next); err != nil {
+		t.Fatal(err)
+	}
+	if next != 52 {
+		t.Fatalf("retention changed stream next sequence to %d", next)
+	}
+	tx, err = e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	_, err = e.writer.Enqueue(ctx, tx, outbox.Event{
+		Destination: topic, Type: "order.old", OrderingKey: "order:start-50", Sequence: 49,
+	})
+	if !errors.Is(err, outbox.ErrSequenceAlreadyPassed) {
+		t.Fatalf("old sequence after retention error = %v", err)
+	}
+}
+
+func TestOrderedPauseRenewsPartitionLeaseAndBlocksClaims(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	id := enqueueOrdered(t, e, topic, "order:paused", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service := adminService(t, e, time.Second)
+	if _, err := service.SetPaused(ctx, true, adminapi.Mutation{Actor: "integration", Reason: "ordered maintenance"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := orderedRelayConfig("ordered-paused-relay")
+	cfg.OrderingLeaseDuration = 900 * time.Millisecond
+	runRelay(t, e.newRelay(t, cfg, e.publisher(t), relay.FailureHooks{}))
+	partition := internalordering.Partition(topic, "order:paused")
+	readLease := func() time.Time {
+		t.Helper()
+		var lease *time.Time
+		if err := e.pool.QueryRow(ctx, `SELECT lease_until FROM emitlane.ordering_partitions WHERE partition_id=$1`, partition).Scan(&lease); err != nil {
+			t.Fatal(err)
+		}
+		if lease == nil {
+			t.Fatal("ordered partition has no lease")
+		}
+		return *lease
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var before time.Time
+	for time.Now().Before(deadline) {
+		var owner *string
+		if err := e.pool.QueryRow(ctx, `SELECT lease_owner FROM emitlane.ordering_partitions WHERE partition_id=$1`, partition).Scan(&owner); err != nil {
+			t.Fatal(err)
+		}
+		if owner != nil && *owner == cfg.InstanceID {
+			before = readLease()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if before.IsZero() {
+		t.Fatal("paused Relay did not acquire ordered partition")
+	}
+	time.Sleep(200 * time.Millisecond)
+	after := readLease()
+	if !after.After(before) {
+		t.Fatalf("partition lease did not renew while paused: before=%s after=%s", before, after)
+	}
+	event := e.getEvent(t, id)
+	if event.Status != "pending" || event.Attempts != 0 {
+		t.Fatalf("ordered event claimed while paused: status=%s attempts=%d", event.Status, event.Attempts)
+	}
+	if _, err := service.SetPaused(ctx, false, adminapi.Mutation{Actor: "integration", Reason: "ordered maintenance complete"}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitStatus(t, id, "delivered", 20*time.Second)
+}
+
+func TestMultipleRelaysPreserveStreamsAndKafkaPartitionAffinity(t *testing.T) {
+	e := startEnv(t)
+	topic := "ordered-multipart-" + uuid.NewString()
+	e.ensureTopicPartitions(t, topic, 8)
+	const streams = 24
+	const perStream = 3
+	committed := make(map[string]struct{}, streams*perStream)
+	for stream := 0; stream < streams; stream++ {
+		key := fmt.Sprintf("order:multi:%02d", stream)
+		for sequence := int64(1); sequence <= perStream; sequence++ {
+			committed[enqueueOrdered(t, e, topic, key, sequence)] = struct{}{}
+		}
+	}
+	for _, id := range []string{"multi-relay-a", "multi-relay-b", "multi-relay-c"} {
+		runRelay(t, e.newRelay(t, orderedRelayConfig(id), e.publisher(t), relay.FailureHooks{}))
+	}
+	records := consumeTopicRecords(t, e.brokers, topic, streams*perStream, 30*time.Second)
+	type observed struct {
+		partition int32
+		offset    int64
+		sequence  int64
+	}
+	byKey := make(map[string][]observed, streams)
+	partitionByKey := make(map[string]int32, streams)
+	usedPartitions := make(map[int32]struct{})
+	seenIDs := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		key := string(record.Key)
+		sequence := recordSequence(t, record)
+		byKey[key] = append(byKey[key], observed{partition: record.Partition, offset: record.Offset, sequence: sequence})
+		if prior, ok := partitionByKey[key]; ok && prior != record.Partition {
+			t.Fatalf("stream %s reached Kafka partitions %d and %d", key, prior, record.Partition)
+		}
+		partitionByKey[key] = record.Partition
+		usedPartitions[record.Partition] = struct{}{}
+		seenIDs[headerValue(record, broker.HeaderEventID)] = struct{}{}
+	}
+	for id := range committed {
+		if _, ok := seenIDs[id]; !ok {
+			t.Fatalf("committed event %s was not observed", id)
+		}
+	}
+	for key, observations := range byKey {
+		sort.Slice(observations, func(i, j int) bool { return observations[i].offset < observations[j].offset })
+		for i, item := range observations {
+			want := int64(i + 1)
+			if item.sequence != want {
+				t.Fatalf("stream %s sequence at offset %d = %d, want %d", key, item.offset, item.sequence, want)
+			}
+		}
+	}
+	if len(byKey) != streams || len(usedPartitions) < 2 {
+		t.Fatalf("stream/partition distribution: streams=%d Kafka partitions=%d", len(byKey), len(usedPartitions))
+	}
+}
+
+func TestOrderedGracefulRebalanceMovesPartitionWithoutRegression(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	const ownerA = "graceful-a"
+	const ownerB = "graceful-b"
+	key := ""
+	var partition int16
+	for i := 0; i < 1000; i++ {
+		candidate := fmt.Sprintf("order:graceful:%d", i)
+		candidatePartition := internalordering.Partition(topic, candidate)
+		if internalordering.DesiredOwner(candidatePartition, []string{ownerA, ownerB}) == ownerB {
+			key, partition = candidate, candidatePartition
+			break
+		}
+	}
+	if key == "" {
+		t.Fatal("could not find stream assigned to joining Relay")
+	}
+	first := enqueueOrdered(t, e, topic, key, 1)
+	runRelay(t, e.newRelay(t, orderedRelayConfig(ownerA), e.publisher(t), relay.FailureHooks{}))
+	e.waitStatus(t, first, "delivered", 20*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service := adminService(t, e, time.Second)
+	if _, err := service.SetPaused(ctx, true, adminapi.Mutation{Actor: "integration", Reason: "rebalance observation"}); err != nil {
+		t.Fatal(err)
+	}
+	second := enqueueOrdered(t, e, topic, key, 2)
+	runRelay(t, e.newRelay(t, orderedRelayConfig(ownerB), e.publisher(t), relay.FailureHooks{}))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var actual *string
+		var handoffPassed bool
+		if err := e.pool.QueryRow(ctx, `
+SELECT lease_owner, COALESCE(handoff_not_before <= NOW(), TRUE)
+FROM emitlane.ordering_partitions WHERE partition_id=$1`, partition).Scan(&actual, &handoffPassed); err != nil {
+			t.Fatal(err)
+		}
+		if actual != nil && *actual == ownerB && handoffPassed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partition %d did not move to %s after handoff", partition, ownerB)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if event := e.getEvent(t, second); event.Status != "pending" || event.Attempts != 0 {
+		t.Fatalf("paused sequence 2 was claimed during rebalance: %+v", event)
+	}
+	if _, err := service.SetPaused(ctx, false, adminapi.Mutation{Actor: "integration", Reason: "rebalance complete"}); err != nil {
+		t.Fatal(err)
+	}
+	e.waitStatus(t, second, "delivered", 20*time.Second)
+	records := consumeTopicRecords(t, e.brokers, topic, 2, 15*time.Second)
+	if recordSequence(t, records[0]) != 1 || recordSequence(t, records[1]) != 2 {
+		t.Fatalf("graceful rebalance sequence = %d,%d", recordSequence(t, records[0]), recordSequence(t, records[1]))
+	}
+}
+
+func TestOrderedCrashTakeoverResumesDeliveryAfterHandoff(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	id := enqueueOrdered(t, e, topic, "order:takeover", 1)
+	registerOrderingRelay(t, e, "crashed-owner")
+	_, err := e.store.ReconcileOrderingPartitions(context.Background(), "crashed-owner",
+		350*time.Millisecond, 100*time.Millisecond, 5*time.Second, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.MarkRelayStopped(context.Background(), "crashed-owner"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := orderedRelayConfig("takeover-relay")
+	cfg.OrderingLeaseDuration = 600 * time.Millisecond
+	cfg.PublishTimeout = 100 * time.Millisecond
+	cfg.OrderingSafetyMargin = 50 * time.Millisecond
+	runRelay(t, e.newRelay(t, cfg, e.publisher(t), relay.FailureHooks{}))
+	e.waitStatus(t, id, "delivered", 20*time.Second)
+	records := consumeTopicRecords(t, e.brokers, topic, 1, 10*time.Second)
+	if got := recordSequence(t, records[0]); got != 1 {
+		t.Fatalf("takeover sequence = %d", got)
+	}
+}
+
+func TestOrderedRandomizedReliabilityScenario(t *testing.T) {
+	e := startEnv(t)
+	topic := "ordered-random-" + uuid.NewString()
+	e.ensureTopicPartitions(t, topic, 6)
+	const streams = 12
+	const perStream = 5
+	type plannedEvent struct {
+		key      string
+		sequence int64
+	}
+	planned := make([]plannedEvent, 0, streams*perStream)
+	for stream := 0; stream < streams; stream++ {
+		for sequence := int64(1); sequence <= perStream; sequence++ {
+			planned = append(planned, plannedEvent{
+				key: fmt.Sprintf("order:random:%02d", stream), sequence: sequence,
+			})
+		}
+	}
+	random := rand.New(rand.NewSource(303))
+	random.Shuffle(len(planned), func(i, j int) { planned[i], planned[j] = planned[j], planned[i] })
+	committed := make(map[string]struct{}, len(planned))
+	for _, item := range planned {
+		committed[enqueueOrdered(t, e, topic, item.key, item.sequence)] = struct{}{}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	service := adminService(t, e, time.Second)
+	if _, err := service.SetPaused(ctx, true, adminapi.Mutation{Actor: "integration", Reason: "randomized startup"}); err != nil {
+		t.Fatal(err)
+	}
+	newPublisher := func(failures int) broker.Publisher {
+		return &transientKafkaPublisher{inner: e.publisher(t), failures: failures, delay: 5 * time.Millisecond}
+	}
+	stopA := runRelay(t, e.newRelay(t, orderedRelayConfig("random-relay-a"), newPublisher(3), relay.FailureHooks{}))
+	runRelay(t, e.newRelay(t, orderedRelayConfig("random-relay-b"), newPublisher(2), relay.FailureHooks{}))
+	time.Sleep(250 * time.Millisecond)
+	if _, err := service.SetPaused(ctx, false, adminapi.Mutation{Actor: "integration", Reason: "randomized run"}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitDeliveredAtLeast := func(want int) {
+		t.Helper()
+		for {
+			var delivered int
+			if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.outbox_events WHERE destination=$1 AND status='delivered'`, topic).Scan(&delivered); err != nil {
+				t.Fatal(err)
+			}
+			if delivered >= want {
+				return
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("delivered %d/%d before timeout", delivered, want)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	waitDeliveredAtLeast(8)
+	stopA()
+	runRelay(t, e.newRelay(t, orderedRelayConfig("random-relay-c"), newPublisher(2), relay.FailureHooks{}))
+	waitDeliveredAtLeast(20)
+	if _, err := service.SetPaused(ctx, true, adminapi.Mutation{Actor: "integration", Reason: "randomized pause"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, err := service.SetPaused(ctx, false, adminapi.Mutation{Actor: "integration", Reason: "randomized resume"}); err != nil {
+		t.Fatal(err)
+	}
+	waitDeliveredAtLeast(len(planned))
+
+	records := consumeTopicRecords(t, e.brokers, topic, len(planned), 30*time.Second)
+	type observed struct {
+		offset   int64
+		sequence int64
+	}
+	byKey := make(map[string][]observed, streams)
+	seenIDs := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		byKey[string(record.Key)] = append(byKey[string(record.Key)], observed{
+			offset: record.Offset, sequence: recordSequence(t, record),
+		})
+		seenIDs[headerValue(record, broker.HeaderEventID)] = struct{}{}
+	}
+	for id := range committed {
+		if _, ok := seenIDs[id]; !ok {
+			t.Fatalf("randomized run lost committed event %s", id)
+		}
+	}
+	for key, observations := range byKey {
+		sort.Slice(observations, func(i, j int) bool { return observations[i].offset < observations[j].offset })
+		var previous int64
+		for _, item := range observations {
+			if item.sequence < previous {
+				t.Fatalf("randomized stream %s regressed from %d to %d", key, previous, item.sequence)
+			}
+			previous = item.sequence
+		}
+	}
+	if len(byKey) != streams {
+		t.Fatalf("randomized run observed %d/%d streams", len(byKey), streams)
 	}
 }
 
