@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/EmitLane/emitlane/compare/v0.3.1...v0.3.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **kafka:** restore bounded at-least-once publishing ([ab58cb1](https://github.com/EmitLane/emitlane/commit/ab58cb11528e89aebf12d9376a156039672905f4))
+
 ## [0.3.1](https://github.com/EmitLane/emitlane/compare/v0.3.0...v0.3.1) (2026-09-04)
 
 
