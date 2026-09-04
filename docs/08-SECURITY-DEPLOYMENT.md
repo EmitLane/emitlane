@@ -11,6 +11,7 @@ Needs roughly:
 ```text
 USAGE on emitlane schema
 INSERT on emitlane.outbox_events
+SELECT, INSERT, UPDATE on emitlane.ordering_streams for ordered writes
 ability to execute notification path if used
 ```
 
@@ -21,6 +22,7 @@ Needs roughly:
 ```text
 SELECT
 UPDATE
+SELECT, UPDATE on emitlane.ordering_streams and emitlane.ordering_partitions
 DELETE only if retention implementation requires it
 LISTEN capability through normal connection
 ```
@@ -30,6 +32,9 @@ LISTEN capability through normal connection
 Can be separate and own DDL rights.
 
 Exact GRANT scripts are in [QUICKSTART.md](QUICKSTART.md).
+Operator inspection needs `SELECT` on both ordering tables. These permissions
+do not require superuser. Ordering keys can contain business identifiers and
+must not be placed in Prometheus labels.
 
 ## Payload safety
 
@@ -68,6 +73,9 @@ relay:
   concurrency: 8
   poll_interval: 5s
   lease_duration: 30s
+  ordering_rebalance_interval: 2s
+  ordering_lease_duration: 30s
+  ordering_safety_margin: 1s
 
 retry:
   max_attempts: 10

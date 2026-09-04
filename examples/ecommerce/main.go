@@ -84,9 +84,10 @@ func main() {
 		if _, err := writer.Enqueue(r.Context(), tx, outbox.Event{
 			Destination: topic,
 			Type:        "order.created",
-			Key:         []byte(orderID),
 			Payload:     payload,
 			ContentType: "application/json",
+			OrderingKey: "order:" + orderID,
+			Sequence:    1,
 		}); err != nil {
 			internalError(log, w, "enqueue order event", err)
 			return
@@ -99,10 +100,58 @@ func main() {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": orderID, "amount": req.Amount})
 	})
+	mux.HandleFunc("POST /orders/{id}/paid", func(w http.ResponseWriter, r *http.Request) {
+		orderID := r.PathValue("id")
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			internalError(log, w, "begin payment transaction", err)
+			return
+		}
+		defer rollbackTx(r.Context(), log, tx)
+		var amount int
+		var version int64
+		err = tx.QueryRow(r.Context(), `
+UPDATE public.orders
+SET status='paid', version=version+1
+WHERE id=$1 AND status='created'
+RETURNING amount, version`, orderID).Scan(&amount, &version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "order not found or already paid", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			internalError(log, w, "mark order paid", err)
+			return
+		}
+		payload, err := outbox.JSON(orderCreated{OrderID: orderID, Amount: amount})
+		if err != nil {
+			internalError(log, w, "encode paid event", err)
+			return
+		}
+		if _, err := writer.Enqueue(r.Context(), tx, outbox.Event{
+			Destination: topic,
+			Type:        "order.paid",
+			Payload:     payload,
+			ContentType: "application/json",
+			OrderingKey: "order:" + orderID,
+			Sequence:    version,
+		}); err != nil {
+			internalError(log, w, "enqueue paid event", err)
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			internalError(log, w, "commit payment transaction", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": orderID, "status": "paid", "version": version})
+	})
 	mux.HandleFunc("GET /orders/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		var amount int
-		err := pool.QueryRow(r.Context(), `SELECT amount FROM public.orders WHERE id = $1`, id).Scan(&amount)
+		var status string
+		var version int64
+		err := pool.QueryRow(r.Context(), `SELECT amount, status, version FROM public.orders WHERE id = $1`, id).Scan(&amount, &status, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -112,7 +161,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "amount": amount})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "amount": amount, "status": status, "version": version})
 	})
 	mux.HandleFunc("GET /payments/{order_id}", func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("order_id")
@@ -284,8 +333,12 @@ func setup(ctx context.Context, pool *pgxpool.Pool) error {
 CREATE TABLE IF NOT EXISTS public.orders (
     id TEXT PRIMARY KEY,
     amount INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'created',
+    version BIGINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'created';
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;
 CREATE TABLE IF NOT EXISTS public.payments (
     order_id TEXT PRIMARY KEY,
     amount INTEGER NOT NULL,

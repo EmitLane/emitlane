@@ -98,6 +98,15 @@ func Load() (Config, error) {
 	if cfg.Relay.PresenceStaleAfter, err = envDuration("EMITLANE_RELAY_STALE_AFTER", cfg.Relay.PresenceStaleAfter); err != nil {
 		return Config{}, err
 	}
+	if cfg.Relay.OrderingRebalanceInterval, err = envDuration("EMITLANE_ORDERING_REBALANCE_INTERVAL", cfg.Relay.OrderingRebalanceInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.Relay.OrderingLeaseDuration, err = envDuration("EMITLANE_ORDERING_LEASE_DURATION", cfg.Relay.OrderingLeaseDuration); err != nil {
+		return Config{}, err
+	}
+	if cfg.Relay.OrderingSafetyMargin, err = envDuration("EMITLANE_ORDERING_SAFETY_MARGIN", cfg.Relay.OrderingSafetyMargin); err != nil {
+		return Config{}, err
+	}
 	if cfg.Relay.Retention, err = envDuration("EMITLANE_RETENTION_DELIVERED", cfg.Relay.Retention); err != nil {
 		return Config{}, err
 	}

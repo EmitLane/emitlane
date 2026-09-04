@@ -43,6 +43,9 @@ relay instances.
   health endpoints, diagnostics, migrations, and dead-letter commands.
 - **Controlled recovery** — durable cluster pause/resume, relay presence,
   redacted event inspection, audited retry, and bounded replay operations.
+- **Opt-in stream ordering** — application-owned sequence numbers, durable
+  stream cursors, fenced virtual-partition leases, visible gaps, and Kafka key
+  affinity without changing the unordered hot path.
 
 ## Quickstart
 
@@ -111,6 +114,21 @@ return tx.Commit(ctx)
 Payloads are stored as opaque `BYTEA`. JSON is a convenience, not a storage
 requirement.
 
+For ordered aggregate events, provide a stable stream key and domain sequence:
+
+```go
+_, err = outbox.NewWriter().Enqueue(ctx, tx, outbox.Event{
+    Destination: "orders.events",
+    Type:        "order.paid",
+    Payload:     payload,
+    OrderingKey: "order:" + order.ID,
+    Sequence:    order.Version,
+})
+```
+
+The application remains responsible for assigning unique monotonic sequences.
+See [ordered delivery](docs/ORDERED_DELIVERY.md) before enabling this mode.
+
 ## Delivery model
 
 ```text
@@ -127,7 +145,10 @@ The important boundaries are intentional:
 - an unacknowledged event remains recoverable after a crash;
 - an acknowledged event can be published twice in the relay crash window;
 - failed events are retained and become `dead` after retry exhaustion;
-- strict or global ordering is not guaranteed in v0.2.
+- unordered events retain the original concurrent behavior;
+- ordered streams prevent N+1 from starting before N is durably delivered,
+  while duplicates of N remain possible around the broker-ACK/SQL crash window;
+- global and cross-destination ordering are not provided.
 
 Read [delivery guarantees](docs/DELIVERY_GUARANTEES.md) and
 [failure modes](docs/FAILURE_MODES.md) before adopting EmitLane in a critical path.
@@ -156,6 +177,9 @@ emitlane relay status|pause|resume
 emitlane replay event <event-id> --reason "..."
 emitlane replay range [filters] --reason "..." [--execute]
 emitlane audit list [--json]
+emitlane ordering streams [--blocked] [--json]
+emitlane ordering inspect --destination name --key key [--json]
+emitlane ordering partitions [--json]
 emitlane version
 ```
 
@@ -216,11 +240,12 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-`v0.1.0` is the released delivery baseline. The repository now contains the
-v0.2 operability and controlled-recovery implementation: additive schema v2,
-durable pause, relay discovery, redacted inspection, audited retry/replay,
-Admin API, expanded CLI, and a real benchmark harness. As a pre-1.0 project,
-APIs and operational defaults may still change during the `v0.x` series.
+`v0.2.0` is the released baseline. This branch implements the v0.3 ordered
+delivery scope: additive schema v3, application-owned sequences, durable stream
+progress, 64 leased virtual partitions with epoch fencing and handoff barriers,
+ordered inspection/replay safeguards, and expanded reliability tests. As a
+pre-1.0 project, APIs and operational defaults may still change during the
+`v0.x` series.
 
 ## License
 

@@ -30,6 +30,7 @@ import (
 type options struct {
 	scenario    string
 	events      int
+	streams     int
 	relays      int
 	duration    time.Duration
 	output      string
@@ -63,15 +64,16 @@ type result struct {
 
 func main() {
 	var opts options
-	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, or ack-crash")
+	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, ack-crash, ordered-many-streams, ordered-hot-stream, or unordered-regression")
 	flag.IntVar(&opts.events, "events", 1000, "number of events")
+	flag.IntVar(&opts.streams, "streams", 1000, "ordered streams for ordered-many-streams")
 	flag.IntVar(&opts.relays, "relays", 2, "relay instances for horizontal scaling")
 	flag.DurationVar(&opts.duration, "duration", 3*time.Second, "idle or failure duration")
 	flag.StringVar(&opts.output, "output", "", "optional JSON output file")
 	flag.IntVar(&opts.payloadSize, "payload-size", 1024, "payload size in bytes")
 	flag.Parse()
-	if opts.events < 1 || opts.relays < 1 || opts.duration <= 0 || opts.payloadSize < 1 {
-		fatal(errors.New("events, relays, duration and payload-size must be positive"))
+	if opts.events < 1 || opts.streams < 1 || opts.relays < 1 || opts.duration <= 0 || opts.payloadSize < 1 {
+		fatal(errors.New("events, streams, relays, duration and payload-size must be positive"))
 	}
 	if err := run(opts); err != nil {
 		fatal(err)
@@ -158,6 +160,33 @@ func run(opts options) error {
 		elapsed, res.AdditionalResults, err = benchmarkFailureRecovery(ctx, pool, store, brokers, opts.events, payload, opts.duration)
 	case "ack-crash":
 		elapsed, res.AdditionalResults, err = benchmarkAckCrash(ctx, pool, store, brokers, opts.events, payload)
+	case "ordered-many-streams":
+		res.RelayInstances = opts.relays
+		streamCount := min(opts.streams, opts.events)
+		res.Configuration["ordered_streams"] = streamCount
+		res.Configuration["virtual_partitions"] = 64
+		elapsed, res.AdditionalResults, err = benchmarkOrderedDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, streamCount)
+	case "ordered-hot-stream":
+		res.RelayInstances = opts.relays
+		res.Configuration["ordered_streams"] = 1
+		res.Configuration["virtual_partitions"] = 64
+		elapsed, res.AdditionalResults, err = benchmarkOrderedDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, 1)
+	case "unordered-regression":
+		res.RelayInstances = opts.relays
+		before, txErr := databaseTransactions(ctx, pool)
+		if txErr != nil {
+			return txErr
+		}
+		elapsed, res.AdditionalResults, err = benchmarkDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, true)
+		if err == nil {
+			after, txErr := databaseTransactions(ctx, pool)
+			if txErr != nil {
+				return txErr
+			}
+			res.AdditionalResults["database_transactions"] = max(int64(0), after-before-1)
+			res.AdditionalResults["ordering_stream_operations_per_event"] = 0
+			res.AdditionalResults["comparison_note"] = "compare with a v0.2.0 run using identical environment metadata"
+		}
 	default:
 		return fmt.Errorf("unknown scenario %q", opts.scenario)
 	}
@@ -178,6 +207,65 @@ func run(opts options) error {
 		delete(res.AdditionalResults, "latencies_ms")
 	}
 	return outputResult(res, opts.output)
+}
+
+func benchmarkOrderedDelivery(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	store *postgres.Store,
+	brokers []string,
+	count int,
+	payload []byte,
+	relayCount int,
+	streamCount int,
+) (time.Duration, map[string]any, error) {
+	publisher, err := newPublisher(brokers)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer publisher.Close()
+	destination := "benchmark-ordered-" + uuid.NewString()
+	beforeTransactions, err := databaseTransactions(ctx, pool)
+	if err != nil {
+		return 0, nil, err
+	}
+	if _, err := enqueueOrdered(ctx, pool, destination, count, streamCount, payload); err != nil {
+		return 0, nil, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make([]<-chan error, 0, relayCount)
+	for i := 0; i < relayCount; i++ {
+		rly, err := newOrderedRelay(store, publisher, fmt.Sprintf("benchmark-ordered-%d", i))
+		if err != nil {
+			cancel()
+			return 0, nil, err
+		}
+		done = append(done, startRelay(runCtx, rly))
+	}
+	defer stopRelays(cancel, done)
+	start := time.Now()
+	if err := waitDelivered(ctx, pool, destination, count); err != nil {
+		return 0, nil, err
+	}
+	elapsed := time.Since(start)
+	latencies, err := deliveryLatencies(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	afterTransactions, err := databaseTransactions(ctx, pool)
+	if err != nil {
+		return 0, nil, err
+	}
+	distribution, err := orderingPartitionDistribution(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	return elapsed, map[string]any{
+		"latencies_ms": latencies, "committed_events": count,
+		"delivered_unique_events": count, "lost_events": 0,
+		"ordered_streams": streamCount, "partition_distribution": distribution,
+		"database_transactions": max(int64(0), afterTransactions-beforeTransactions-1),
+	}, nil
 }
 
 func benchmarkEnqueue(ctx context.Context, pool *pgxpool.Pool, count int, payload []byte) (time.Duration, map[string]any, error) {
@@ -455,6 +543,30 @@ func newRelay(store relay.Store, publisher broker.Publisher, instance string, ho
 	return relay.New(cfg, store, publisher, relay.WithLogger(logger), relay.WithFailureHooks(hooks))
 }
 
+func newOrderedRelay(store relay.Store, publisher broker.Publisher, instance string) (*relay.Relay, error) {
+	cfg := relay.DefaultConfig()
+	cfg.InstanceID = instance + "-" + uuid.NewString()
+	cfg.BatchSize = 200
+	cfg.Concurrency = 16
+	cfg.PollInterval = 100 * time.Millisecond
+	cfg.ControlInterval = 100 * time.Millisecond
+	cfg.HeartbeatInterval = 100 * time.Millisecond
+	cfg.PresenceStaleAfter = time.Second
+	cfg.LeaseDuration = 3 * time.Second
+	cfg.PublishTimeout = 500 * time.Millisecond
+	cfg.BaseDelay = 25 * time.Millisecond
+	cfg.MaxDelay = 250 * time.Millisecond
+	cfg.MaxAttempts = 1000
+	cfg.Retention = 0
+	cfg.CleanupInterval = 0
+	cfg.CleanupBatch = 0
+	cfg.OrderingRebalanceInterval = 100 * time.Millisecond
+	cfg.OrderingLeaseDuration = 2 * time.Second
+	cfg.OrderingSafetyMargin = 100 * time.Millisecond
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return relay.New(cfg, store, publisher, relay.WithLogger(logger))
+}
+
 func startRelay(ctx context.Context, rly *relay.Relay) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- rly.Run(ctx) }()
@@ -491,6 +603,74 @@ func enqueue(ctx context.Context, pool *pgxpool.Pool, destination string, count 
 		ids = append(ids, eventID)
 	}
 	return ids, nil
+}
+
+func enqueueOrdered(ctx context.Context, pool *pgxpool.Pool, destination string, count, streamCount int, payload []byte) ([]string, error) {
+	writer := outbox.NewWriter()
+	ids := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		stream := i % streamCount
+		sequence := int64(i/streamCount + 1)
+		key := fmt.Sprintf("benchmark-stream-%d", stream)
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		eventID, err := writer.Enqueue(ctx, tx, outbox.Event{
+			Destination: destination,
+			Type:        "benchmark.ordered",
+			Payload:     payload,
+			OrderingKey: key,
+			Sequence:    sequence,
+		})
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		ids = append(ids, eventID)
+	}
+	return ids, nil
+}
+
+func orderingPartitionDistribution(ctx context.Context, pool *pgxpool.Pool, destination string) (map[string]any, error) {
+	rows, err := pool.Query(ctx, `
+SELECT ordering_partition, COUNT(*)
+FROM emitlane.outbox_events
+WHERE destination=$1 AND ordering_partition IS NOT NULL
+GROUP BY ordering_partition
+ORDER BY ordering_partition`, destination)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int64)
+	var minimum, maximum int64
+	for rows.Next() {
+		var partition int16
+		var count int64
+		if err := rows.Scan(&partition, &count); err != nil {
+			return nil, err
+		}
+		counts[fmt.Sprint(partition)] = count
+		if minimum == 0 || count < minimum {
+			minimum = count
+		}
+		if count > maximum {
+			maximum = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"used_virtual_partitions": len(counts),
+		"minimum_events":          minimum,
+		"maximum_events":          maximum,
+		"events_by_partition":     counts,
+	}, nil
 }
 
 func waitDelivered(ctx context.Context, pool *pgxpool.Pool, destination string, want int) error {
