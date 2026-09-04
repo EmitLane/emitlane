@@ -125,6 +125,36 @@ WHERE destination='orders.integrity' AND ordering_key='order:behind'`); err != n
 	}
 }
 
+func TestIntegrityTargetedStreamInspection(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	enqueueIntegrityEvent(t, e, outbox.Event{
+		Destination: "orders.integrity", Type: "order.changed",
+		OrderingKey: "order:inspect", Sequence: 2,
+	})
+	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := verifier.InspectStream(ctx, "orders.integrity", "order:inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Mode != integrity.ModeStream || report.BlockingCondition != integrity.StreamStateGap {
+		t.Fatalf("mode=%q condition=%q", report.Mode, report.BlockingCondition)
+	}
+	if report.Stream == nil || report.Stream.NextSequence != 1 || report.Partition == nil {
+		t.Fatalf("incomplete stream diagnosis: %+v", report)
+	}
+	if report.Stream.PartitionID != report.ExpectedPartition || len(report.Events) != 1 || report.Events[0].Sequence != 2 {
+		t.Fatalf("unexpected stream state: %+v", report)
+	}
+	if !hasIntegrityCode(report.Report, integrity.CodeStreamGap) {
+		t.Fatalf("stream gap finding is missing: %+v", report.Findings)
+	}
+}
+
 func enqueueIntegrityEvent(t *testing.T, e *env, event outbox.Event) uuid.UUID {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

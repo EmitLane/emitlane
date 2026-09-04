@@ -42,6 +42,29 @@ func TestAccumulatorSeverityResultAndTruncation(t *testing.T) {
 	}
 }
 
+func TestExitCodeMapping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		report Report
+		strict bool
+		want   int
+	}{
+		{name: "clean", report: Report{}, want: 0},
+		{name: "warning default", report: Report{Summary: Summary{Warnings: 1}}, want: 0},
+		{name: "warning strict", report: Report{Summary: Summary{Warnings: 1}}, strict: true, want: 2},
+		{name: "violation", report: Report{Summary: Summary{Violations: 1}}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExitCode(tt.report, tt.strict); got != tt.want {
+				t.Fatalf("ExitCode()=%d want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReportJSONContract(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
@@ -59,6 +82,33 @@ func TestReportJSONContract(t *testing.T) {
 		if _, ok := decoded[field]; !ok {
 			t.Errorf("JSON field %q is missing: %s", field, raw)
 		}
+	}
+}
+
+func TestStreamInspectionJSONContract(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	inspection := StreamInspection{
+		Report: Report{Result: "warnings", Mode: ModeStream, StartedAt: now, FinishedAt: now,
+			Clean: true, Findings: []Finding{}, Summary: Summary{Warnings: 1}},
+		Destination: "orders.events", OrderingKey: "order:123", ExpectedPartition: 61,
+		BlockingCondition: StreamStateGap, Events: []StreamEvent{},
+	}
+	raw, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"result", "mode", "summary", "destination", "ordering_key", "expected_partition", "blocking_condition", "events"} {
+		if _, ok := decoded[field]; !ok {
+			t.Errorf("stream JSON field %q is missing: %s", field, raw)
+		}
+	}
+	if _, nested := decoded["Report"]; nested {
+		t.Fatalf("embedded report unexpectedly nested: %s", raw)
 	}
 }
 

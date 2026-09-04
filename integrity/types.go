@@ -129,6 +129,15 @@ type Report struct {
 	FindingsTruncated bool      `json:"findings_truncated"`
 }
 
+// ExitCode maps a completed report to the CLI contract. Operational failures
+// are represented by returned errors and use exit status 1 in the CLI.
+func ExitCode(report Report, strict bool) int {
+	if report.Summary.Violations > 0 || strict && report.Summary.Warnings > 0 {
+		return 2
+	}
+	return 0
+}
+
 type accumulator struct {
 	report      Report
 	maxFindings int
@@ -212,6 +221,50 @@ type CursorObservation struct {
 	ExpectedAvailableAt  *time.Time
 	ExpectedLeaseUntil   *time.Time
 	LowestFutureSequence *int64
+}
+
+type StreamCursor struct {
+	Destination   string    `json:"destination"`
+	OrderingKey   string    `json:"ordering_key"`
+	PartitionID   int16     `json:"partition_id"`
+	StartSequence int64     `json:"start_sequence"`
+	NextSequence  int64     `json:"next_sequence"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type StreamEvent struct {
+	ID          string     `json:"id"`
+	Sequence    int64      `json:"sequence"`
+	PartitionID int16      `json:"partition_id"`
+	Status      string     `json:"status"`
+	Attempts    int        `json:"attempts"`
+	AvailableAt time.Time  `json:"available_at"`
+	LeaseOwner  string     `json:"lease_owner,omitempty"`
+	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type PartitionState struct {
+	PartitionID      int16      `json:"partition_id"`
+	LeaseOwner       string     `json:"lease_owner,omitempty"`
+	LeaseUntil       *time.Time `json:"lease_until,omitempty"`
+	Epoch            int64      `json:"epoch"`
+	HandoffNotBefore *time.Time `json:"handoff_not_before,omitempty"`
+	PublishTimeoutMS *int       `json:"publish_timeout_ms,omitempty"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type StreamInspection struct {
+	Report
+	Destination       string          `json:"destination"`
+	OrderingKey       string          `json:"ordering_key"`
+	ExpectedPartition int16           `json:"expected_partition"`
+	BlockingCondition StreamState     `json:"blocking_condition"`
+	Stream            *StreamCursor   `json:"stream,omitempty"`
+	Partition         *PartitionState `json:"partition,omitempty"`
+	Events            []StreamEvent   `json:"events"`
+	EventsTruncated   bool            `json:"events_truncated"`
 }
 
 // ClassifyCursor classifies one stream from active retained rows only.
