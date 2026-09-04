@@ -28,6 +28,7 @@ type faultStats struct {
 	outages        atomic.Int64
 	outageNanos    atomic.Int64
 	pauses         atomic.Int64
+	memberships    atomic.Int64
 	acquisitions   atomic.Int64
 	handoffs       atomic.Int64
 	infrastructure atomic.Int64
@@ -60,20 +61,23 @@ func (s *faultStats) durationSnapshot() map[string]float64 {
 }
 
 type soakRuntime struct {
-	runDir         string
-	cfg            Config
-	started        time.Time
-	phaseMu        sync.RWMutex
-	phase          string
-	progressStop   chan struct{}
-	progressDone   chan struct{}
-	progressOnce   sync.Once
-	verifier       *verifier
-	faults         *faultStats
-	relays         *relayGroup
-	env            *soakEnvironment
-	orderedTopic   string
-	unorderedTopic string
+	runDir          string
+	cfg             Config
+	started         time.Time
+	phaseMu         sync.RWMutex
+	phase           string
+	progressStop    chan struct{}
+	progressDone    chan struct{}
+	progressOnce    sync.Once
+	progressWriteMu sync.Mutex
+	timelineMu      sync.Mutex
+	timeline        []timelinePoint
+	verifier        *verifier
+	faults          *faultStats
+	relays          *relayGroup
+	env             *soakEnvironment
+	orderedTopic    string
+	unorderedTopic  string
 }
 
 func runSoak(ctx context.Context, runDir string, cfg Config) error {
@@ -175,6 +179,7 @@ func (r *soakRuntime) setPhase(phase string) {
 	r.phaseMu.Unlock()
 	_ = writeJSON(filepath.Join(r.runDir, "state.json"), State{RunID: r.cfg.RunID, State: "running", Phase: phase, UpdatedAt: time.Now().UTC()})
 	log.Printf("phase=%s", phase)
+	r.writeProgress("running")
 }
 
 func (r *soakRuntime) currentPhase() string {
@@ -205,9 +210,20 @@ func (r *soakRuntime) stopProgress() {
 }
 
 func (r *soakRuntime) writeProgress(state string) {
+	r.progressWriteMu.Lock()
+	defer r.progressWriteMu.Unlock()
 	snap := r.verifier.snapshot()
 	progress := Progress{RunID: r.cfg.RunID, State: state, Phase: r.currentPhase(), Profile: r.cfg.Profile, Seed: r.cfg.Seed, StartedAt: r.started, UpdatedAt: time.Now().UTC(), Elapsed: time.Since(r.started), CommittedEvents: snap.committed, ObservedUnique: snap.observed, BrokerRecords: snap.records, DuplicateRecords: snap.duplicates, NotObservedYet: snap.lost, OrderedStreams: r.cfg.OrderedStreams, Relays: r.cfg.Relays, RelayRestarts: r.faults.restarts.Load(), RelayCrashTakeovers: r.faults.crashes.Load(), KafkaOutages: r.faults.outages.Load(), PauseCycles: r.faults.pauses.Load(), OrderingRegressions: snap.regressions, OrderingSkips: snap.skips}
+	r.timelineMu.Lock()
+	r.timeline = append(r.timeline, timelinePoint{Elapsed: progress.Elapsed, Phase: progress.Phase, Committed: progress.CommittedEvents, Observed: progress.ObservedUnique, Backlog: progress.NotObservedYet, Restarts: progress.RelayRestarts, Crashes: progress.RelayCrashTakeovers, KafkaOutages: progress.KafkaOutages, PauseCycles: progress.PauseCycles, MembershipChanges: r.faults.memberships.Load()})
+	r.timelineMu.Unlock()
 	_ = writeJSON(filepath.Join(r.runDir, "progress.json"), progress)
+}
+
+func (r *soakRuntime) timelineSnapshot() []timelinePoint {
+	r.timelineMu.Lock()
+	defer r.timelineMu.Unlock()
+	return append([]timelinePoint(nil), r.timeline...)
 }
 
 func (r *soakRuntime) consume(ctx context.Context, client *kgo.Client, done chan<- struct{}) {
@@ -402,6 +418,9 @@ func (r *soakRuntime) injectFaults(ctx context.Context, random *mathrand.Rand) {
 			if err == nil && waitContext(ctx, 2*time.Second) {
 				err = r.relays.stopIndex(r.relays.count()-1, true)
 			}
+			if err == nil {
+				r.faults.memberships.Add(1)
+			}
 			r.faults.addDuration("relay_membership_change", time.Since(started))
 		}
 		if err != nil && ctx.Err() == nil {
@@ -568,6 +587,7 @@ func (r *soakRuntime) finish(result Result, requestedState string, prior error, 
 	r.phase = state
 	r.phaseMu.Unlock()
 	r.writeProgress(state)
+	_ = os.WriteFile(filepath.Join(r.runDir, "timeline.svg"), []byte(timelineSVG(r.cfg.RunID, r.timelineSnapshot())), 0o644)
 	_ = writeJSON(filepath.Join(r.runDir, "state.json"), State{RunID: r.cfg.RunID, State: state, Phase: state, UpdatedAt: time.Now().UTC(), Reason: reason})
 	log.Printf("soak result=%s committed=%d observed=%d duplicates=%d regressions=%d skips=%d reason=%q", state, result.CommittedEvents, result.ObservedUniqueEvents, result.DuplicateRecords, result.OrderingRegressions, result.OrderingSkips, reason)
 	if code != 0 {

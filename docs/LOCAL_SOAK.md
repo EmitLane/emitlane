@@ -109,7 +109,13 @@ to the latest run. The directory contains:
 - `config.json` and `metadata.json`;
 - `state.json` and periodically refreshed `progress.json`;
 - `soak.log` and `pid`;
-- `result.json`, `report.md`, and `exit_code` at termination.
+- `result.json`, `report.md`, `timeline.svg`, and `exit_code` at termination.
+
+`timeline.svg` plots committed and observed events, the temporary delivery
+backlog, recovery, and fault markers (`K` Kafka outage, `C` Relay crash, `R`
+graceful restart, `P` pause, and `M` membership change). It is generated
+locally and embedded in `report.md`; no chart service or browser session is
+required.
 
 Detailed diagnostics are bounded to the first 100 failures. Reports do not
 contain payloads or unbounded event-ID lists. `.emitlane/` is ignored by Git.

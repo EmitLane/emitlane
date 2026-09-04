@@ -132,10 +132,30 @@ func TestReportGenerationDeterministic(t *testing.T) {
 	if a != b {
 		t.Fatal("report is not deterministic")
 	}
-	for _, want := range []string{"**Result: PASS**", "Committed events | 2", "At-least-once duplicates | 1", "PASS: all committed event IDs"} {
+	for _, want := range []string{"**Result: PASS**", "timeline.svg", "Committed events | 2", "At-least-once duplicates | 1", "PASS: all committed event IDs"} {
 		if !strings.Contains(a, want) {
 			t.Fatalf("missing %q in report", want)
 		}
+	}
+}
+
+func TestTimelineSVG(t *testing.T) {
+	points := []timelinePoint{
+		{Elapsed: 0, Phase: "warmup"},
+		{Elapsed: 5 * time.Second, Phase: "running", Committed: 100, Observed: 80, Backlog: 20, KafkaOutages: 1},
+		{Elapsed: 10 * time.Second, Phase: "recovering", Committed: 100, Observed: 100},
+	}
+	a, b := timelineSVG("run<&>", points), timelineSVG("run<&>", points)
+	if a != b {
+		t.Fatal("timeline is not deterministic")
+	}
+	for _, want := range []string{"<svg", "Committed", "Observed", "Backlog", ">K</text>", "run&lt;&amp;&gt;"} {
+		if !strings.Contains(a, want) {
+			t.Fatalf("timeline missing %q", want)
+		}
+	}
+	if strings.Contains(a, "NaN") {
+		t.Fatal("timeline contains NaN")
 	}
 }
 
