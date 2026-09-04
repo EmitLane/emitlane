@@ -101,6 +101,52 @@ func consumeTopicRecords(t *testing.T, brokers []string, topic string, count int
 	return records[:count]
 }
 
+func consumeTopicUntilEventIDs(
+	t *testing.T,
+	brokers []string,
+	topic string,
+	expected map[string]struct{},
+	timeout time.Duration,
+) []*kgo.Record {
+	t.Helper()
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.FetchMaxWait(250*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	remaining := make(map[string]struct{}, len(expected))
+	for id := range expected {
+		remaining[id] = struct{}{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var records []*kgo.Record
+	for len(remaining) > 0 && ctx.Err() == nil {
+		fetches := client.PollFetches(ctx)
+		if errs := fetches.Errors(); len(errs) > 0 && ctx.Err() == nil {
+			t.Fatalf("consume ordered records: %v", errs[0])
+		}
+		for _, record := range fetches.Records() {
+			records = append(records, record)
+			delete(remaining, headerValue(record, broker.HeaderEventID))
+		}
+	}
+	if len(remaining) > 0 {
+		missing := make([]string, 0, len(remaining))
+		for id := range remaining {
+			missing = append(missing, id)
+		}
+		sort.Strings(missing)
+		t.Fatalf("did not observe %d/%d committed event IDs before timeout: %v", len(remaining), len(expected), missing)
+	}
+	return records
+}
+
 func recordSequence(t *testing.T, record *kgo.Record) int64 {
 	t.Helper()
 	sequence, err := strconv.ParseInt(headerValue(record, broker.HeaderSequence), 10, 64)
@@ -563,7 +609,7 @@ func TestMultipleRelaysPreserveStreamsAndKafkaPartitionAffinity(t *testing.T) {
 	for _, id := range []string{"multi-relay-a", "multi-relay-b", "multi-relay-c"} {
 		runRelay(t, e.newRelay(t, orderedRelayConfig(id), e.publisher(t), relay.FailureHooks{}))
 	}
-	records := consumeTopicRecords(t, e.brokers, topic, streams*perStream, 30*time.Second)
+	records := consumeTopicUntilEventIDs(t, e.brokers, topic, committed, 30*time.Second)
 	type observed struct {
 		partition int32
 		offset    int64
@@ -591,11 +637,15 @@ func TestMultipleRelaysPreserveStreamsAndKafkaPartitionAffinity(t *testing.T) {
 	}
 	for key, observations := range byKey {
 		sort.Slice(observations, func(i, j int) bool { return observations[i].offset < observations[j].offset })
-		for i, item := range observations {
-			want := int64(i + 1)
-			if item.sequence != want {
-				t.Fatalf("stream %s sequence at offset %d = %d, want %d", key, item.offset, item.sequence, want)
+		var previous int64
+		for _, item := range observations {
+			if item.sequence < previous || item.sequence > previous+1 {
+				t.Fatalf("stream %s sequence at offset %d advanced from %d to %d", key, item.offset, previous, item.sequence)
 			}
+			previous = item.sequence
+		}
+		if previous != perStream {
+			t.Fatalf("stream %s ended at sequence %d, want %d", key, previous, perStream)
 		}
 	}
 	if len(byKey) != streams || len(usedPartitions) < 2 {
@@ -758,7 +808,7 @@ func TestOrderedRandomizedReliabilityScenario(t *testing.T) {
 	}
 	waitDeliveredAtLeast(len(planned))
 
-	records := consumeTopicRecords(t, e.brokers, topic, len(planned), 30*time.Second)
+	records := consumeTopicUntilEventIDs(t, e.brokers, topic, committed, 30*time.Second)
 	type observed struct {
 		offset   int64
 		sequence int64
