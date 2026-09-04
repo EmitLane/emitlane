@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/moby/moby/api/types/container"
 	containernetwork "github.com/moby/moby/api/types/network"
+	mobyclient "github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -150,23 +151,61 @@ func (e *soakEnvironment) close(ctx context.Context) {
 }
 
 func (e *soakEnvironment) kafkaOutage(ctx context.Context, duration time.Duration) error {
-	timeout := 10 * time.Second
-	if err := e.kafka.Stop(ctx, &timeout); err != nil {
+	if err := e.setKafkaPaused(ctx, true); err != nil {
 		return err
 	}
 	timer := time.NewTimer(duration)
 	select {
 	case <-ctx.Done():
 		timer.Stop()
-		restartCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = e.kafka.Start(restartCtx)
+		_ = e.setKafkaPaused(resumeCtx, false)
 		return ctx.Err()
 	case <-timer.C:
 	}
-	if err := e.kafka.Start(ctx); err != nil {
+	if err := e.setKafkaPaused(ctx, false); err != nil {
 		return err
 	}
+	return e.pingKafka(ctx)
+}
+
+func (e *soakEnvironment) restoreKafka(ctx context.Context) error {
+	state, err := e.kafka.State(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect Kafka container: %w", err)
+	}
+	if state.Paused {
+		if err := e.setKafkaPaused(ctx, false); err != nil {
+			return err
+		}
+	} else if !state.Running {
+		if err := e.kafka.Start(ctx); err != nil {
+			return fmt.Errorf("start Kafka container: %w", err)
+		}
+	}
+	return e.pingKafka(ctx)
+}
+
+func (e *soakEnvironment) setKafkaPaused(ctx context.Context, paused bool) error {
+	client, err := mobyclient.New(mobyclient.FromEnv)
+	if err != nil {
+		return fmt.Errorf("create Docker client: %w", err)
+	}
+	defer client.Close()
+	if paused {
+		if _, err := client.ContainerPause(ctx, e.kafka.GetContainerID(), mobyclient.ContainerPauseOptions{}); err != nil {
+			return fmt.Errorf("pause Kafka container: %w", err)
+		}
+		return nil
+	}
+	if _, err := client.ContainerUnpause(ctx, e.kafka.GetContainerID(), mobyclient.ContainerUnpauseOptions{}); err != nil {
+		return fmt.Errorf("unpause Kafka container: %w", err)
+	}
+	return nil
+}
+
+func (e *soakEnvironment) pingKafka(ctx context.Context) error {
 	client, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
 	if err != nil {
 		return err

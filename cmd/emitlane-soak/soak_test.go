@@ -87,8 +87,8 @@ func TestVerifierAllowsAdjacentDuplicatesAndDetectsRegression(t *testing.T) {
 		v.committed(id, expectedEvent{ordered: true, stream: "topic/order:1", sequence: int64(i + 1), committedAt: now})
 	}
 	v.observe(record("topic", ids[0].String(), "order:1", 1), now)
-	v.observe(record("topic", ids[0].String(), "order:1", 1), now)
 	v.observe(record("topic", ids[1].String(), "order:1", 2), now)
+	v.observe(record("topic", ids[0].String(), "order:1", 1), now)
 	snap := v.snapshot()
 	if snap.duplicates != 1 || snap.regressions != 0 || snap.lost != 2 {
 		t.Fatalf("unexpected snapshot: %+v", snap)
@@ -96,6 +96,32 @@ func TestVerifierAllowsAdjacentDuplicatesAndDetectsRegression(t *testing.T) {
 	v.observe(record("topic", ids[2].String(), "order:1", 1), now)
 	if got := v.snapshot().regressions; got != 1 {
 		t.Fatalf("regressions=%d", got)
+	}
+}
+
+func TestVerifierAdoptsIndependentKafkaAudit(t *testing.T) {
+	v := newVerifier()
+	now := time.Now()
+	first, second := uuid.New(), uuid.New()
+	v.committed(first, expectedEvent{ordered: true, stream: "topic/stream", sequence: 1, committedAt: now})
+	v.committed(second, expectedEvent{ordered: true, stream: "topic/stream", sequence: 2, committedAt: now})
+
+	// The long-lived observer missed sequence 1 across a broker restart.
+	v.observe(record("topic", second.String(), "stream", 2), now)
+	if live := v.snapshot(); live.lost != 1 || live.skips != 1 {
+		t.Fatalf("live snapshot=%+v", live)
+	}
+
+	audit := v.auditClone()
+	audit.observeForAudit(record("topic", first.String(), "stream", 1))
+	audit.observeForAudit(record("topic", second.String(), "stream", 2))
+	// A late at-least-once duplicate must not look like an ordering regression.
+	audit.observeForAudit(record("topic", first.String(), "stream", 1))
+	v.adoptAudit(audit)
+
+	final := v.finalSnapshot()
+	if final.lost != 0 || final.skips != 0 || final.regressions != 0 || final.duplicates != 1 {
+		t.Fatalf("audited snapshot=%+v", final)
 	}
 }
 

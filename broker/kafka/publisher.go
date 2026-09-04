@@ -40,8 +40,10 @@ func (c Config) Validate() error {
 // Publisher publishes records with franz-go and waits for produce results.
 //
 // EmitLane owns retry/backoff. The client is configured with required acks=all,
-// idempotent producing, and no additional record retries so a failed ProduceSync
-// becomes one EmitLane attempt.
+// idempotent producing, and no additional record retries so a definite failed
+// ProduceSync becomes one EmitLane attempt. In-flight idempotent requests are
+// not cancelled: franz-go must resolve their broker outcome before the caller
+// can safely retry without opening a producer-sequence gap.
 type Publisher struct {
 	client *kgo.Client
 }
@@ -66,7 +68,6 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		kgo.RecordRetries(0),
 		kgo.RecordDeliveryTimeout(cfg.PublishTimeout),
 		kgo.ProduceRequestTimeout(cfg.PublishTimeout),
-		kgo.AllowIdempotentProduceCancellation(),
 		kgo.ProducerLinger(0),
 		kgo.UnknownTopicRetries(0),
 	}
