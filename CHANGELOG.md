@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/EmitLane/emitlane/compare/v0.3.0...v0.3.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **kafka:** prevent record loss during broker outages ([#13](https://github.com/EmitLane/emitlane/issues/13)) ([838020a](https://github.com/EmitLane/emitlane/commit/838020a532db8aba8803948abb5bb22e767a28d6))
+
 ## [0.3.0](https://github.com/EmitLane/emitlane/compare/v0.2.0...v0.3.0) (2026-09-04)
 
 
