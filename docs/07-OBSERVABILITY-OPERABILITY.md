@@ -37,6 +37,9 @@ emitlane_ordering_partition_acquisitions_total
 emitlane_ordering_partition_rebalances_total
 emitlane_ordering_delivery_wait_seconds
 emitlane_ordering_gap_age_seconds
+emitlane_ordering_fenced_attempts_total{operation}
+emitlane_integrity_checks_total{mode,result}
+emitlane_integrity_check_duration_seconds{mode}
 ```
 
 The failure counter has one bounded `result` label (`retryable` or
@@ -127,6 +130,8 @@ emitlane doctor
 emitlane ordering streams --blocked
 emitlane ordering inspect --destination orders.events --key order:123
 emitlane ordering partitions
+emitlane integrity check [--full] [--json] [--strict]
+emitlane integrity stream --destination orders.events --key order:123
 ```
 
 Status, redacted event inspection, audited replay, ordering inspection, and the
@@ -174,6 +179,7 @@ GET /readyz
 GET /v1/ordering/streams
 GET /v1/ordering/stream
 GET /v1/ordering/partitions
+GET /v1/integrity
 ```
 
 Mutating operator actions are audit logged in the same transaction as their

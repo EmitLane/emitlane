@@ -124,3 +124,88 @@ CLI exit status is stable:
 
 Warnings keep the default exit status at zero. With `--strict`, one or more
 warnings produce status 2.
+
+## Operator commands
+
+Set `EMITLANE_DATABASE_URL` to a role with `SELECT` on the EmitLane schema. No
+write privilege, Kafka connection, or superuser access is required.
+
+```bash
+# Fast, bounded production check.
+emitlane integrity check
+
+# Machine-readable check suitable for automation.
+emitlane integrity check --json --timeout 20s --max-findings 50
+
+# Complete scan of retained active ordering state.
+emitlane integrity check --full --json --timeout 2m
+
+# One stream, including its cursor, retained relevant events and partition state.
+emitlane integrity stream \
+  --destination orders.events --key order:123 --json
+```
+
+`--max-findings` bounds detailed findings, not the summary counters. Its allowed
+range is 1–1000 and its default is 100. The CLI overall timeout also becomes the
+PostgreSQL statement timeout. Prefer summary mode for frequent automation. Run
+full mode during incidents, before release, and off peak on large databases.
+
+The authenticated Admin API exposes `GET /v1/integrity` and
+`GET /v1/integrity?mode=summary`. It fixes a five-second statement timeout and
+returns at most 50 findings. `mode=full` is rejected: an HTTP request must not
+start an unexpectedly expensive scan. The integrity endpoint is diagnostic and
+is not part of `/healthz` or `/readyz`; warnings and durable corruption must not
+cause orchestrators to restart a healthy Relay loop.
+
+## Fencing diagnostics
+
+An epoch or ownership check can legitimately reject stale work during graceful
+handoff, crash takeover, or lease expiry. Relay reports this typed `ErrFenced`
+outcome at debug level with the event ID, Relay instance, claimed epoch,
+partition, and operation (`begin_attempt`, `retry`, `dead`, or `delivered`). It
+does not log payload, key, or headers, and it does not count the outcome as an
+ordinary SQL failure.
+
+Use these bounded metrics to correlate integrity reports with runtime behavior:
+
+```text
+emitlane_ordering_fenced_attempts_total{operation}
+emitlane_integrity_checks_total{mode,result}
+emitlane_integrity_check_duration_seconds{mode}
+```
+
+Expected fencing by itself is not corruption. Repeated fencing with overdue
+handoffs, stale owners, or a backlog that does not recover warrants inspection
+of Relay membership and partition ownership.
+
+## Incident examples
+
+### A stream stops advancing
+
+Run `integrity stream` for the exact destination and ordering key. A `gap`
+warning means the domain producer has not committed the expected sequence;
+create that missing event rather than advancing the cursor. `dead_blocked` means
+repair and retry the same event identity. `retry_wait` is normally automatic.
+
+### A stale owner or lease appears
+
+Compare the reported owner, epoch, `lease_until`, and `handoff_not_before` with
+`emitlane ordering partitions`. An expired event lease is recoverable and is a
+warning. Allow another Relay to reclaim it. If recovery does not happen after
+the configured lease and handoff windows, inspect Relay presence and database
+connectivity.
+
+### A violation is reported
+
+Capture the JSON report and stop manual state mutations. Re-run a targeted
+stream check where possible, verify the binary and schema versions, and inspect
+recent operator audit records. Violations describe durable state that normal
+protocol transitions should not produce. The verifier intentionally performs
+no repair; recovery is an explicit operator decision after root-cause analysis.
+
+### Kafka delivery is disputed
+
+Integrity verification cannot establish whether Kafka retained or a consumer
+processed a record. Use broker and consumer evidence. A duplicate after broker
+ACK and before PostgreSQL acknowledgement is permitted by the at-least-once
+contract and should be absorbed by Inbox or downstream idempotency.

@@ -20,6 +20,21 @@ emitlane ordering partitions
 `retry_wait` means the expected event is delayed. `dead_blocked` means the
 expected event is dead. v0.3 intentionally has no skip or force-advance command.
 
+Check durable protocol invariants without changing state:
+
+```bash
+emitlane integrity check
+emitlane integrity check --full --json --timeout 2m
+emitlane integrity stream --destination orders.events --key order:123
+```
+
+Summary mode is appropriate for frequent production diagnostics. Full mode scans
+all retained active ordering state in one read-only repeatable-read snapshot;
+run it off peak with a deliberate timeout. Exit 0 means no violations, exit 1
+means the check could not complete, and exit 2 means a violation. Warnings are
+exit 0 unless `--strict` is set. A bounded findings list never makes summary
+counts partial. See [integrity verification](INTEGRITY.md).
+
 Event list and inspection hide payload and headers by default:
 
 ```bash
@@ -93,3 +108,10 @@ request ID, time, and safe counts—never payload or credentials.
   into the historical stream.
 - Stale Relay or ownership handoff: allow lease expiry plus the displayed
   `handoff_not_before` barrier; recovery is automatic.
+- Integrity violation: capture JSON evidence, avoid ad-hoc SQL repair, and use a
+  targeted stream check plus audit history to isolate the invariant and cause.
+- Integrity warning: inspect the named stream/partition, but do not treat a gap,
+  retry wait, stale lease, or expected fencing race as automatic corruption.
+
+`GET /v1/integrity` is an authenticated, bounded summary check. It is not a
+liveness or readiness endpoint and intentionally does not accept full mode.

@@ -24,6 +24,9 @@ same request ID.
 ## Endpoints
 
 - `GET /v1/stats`: durable queue, relay, ordered stream, and partition counts.
+- `GET /v1/integrity`: bounded read-only integrity summary. The optional `mode`
+  query parameter accepts only `summary`; full and targeted checks remain CLI
+  operations.
 - `GET /v1/events`: redacted, keyset-paginated event list.
 - `GET /v1/events/{id}`: redacted event inspection.
 - `GET /v1/relays`: active, stale, and stopped relay instances.
@@ -87,3 +90,8 @@ Ordered event inspection adds key, sequence, and virtual partition metadata but
 still hides payload. Replay of an ordered source returns `409` unless the body
 contains `"ordering_mode":"unordered"`; the resulting clone is deliberately
 outside the historical stream.
+
+Integrity findings never contain event payloads, raw headers, ordering keys,
+credentials, or tokens. The endpoint uses a five-second statement timeout and a
+50-finding detail cap while keeping report summary counts complete. It is not a
+health endpoint and does not change `/healthz` or `/readyz` semantics.

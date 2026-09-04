@@ -238,3 +238,23 @@ The benchmark harness adds `ordered-many-streams`, `ordered-hot-stream`, and
 virtual-partition distribution, and PostgreSQL transaction count. Compare
 unordered regression output with a v0.2.0 run under identical environment
 metadata; the harness does not invent a baseline or performance claim.
+
+## v0.4 integrity coverage
+
+The PostgreSQL integration suite verifies clean summary/full reports, delivered
+retention, deliberate gaps and wrong partitions, cursors behind active events,
+dead/retry/stale-lease warnings, lease recovery, missing partition seeds,
+invalid cursor and lease shapes, statement timeouts, and operation with a
+`SELECT`-only role. A live concurrency scenario repeatedly verifies the database
+while several Relays process ordered work, retry, and rebalance; normal snapshot
+interleavings must not create violations.
+
+The scale scenario seeds 10,000 streams and 100,000 retained active events and
+runs a full verifier scan while recording duration and allocation diagnostics.
+It is a bounded-memory regression test, not a portable throughput claim; do not
+turn workstation timing into a release threshold without a controlled benchmark
+environment.
+
+Kafka/Relay regression coverage preserves actual broker stop/start and ambiguous
+publish outcomes. Expected stale epoch/ownership transitions must return
+`relay.ErrFenced`; injected SQL failures must remain errors.

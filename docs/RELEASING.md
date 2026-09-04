@@ -20,6 +20,22 @@ Docker images are built by GoReleaser into `ghcr.io/emitlane/emitlane` when a
 release runs. The release workflow needs `packages: write` for GHCR. Public
 image visibility should be confirmed in package settings after the first publish.
 
+For v0.4.0, publication additionally requires a clean release-profile soak from
+one exact Git commit for at least one hour against real PostgreSQL and Kafka. It
+must exercise ordered and unordered load, graceful Relay restarts, crash
+takeovers, Kafka pause plus an actual broker stop/restart, cluster pause/resume,
+and membership changes. After queue quiescence, the runner performs an
+independent Kafka audit and then a full integrity check before infrastructure is
+destroyed.
+
+The release evidence must report zero lost committed events, ordering
+regressions, unexpected sequence skips, final pending/inflight/dead events,
+blocked/gap streams, infrastructure errors, and integrity violations.
+At-least-once duplicates are allowed and must not be described as an
+exactly-once result. Integrity warnings are recorded for operator review but do
+not by themselves fail the default soak verdict. Do not publish if the Git tree
+was dirty or the recorded commit and configuration cannot be reproduced.
+
 ## Normal release flow
 
 1. Merge focused pull requests to `main`. Their squash titles must use
