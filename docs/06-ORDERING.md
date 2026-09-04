@@ -32,6 +32,12 @@ epoch, lease, and sequence. A bounded publish window plus a persisted handoff
 barrier prevents a replacement owner from publishing until an old owner's
 network-send window has elapsed.
 
+The Kafka client uses `acks=all`, disables producer idempotence, and performs no
+client record retries. This lets the Relay deadline cancel an unresolved
+request within the bounded handoff window. Kafka may already have accepted a
+request whose acknowledgement was lost, so PostgreSQL retry can still create
+the documented at-least-once duplicate.
+
 The guarantee remains at least once. A crash after Kafka ACK but before the
 atomic delivered/stream-advance transaction can produce duplicate N. EmitLane
 keeps N+1 blocked, so valid output can be `N, N, N+1`, but not `N, N+1, N` under
