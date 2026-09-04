@@ -95,9 +95,3 @@ func (r *Relay) releaseOrderingPartitions(store OrderingPartitionStore) {
 		)
 	}
 }
-
-func (r *Relay) currentOrderingPartitions() []OrderingPartition {
-	r.orderingMu.RLock()
-	defer r.orderingMu.RUnlock()
-	return append([]OrderingPartition(nil), r.orderingPartitions...)
-}
