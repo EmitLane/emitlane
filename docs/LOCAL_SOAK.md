@@ -94,12 +94,21 @@ Runs move through `initializing`, `warmup`, `running`, `recovering`, `verifying`
 then `completed`, `failed`, or `aborted`. During the running phase, the seeded
 schedule injects graceful Relay restarts, crash-like Relay termination and lease
 takeover, Kafka outages, cluster pause/resume, and Relay membership changes.
+Kafka outages pause and unpause the test broker process without restarting it
+or replacing its storage. This exercises temporary broker unavailability while
+keeping the test scoped to EmitLane recovery rather than the durability limits
+of a single-replica Kafka cluster.
 
 When the configured duration ends, the runner stops producing and injecting
 faults. It restores Kafka, resumes EmitLane, restores the requested Relay count,
-and waits for the database backlog, ordered streams, and committed-ID verifier
-to quiesce. Recovery defaults are 3 minutes for quick, 5 minutes for standard,
-and 10 minutes for release. Only then are missing committed events called lost.
+and waits for the database backlog and ordered streams to quiesce. Recovery
+defaults are 3 minutes for quick, 5 minutes for standard, and 10 minutes for
+release. It then stops all producers and performs an independent Kafka audit
+from offset zero through a captured end offset for every test partition. The
+audit prevents a long-lived observer's offset recovery across broker restarts
+from creating false losses, while still failing if an acknowledged event is
+actually absent from Kafka. Only after this audit are missing committed events
+called lost.
 
 At-least-once duplicates are expected and reported but do not fail a run.
 Correctness fails when any committed event is lost, an ordered stream regresses

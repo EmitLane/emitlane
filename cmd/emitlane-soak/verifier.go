@@ -62,6 +62,14 @@ func header(record *kgo.Record, key string) string {
 }
 
 func (v *verifier) observe(record *kgo.Record, now time.Time) {
+	v.observeRecord(record, now, true)
+}
+
+func (v *verifier) observeForAudit(record *kgo.Record) {
+	v.observeRecord(record, time.Time{}, false)
+}
+
+func (v *verifier) observeRecord(record *kgo.Record, now time.Time, recordLatency bool) {
 	id, err := uuid.Parse(header(record, broker.HeaderEventID))
 	if err != nil {
 		v.mu.Lock()
@@ -74,8 +82,11 @@ func (v *verifier) observe(record *kgo.Record, now time.Time) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.brokerRecords++
-	if _, duplicate := v.observed[id]; !duplicate {
-		v.observed[id] = now
+	if _, duplicate := v.observed[id]; duplicate {
+		return
+	}
+	v.observed[id] = now
+	if recordLatency {
 		if meta, ok := v.expected[id]; ok {
 			v.latencies = append(v.latencies, float64(now.Sub(meta.committedAt).Microseconds())/1000)
 		}
@@ -102,6 +113,35 @@ func (v *verifier) observe(record *kgo.Record, now time.Time) {
 	if sequence > previous {
 		v.lastSequence[stream] = sequence
 	}
+}
+
+// auditClone shares the now-immutable expected set after production stops, but
+// rebuilds all broker observations from an independent offset-zero scan.
+func (v *verifier) auditClone() *verifier {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return &verifier{
+		expected:           v.expected,
+		observed:           make(map[uuid.UUID]time.Time),
+		lastSequence:       make(map[string]int64),
+		latencies:          append([]float64(nil), v.latencies...),
+		orderedCommitted:   v.orderedCommitted,
+		unorderedCommitted: v.unorderedCommitted,
+	}
+}
+
+func (v *verifier) adoptAudit(audit *verifier) {
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.observed = audit.observed
+	v.lastSequence = audit.lastSequence
+	v.brokerRecords = audit.brokerRecords
+	v.regressions = audit.regressions
+	v.skips = audit.skips
+	v.errors = audit.errors
+	v.diagnostics = audit.diagnostics
 }
 
 func (v *verifier) addDiagnostic(d Diagnostic) {

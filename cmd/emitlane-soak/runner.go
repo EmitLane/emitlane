@@ -119,7 +119,14 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 	consumerCtx, stopConsumer := context.WithCancel(context.Background())
 	consumerDone := make(chan struct{})
 	go r.consume(consumerCtx, consumer, consumerDone)
-	defer func() { stopConsumer(); <-consumerDone }()
+	var stopConsumerOnce sync.Once
+	stopVerifierConsumer := func() {
+		stopConsumerOnce.Do(func() {
+			stopConsumer()
+			<-consumerDone
+		})
+	}
+	defer stopVerifierConsumer()
 
 	r.setPhase("warmup")
 	if !waitContext(ctx, cfg.Warmup) {
@@ -159,6 +166,26 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 	}
 
 	r.setPhase("verifying")
+	r.relays.stopAll()
+	stopVerifierConsumer()
+	auditCtx, cancelAudit := context.WithTimeout(ctx, finalAuditTimeout)
+	audit, auditErr := auditKafka(auditCtx, r.env.brokers, []string{r.orderedTopic, r.unorderedTopic}, r.verifier)
+	cancelAudit()
+	if ctx.Err() != nil {
+		return r.finish(base, "aborted", errors.New("stopped by operator during final Kafka audit"), 130)
+	}
+	if auditErr != nil {
+		r.faults.infrastructure.Add(1)
+		auditErr = fmt.Errorf("final Kafka audit: %w", auditErr)
+		log.Printf("%v", auditErr)
+		recoveryErr = errors.Join(recoveryErr, auditErr)
+	} else {
+		auditSnapshot := audit.snapshot()
+		log.Printf("final Kafka audit completed records=%d observed=%d lost=%d regressions=%d skips=%d",
+			auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
+			auditSnapshot.regressions, auditSnapshot.skips)
+		r.verifier.adoptAudit(audit)
+	}
 	return r.finish(base, "completed", recoveryErr, 0)
 }
 
@@ -462,11 +489,9 @@ func (r *soakRuntime) setPaused(ctx context.Context, paused bool) error {
 func (r *soakRuntime) recover(ctx context.Context) error {
 	recoveryCtx, cancel := context.WithTimeout(ctx, r.cfg.RecoveryTimeout)
 	defer cancel()
-	if running := r.env.kafka.IsRunning(); !running {
-		if err := r.env.kafka.Start(recoveryCtx); err != nil {
-			r.faults.infrastructure.Add(1)
-			return fmt.Errorf("restart Kafka: %w", err)
-		}
+	if err := r.env.restoreKafka(recoveryCtx); err != nil {
+		r.faults.infrastructure.Add(1)
+		return fmt.Errorf("restore Kafka: %w", err)
 	}
 	if err := r.setPaused(recoveryCtx, false); err != nil {
 		r.faults.infrastructure.Add(1)
@@ -490,9 +515,8 @@ func (r *soakRuntime) recover(ctx context.Context) error {
 	for {
 		pending, inflight, dead, blocked, gaps, err := queueState(recoveryCtx, r.env.pool)
 		if err == nil {
-			snap := r.verifier.snapshot()
-			last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d not_observed=%d", pending, inflight, dead, blocked, gaps, snap.lost)
-			if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 && snap.lost == 0 {
+			last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d", pending, inflight, dead, blocked, gaps)
+			if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 {
 				return nil
 			}
 		}
