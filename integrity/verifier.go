@@ -179,8 +179,11 @@ WHERE table_schema='emitlane'`)
 	}
 
 	constraints, err := stringSet(ctx, tx, `
-SELECT constraint_name FROM information_schema.table_constraints
-WHERE table_schema='emitlane'`)
+SELECT constraint_record.conname
+FROM pg_catalog.pg_constraint AS constraint_record
+JOIN pg_catalog.pg_class AS relation ON relation.oid=constraint_record.conrelid
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid=relation.relnamespace
+WHERE namespace.nspname='emitlane'`)
 	if err != nil {
 		return false, fmt.Errorf("integrity: inspect schema constraints: %w", err)
 	}
