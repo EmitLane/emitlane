@@ -8,25 +8,35 @@ const namespace = "emitlane"
 
 // Metrics holds Prometheus instruments. A nil Metrics is safe to call.
 type Metrics struct {
-	enqueued         prometheus.Counter
-	delivered        prometheus.Counter
-	failed           *prometheus.CounterVec
-	retried          prometheus.Counter
-	dead             prometheus.Counter
-	pending          prometheus.Gauge
-	inflight         prometheus.Gauge
-	deadGauge        prometheus.Gauge
-	deliveryDuration prometheus.Histogram
-	publishDuration  prometheus.Histogram
-	oldestPending    prometheus.Gauge
-	relayPaused      prometheus.Gauge
-	relaysActive     prometheus.Gauge
-	relaysStale      prometheus.Gauge
-	replayBatches    prometheus.Counter
-	replayedEvents   prometheus.Counter
-	adminMutations   *prometheus.CounterVec
-	controlFailures  prometheus.Counter
-	presenceFailures *prometheus.CounterVec
+	enqueued             prometheus.Counter
+	delivered            prometheus.Counter
+	failed               *prometheus.CounterVec
+	retried              prometheus.Counter
+	dead                 prometheus.Counter
+	pending              prometheus.Gauge
+	inflight             prometheus.Gauge
+	deadGauge            prometheus.Gauge
+	deliveryDuration     prometheus.Histogram
+	publishDuration      prometheus.Histogram
+	oldestPending        prometheus.Gauge
+	relayPaused          prometheus.Gauge
+	relaysActive         prometheus.Gauge
+	relaysStale          prometheus.Gauge
+	replayBatches        prometheus.Counter
+	replayedEvents       prometheus.Counter
+	adminMutations       *prometheus.CounterVec
+	controlFailures      prometheus.Counter
+	presenceFailures     *prometheus.CounterVec
+	orderingStreams      prometheus.Gauge
+	orderingBlocked      prometheus.Gauge
+	orderingGaps         prometheus.Gauge
+	orderingDeadBlocked  prometheus.Gauge
+	orderingOwned        prometheus.Gauge
+	orderingHandoff      prometheus.Gauge
+	orderingAcquisitions prometheus.Counter
+	orderingRebalances   prometheus.Counter
+	orderingDeliveryWait prometheus.Histogram
+	orderingGapAge       prometheus.Gauge
 }
 
 // NewMetrics registers instruments with reg. The only label is the bounded
@@ -133,6 +143,16 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Name:      "relay_presence_failures_total",
 			Help:      "Best-effort relay presence failures by operation.",
 		}, []string{"operation"}),
+		orderingStreams:      prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_streams", Help: "Durable ordered streams."}),
+		orderingBlocked:      prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_streams_blocked", Help: "Ordered streams blocked by retry wait, gap, or dead event."}),
+		orderingGaps:         prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_streams_gap", Help: "Ordered streams whose expected sequence is missing while a future sequence exists."}),
+		orderingDeadBlocked:  prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_streams_dead_blocked", Help: "Ordered streams blocked by a dead expected event."}),
+		orderingOwned:        prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_partitions_owned", Help: "Virtual ordering partitions with a valid owner outside handoff."}),
+		orderingHandoff:      prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_partitions_handoff", Help: "Virtual ordering partitions waiting for the stale-publish handoff barrier."}),
+		orderingAcquisitions: prometheus.NewCounter(prometheus.CounterOpts{Namespace: namespace, Name: "ordering_partition_acquisitions_total", Help: "Virtual ordering partitions newly observed as owned by this Relay."}),
+		orderingRebalances:   prometheus.NewCounter(prometheus.CounterOpts{Namespace: namespace, Name: "ordering_partition_rebalances_total", Help: "Desired ownership maps changed after Relay membership changes."}),
+		orderingDeliveryWait: prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: namespace, Name: "ordering_delivery_wait_seconds", Help: "Wait from ordered event availability to broker publish start.", Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}}),
+		orderingGapAge:       prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_gap_age_seconds", Help: "Age of the oldest currently observed ordered gap."}),
 	}
 	// CounterVec collectors are otherwise absent from exposition until their
 	// first observation. Initialize the complete, bounded label set so operators
@@ -166,6 +186,16 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.adminMutations,
 		m.controlFailures,
 		m.presenceFailures,
+		m.orderingStreams,
+		m.orderingBlocked,
+		m.orderingGaps,
+		m.orderingDeadBlocked,
+		m.orderingOwned,
+		m.orderingHandoff,
+		m.orderingAcquisitions,
+		m.orderingRebalances,
+		m.orderingDeliveryWait,
+		m.orderingGapAge,
 	}
 	registered := make([]prometheus.Collector, 0, len(collectors))
 	for _, c := range collectors {
@@ -317,4 +347,38 @@ func (m *Metrics) IncPresenceFailure(operation string) {
 		return
 	}
 	m.presenceFailures.WithLabelValues(operation).Inc()
+}
+
+func (m *Metrics) SetOrderingState(streams, blocked, gaps, deadBlocked, owned, handoff, gapAge float64) {
+	if m == nil {
+		return
+	}
+	m.orderingStreams.Set(max(0, streams))
+	m.orderingBlocked.Set(max(0, blocked))
+	m.orderingGaps.Set(max(0, gaps))
+	m.orderingDeadBlocked.Set(max(0, deadBlocked))
+	m.orderingOwned.Set(max(0, owned))
+	m.orderingHandoff.Set(max(0, handoff))
+	m.orderingGapAge.Set(max(0, gapAge))
+}
+
+func (m *Metrics) AddOrderingAcquisitions(count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.orderingAcquisitions.Add(float64(count))
+}
+
+func (m *Metrics) IncOrderingRebalance() {
+	if m == nil {
+		return
+	}
+	m.orderingRebalances.Inc()
+}
+
+func (m *Metrics) ObserveOrderingDeliveryWait(seconds float64) {
+	if m == nil {
+		return
+	}
+	m.orderingDeliveryWait.Observe(max(0, seconds))
 }

@@ -221,3 +221,20 @@ The integration suite additionally verifies v1→v2 data preservation, atomic
 pause gating, in-flight completion, presence classification, redaction, keyset
 pagination, audited retry, replay provenance/system headers, and atomic rejection
 of replay selections above the 1000-event cap.
+
+## v0.3 ordered reliability coverage
+
+The real PostgreSQL/Kafka suite covers transaction commit inversion, durable
+future sequences, concurrent duplicate rejection, independent streams,
+retry/dead blocking, the ordered ACK crash window, ownership races, multi-Relay
+delivery, graceful rebalance, crash takeover and handoff, stale epoch rejection,
+gap inspection, explicit stream start, ordered replay, retention, pause/lease
+renewal, and actual Kafka partition affinity. A seeded randomized scenario mixes
+commit order, transient publish failures, Relay membership changes, and
+pause/resume while asserting no committed IDs are lost and no stream regresses.
+
+The benchmark harness adds `ordered-many-streams`, `ordered-hot-stream`, and
+`unordered-regression`. Ordered results include throughput, latency percentiles,
+virtual-partition distribution, and PostgreSQL transaction count. Compare
+unordered regression output with a v0.2.0 run under identical environment
+metadata; the harness does not invent a baseline or performance claim.

@@ -30,8 +30,14 @@ curl -sS -X POST http://localhost:8081/orders \
   -d '{"amount": 42}'
 ```
 
-The relay publishes `order.created` to `orders.events`. The example consumer uses
-Inbox and writes a payment row. Check:
+The relay publishes ordered `order.created` sequence 1 to `orders.events`. Mark
+the order paid to publish sequence 2 for the same stream:
+
+```bash
+curl -sS -X POST http://localhost:8081/orders/<order-id>/paid
+```
+
+The example consumer uses Inbox and writes a payment row. Check:
 
 ```bash
 # liveness / metrics on the relay
@@ -80,8 +86,9 @@ if err != nil {
 _, err = outbox.NewWriter().Enqueue(ctx, tx, outbox.Event{
     Destination: "orders.events",
     Type:        "order.created",
-    Key:         []byte(order.ID),
     Payload:     payload,
+    OrderingKey: "order:" + order.ID,
+    Sequence:    order.Version,
 })
 if err != nil {
     return err
@@ -101,8 +108,12 @@ Do not use a superuser at runtime. Suggested grants (adjust role names):
 GRANT USAGE ON SCHEMA emitlane TO emitlane_writer, emitlane_relay, emitlane_consumer;
 
 GRANT INSERT ON TABLE emitlane.outbox_events TO emitlane_writer;
+GRANT SELECT, INSERT, UPDATE ON TABLE emitlane.ordering_streams TO emitlane_writer;
 
 GRANT SELECT, UPDATE ON TABLE emitlane.outbox_events TO emitlane_relay;
+GRANT SELECT, UPDATE ON TABLE emitlane.ordering_streams, emitlane.ordering_partitions TO emitlane_relay;
+GRANT SELECT ON TABLE emitlane.runtime_control TO emitlane_relay;
+GRANT SELECT, INSERT, UPDATE ON TABLE emitlane.relay_instances TO emitlane_relay;
 GRANT DELETE ON TABLE emitlane.outbox_events TO emitlane_relay; -- delivered cleanup only
 
 GRANT INSERT, SELECT ON TABLE emitlane.inbox_events TO emitlane_consumer;
@@ -125,6 +136,9 @@ GRANT INSERT, SELECT ON TABLE emitlane.inbox_events TO emitlane_consumer;
 | `EMITLANE_RELAY_CONCURRENCY` | `4` | In-flight publishes |
 | `EMITLANE_RELAY_POLL_INTERVAL` | `5s` | Polling fallback |
 | `EMITLANE_RELAY_LEASE_DURATION` | `30s` | Must exceed publish timeout |
+| `EMITLANE_ORDERING_REBALANCE_INTERVAL` | `2s` | Virtual-partition ownership refresh |
+| `EMITLANE_ORDERING_LEASE_DURATION` | `30s` | Must exceed publish timeout + ordering safety margin |
+| `EMITLANE_ORDERING_SAFETY_MARGIN` | `1s` | Added to the stale-publish handoff bound |
 | `EMITLANE_RETRY_MAX_ATTEMPTS` | `10` | Then `dead` |
 | `EMITLANE_RETRY_BASE_DELAY` | `1s` | Exponential backoff base |
 | `EMITLANE_RETRY_MAX_DELAY` | `30m` | Backoff cap |

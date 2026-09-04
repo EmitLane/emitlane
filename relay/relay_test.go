@@ -31,6 +31,36 @@ type failingPresenceStore struct {
 	*memoryStore
 }
 
+type orderedMemoryStore struct {
+	*memoryStore
+	beginOrderedCalls int
+	beginOrderedErr   error
+}
+
+func (*orderedMemoryStore) ClaimOrdered(context.Context, string, int, time.Duration, time.Duration) ([]Event, error) {
+	return nil, nil
+}
+
+func (s *orderedMemoryStore) BeginOrderedAttempt(context.Context, uuid.UUID, string, int64, int, time.Duration) (int, error) {
+	s.beginOrderedCalls++
+	if s.beginOrderedErr != nil {
+		return 0, s.beginOrderedErr
+	}
+	return 1, nil
+}
+
+func (s *orderedMemoryStore) MarkOrderedDelivered(_ context.Context, event Event, _ string) error {
+	return s.memoryStore.MarkDelivered(context.Background(), event.ID, "")
+}
+
+func (s *orderedMemoryStore) MarkOrderedRetry(_ context.Context, event Event, _ string, delay time.Duration, lastError string) error {
+	return s.memoryStore.MarkRetry(context.Background(), event.ID, "", delay, lastError)
+}
+
+func (s *orderedMemoryStore) MarkOrderedDead(_ context.Context, event Event, _ string, lastError string) error {
+	return s.memoryStore.MarkDead(context.Background(), event.ID, "", lastError)
+}
+
 func (*failingPresenceStore) RegisterRelay(context.Context, RelayPresence) error {
 	return errors.New("presence unavailable")
 }
@@ -288,6 +318,43 @@ func TestFailureAfterClaimDoesNotStartAttempt(t *testing.T) {
 	if beginCalls != 0 || published != 0 {
 		t.Fatalf("begin calls=%d published=%d, want zero", beginCalls, published)
 	}
+}
+
+func TestOrderedFinalFenceAndCancelledContextPreventNetworkSend(t *testing.T) {
+	partition := int16(7)
+	event := Event{
+		ID: uuid.Must(uuid.NewV7()), Destination: "orders.events", Type: "order.changed",
+		SchemaVersion: 1, OrderingKey: "order:stale", OrderingSequence: 1,
+		OrderingPartition: &partition, OrderingEpoch: 4, CreatedAt: time.Now(),
+	}
+
+	t.Run("stale fence", func(t *testing.T) {
+		store := &orderedMemoryStore{memoryStore: &memoryStore{}, beginOrderedErr: errors.New("stale epoch")}
+		pub := &trackingPublisher{}
+		rly := testRelay(t, store, pub, nil)
+		rly.handle(context.Background(), event)
+		if store.beginOrderedCalls != 1 {
+			t.Fatalf("ordered begin calls = %d", store.beginOrderedCalls)
+		}
+		if len(pub.messages) != 0 {
+			t.Fatalf("stale owner sent %d broker messages", len(pub.messages))
+		}
+	})
+
+	t.Run("cancelled context", func(t *testing.T) {
+		store := &orderedMemoryStore{memoryStore: &memoryStore{}}
+		pub := &trackingPublisher{}
+		rly := testRelay(t, store, pub, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rly.handle(ctx, event)
+		if store.beginOrderedCalls != 1 {
+			t.Fatalf("ordered begin calls = %d", store.beginOrderedCalls)
+		}
+		if len(pub.messages) != 0 {
+			t.Fatalf("cancelled context sent %d broker messages", len(pub.messages))
+		}
+	})
 }
 
 func TestRunDrainsStartedPublishOnCancellation(t *testing.T) {

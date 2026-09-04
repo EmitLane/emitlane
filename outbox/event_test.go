@@ -44,6 +44,37 @@ func TestEventValidate(t *testing.T) {
 	}
 }
 
+func TestEventValidateOrdering(t *testing.T) {
+	t.Parallel()
+	valid := []Event{
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 1},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 51, OrderingStartSequence: 51},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 2, Key: []byte("order:1")},
+	}
+	for _, event := range valid {
+		if err := event.validate(); err != nil {
+			t.Errorf("valid ordered event rejected: %v", err)
+		}
+	}
+
+	invalid := []Event{
+		{Destination: "orders.events", Type: "t", Sequence: 1},
+		{Destination: "orders.events", Type: "t", OrderingStartSequence: 1},
+		{Destination: "orders.events", Type: "t", OrderingKey: " "},
+		{Destination: "orders.events", Type: "t", OrderingKey: " order:1", Sequence: 1},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1"},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: -1},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 1, OrderingStartSequence: -1},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 1, OrderingStartSequence: 2},
+		{Destination: "orders.events", Type: "t", OrderingKey: "order:1", Sequence: 1, Key: []byte("different")},
+	}
+	for _, event := range invalid {
+		if err := event.validate(); err == nil {
+			t.Errorf("invalid ordered event accepted: %+v", event)
+		}
+	}
+}
+
 func TestNewEventID(t *testing.T) {
 	t.Parallel()
 	a, err := newEventID()

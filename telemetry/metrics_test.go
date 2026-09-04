@@ -29,6 +29,10 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 	metrics.IncAdminMutation("event.replay", "success")
 	metrics.IncControlFailure()
 	metrics.IncPresenceFailure("heartbeat")
+	metrics.SetOrderingState(10, 3, 2, 1, 64, 4, 12)
+	metrics.AddOrderingAcquisitions(4)
+	metrics.IncOrderingRebalance()
+	metrics.ObserveOrderingDeliveryWait(0.2)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -58,6 +62,16 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 		"emitlane_admin_mutations_total",
 		"emitlane_control_read_failures_total",
 		"emitlane_relay_presence_failures_total",
+		"emitlane_ordering_streams",
+		"emitlane_ordering_streams_blocked",
+		"emitlane_ordering_streams_gap",
+		"emitlane_ordering_streams_dead_blocked",
+		"emitlane_ordering_partitions_owned",
+		"emitlane_ordering_partitions_handoff",
+		"emitlane_ordering_partition_acquisitions_total",
+		"emitlane_ordering_partition_rebalances_total",
+		"emitlane_ordering_delivery_wait_seconds",
+		"emitlane_ordering_gap_age_seconds",
 	} {
 		if !got[name] {
 			t.Errorf("metric family %s is missing", name)
@@ -83,4 +97,8 @@ func TestNilMetricsIsNoOp(t *testing.T) {
 	metrics.IncAdminMutation("event.replay", "success")
 	metrics.IncControlFailure()
 	metrics.IncPresenceFailure("heartbeat")
+	metrics.SetOrderingState(1, 1, 1, 1, 1, 1, 1)
+	metrics.AddOrderingAcquisitions(1)
+	metrics.IncOrderingRebalance()
+	metrics.ObserveOrderingDeliveryWait(1)
 }

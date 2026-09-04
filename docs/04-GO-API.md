@@ -21,13 +21,19 @@ type Event struct {
     CorrelationID string
     CausationID   string
     AvailableAt   time.Time
+
+    OrderingKey           string
+    Sequence              int64
+    OrderingStartSequence int64
 }
 ```
 
 `Destination` and `Type` are required. Payload is opaque bytes and may be
 empty. An empty ID is replaced with UUIDv7 before insertion. An empty
-`AvailableAt` uses PostgreSQL `NOW()`. Strict ordering fields are intentionally
-absent from v0.1.
+`AvailableAt` uses PostgreSQL `NOW()`. The ordering fields are opt-in in v0.3:
+zero values preserve unordered behavior. An ordered event requires a non-blank
+key and positive application-owned sequence. The first stream defaults to one;
+`OrderingStartSequence` can explicitly adopt a higher starting point.
 
 ## Writer
 
@@ -149,9 +155,11 @@ func (r *relay.Relay) Run(ctx context.Context) error
 
 `relay.Config` controls batch size, concurrency, polling, leases, attempt
 budget, retry delays, publish/shutdown timeouts, statistics, and delivered-row
-retention. The standalone binary is the recommended production composition
-root. Embedded use remains possible for applications that can own the
-lifecycle correctly.
+retention. v0.3 adds `OrderingRebalanceInterval`, `OrderingLeaseDuration`, and
+`OrderingSafetyMargin`; validation requires the ordering lease to exceed the
+publish timeout plus safety margin. The standalone binary is the recommended
+production composition root. Embedded use remains possible for applications
+that can own the lifecycle correctly.
 
 ## Trace propagation
 
@@ -178,3 +186,15 @@ This preserves source compatibility for custom v0.1 stores. The PostgreSQL store
 implements all capabilities and atomically gates its `Claim` SQL on the durable
 pause row. `relay.WithPresenceInfo` can attach hostname/version metadata without
 affecting delivery behavior.
+
+## v0.3 ordered capabilities
+
+The required `relay.Store` interface remains compatible with v0.2 custom
+stores. Ordered behavior is discovered through `relay.OrderedDeliveryStore`
+and `relay.OrderingPartitionStore`. A custom store that does not implement them
+continues to support unordered delivery only.
+
+Ordered events use their ordering key as the effective Kafka key and receive
+authoritative `emitlane-ordering-key`, `emitlane-sequence`, and
+`emitlane-ordering-partition` headers. See [Ordered delivery](ORDERED_DELIVERY.md)
+for sequence validation, duplicate semantics, and the fencing invariant.

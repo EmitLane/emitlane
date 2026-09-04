@@ -41,6 +41,8 @@ func main() {
 		err = replayCmd(args)
 	case "audit":
 		err = auditCmd(args)
+	case "ordering":
+		err = orderingCmd(args)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return
@@ -72,6 +74,9 @@ Usage:
   emitlane replay event <event-id> --reason reason
   emitlane replay range [filters] --reason reason [--execute]
   emitlane audit list [--json]
+  emitlane ordering streams [--blocked] [--json]
+  emitlane ordering inspect --destination name --key key [--json]
+  emitlane ordering partitions [--json]
   emitlane version
 
 Configuration is read from EMITLANE_* environment variables.

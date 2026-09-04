@@ -54,11 +54,19 @@ downstream API supports it.
 
 ## Ordering
 
-v0.1 does not guarantee global or per-aggregate order across independent
-transactions. Kafka partitioning still follows the record key. Ordering
-guarantees are broker- and application-dependent.
+Unordered events do not guarantee global or per-aggregate order across
+independent transactions. Kafka partitioning follows the record key.
+
+v0.3 ordered events opt into a per-`(destination, ordering_key)` contract using
+an application-owned positive sequence. EmitLane will not begin N+1 until N has
+durably reached delivered. Duplicate N is possible after Kafka ACK and before
+the PostgreSQL transition, but N+1 remains blocked; consumers still deduplicate.
+The guarantee depends on the bounded publish/handoff assumptions documented in
+[Ordered delivery](ORDERED_DELIVERY.md). It is not global, cross-topic, or
+exactly-once ordering.
 
 ## Retention
 
 Delivered events may be deleted after `EMITLANE_RETENTION_DELIVERED` (default
-7 days). Dead events are never deleted by this cleanup.
+7 days). Dead events are never deleted by this cleanup. Ordered stream cursors
+survive delivered-row cleanup, so historical sequence numbers remain rejected.

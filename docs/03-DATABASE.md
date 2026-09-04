@@ -138,3 +138,32 @@ Retry updates the existing dead row. Replay inserts a new pending row with a new
 UUIDv7 and provenance. Pause/resume, retry, and replay write their audit record
 in the same transaction as the state mutation. The v1 migration files are
 immutable.
+
+## Schema version 3
+
+Migration `000003_ordered_delivery` is additive to the released v2 schema. It
+adds nullable `ordering_key`, `ordering_sequence`, and `ordering_partition`
+columns to outbox rows. A check constraint requires all three or none, and a
+partial unique index protects `(destination, ordering_key, ordering_sequence)`.
+Unordered rows keep all three null and use the existing claim indexes and SQL.
+
+`emitlane.ordering_streams` stores one durable cursor per
+`(destination, ordering_key)`:
+
+```text
+partition_id, start_sequence, next_sequence, updated_at
+```
+
+The writer creates or validates this row inside the caller's transaction. The
+cursor advances atomically with the expected event's delivered transition and
+is not removed by delivered-event retention.
+
+`emitlane.ordering_partitions` contains exactly 64 seeded rows. Each row stores
+the authoritative lease owner/expiry, monotonically increasing epoch, handoff
+barrier, and prior owner's publish timeout. Ownership transactions are short;
+Kafka I/O never occurs while one is open. `relay_instances.ordering_capable`
+keeps released v0.2 processes out of ordered membership.
+
+The v3 down migration refuses while any ordered stream or ordered outbox row
+exists. It will not silently erase sequence progress. See
+[Ordered delivery](ORDERED_DELIVERY.md) for the claim and fencing protocol.

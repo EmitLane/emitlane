@@ -45,6 +45,9 @@ type Relay struct {
 	wake     chan struct{}
 	listener WakeupListener
 	presence RelayPresence
+
+	orderingMu         sync.RWMutex
+	orderingPartitions []OrderingPartition
 }
 
 // Option configures Relay.
@@ -98,6 +101,15 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 	if cfg.PresenceStaleAfter == 0 {
 		cfg.PresenceStaleAfter = defaults.PresenceStaleAfter
 	}
+	if cfg.OrderingRebalanceInterval == 0 {
+		cfg.OrderingRebalanceInterval = defaults.OrderingRebalanceInterval
+	}
+	if cfg.OrderingLeaseDuration == 0 {
+		cfg.OrderingLeaseDuration = defaults.OrderingLeaseDuration
+	}
+	if cfg.OrderingSafetyMargin == 0 {
+		cfg.OrderingSafetyMargin = defaults.OrderingSafetyMargin
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -115,7 +127,7 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 		clock:    clock.System{},
 		rnd:      newLockedRand(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()^0xdeadbeef)),
 		wake:     make(chan struct{}, 1),
-		presence: RelayPresence{InstanceID: cfg.InstanceID},
+		presence: RelayPresence{InstanceID: cfg.InstanceID, OrderingCapable: true},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -179,6 +191,23 @@ func (r *Relay) Run(ctx context.Context) error {
 		}
 		go r.heartbeatLoop(runCtx, presence)
 		defer r.markStopped(presence)
+	}
+	if orderingStore, ok := r.store.(OrderingPartitionStore); ok {
+		orderingDone := make(chan struct{})
+		go func() {
+			defer close(orderingDone)
+			r.orderingLoop(runCtx, orderingStore)
+		}()
+		defer func() {
+			cancel()
+			select {
+			case <-orderingDone:
+			case <-time.After(10 * time.Second):
+				r.log.Warn("timed out stopping ordered partition reconciliation",
+					"relay_instance", r.cfg.InstanceID)
+			}
+			r.releaseOrderingPartitions(orderingStore)
+		}()
 	}
 	go r.statsLoop(runCtx)
 	if r.cfg.Retention > 0 && r.cfg.CleanupInterval > 0 && r.cfg.CleanupBatch > 0 {
@@ -247,9 +276,26 @@ func (r *Relay) tick(claimCtx, workCtx context.Context) error {
 				return nil
 			}
 		}
-		events, err := r.store.Claim(claimCtx, r.cfg.InstanceID, claimLimit, r.cfg.LeaseDuration)
-		if err != nil {
-			return err
+		var events []Event
+		if orderedStore, ok := r.store.(OrderedDeliveryStore); ok {
+			ordered, err := orderedStore.ClaimOrdered(
+				claimCtx,
+				r.cfg.InstanceID,
+				claimLimit,
+				r.cfg.LeaseDuration,
+				r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin,
+			)
+			if err != nil {
+				return err
+			}
+			events = append(events, ordered...)
+		}
+		if len(events) < claimLimit {
+			unordered, err := r.store.Claim(claimCtx, r.cfg.InstanceID, claimLimit-len(events), r.cfg.LeaseDuration)
+			if err != nil {
+				return err
+			}
+			events = append(events, unordered...)
 		}
 		if len(events) == 0 {
 			return nil
@@ -285,7 +331,7 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 		r.markDead(ctx, ev, "publish attempt budget exhausted during lease recovery")
 		return
 	}
-	attempt, err := r.store.BeginAttempt(ctx, ev.ID, r.cfg.InstanceID, r.cfg.MaxAttempts)
+	attempt, err := r.beginAttempt(ctx, ev)
 	if err != nil {
 		r.log.Error("begin publish attempt failed; event remains recoverable",
 			"event_id", ev.ID.String(),
@@ -308,6 +354,15 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 		attribute.Int("emitlane.attempt", ev.Attempts),
 		attribute.String("emitlane.relay_instance", r.cfg.InstanceID),
 	)
+	if ev.OrderingKey != "" && ev.OrderingPartition != nil {
+		span.SetName("emitlane.ordering.publish")
+		span.SetAttributes(
+			attribute.String("emitlane.ordering_key", ev.OrderingKey),
+			attribute.Int64("emitlane.ordering_sequence", ev.OrderingSequence),
+			attribute.Int("emitlane.ordering_partition", int(*ev.OrderingPartition)),
+			attribute.Int64("emitlane.ordering_epoch", ev.OrderingEpoch),
+		)
+	}
 	traceparent, tracestate := telemetry.InjectTrace(pubCtx)
 	setHeader(msg.Headers, broker.HeaderTraceparent, traceparent)
 	setHeader(msg.Headers, broker.HeaderTracestate, tracestate)
@@ -317,8 +372,18 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 		pubCtx, cancel = context.WithTimeout(pubCtx, r.cfg.PublishTimeout)
 		defer cancel()
 	}
+	if err := pubCtx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+		r.onPublishFailure(ctx, ev, err)
+		return
+	}
 
 	start := r.clock.Now()
+	if ev.OrderingKey != "" {
+		r.metrics.ObserveOrderingDeliveryWait(nonNegativeSeconds(start.Sub(ev.AvailableAt)))
+	}
 	err = r.pub.Publish(pubCtx, msg)
 	r.metrics.ObservePublish(nonNegativeSeconds(r.clock.Now().Sub(start)))
 	if err != nil {
@@ -346,7 +411,7 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 	// cancelled, otherwise the crash window is the normal at-least-once path.
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := r.store.MarkDelivered(markCtx, ev.ID, r.cfg.InstanceID); err != nil {
+	if err := r.markDelivered(markCtx, ev); err != nil {
 		r.log.Error("mark delivered failed after broker ack; event remains recoverable",
 			"event_id", ev.ID.String(),
 			"destination", ev.Destination,
@@ -367,6 +432,29 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 		"status", "delivered",
 		"duration", r.clock.Now().Sub(start),
 	)
+}
+
+func (r *Relay) beginAttempt(ctx context.Context, ev Event) (int, error) {
+	if ev.OrderingKey == "" {
+		return r.store.BeginAttempt(ctx, ev.ID, r.cfg.InstanceID, r.cfg.MaxAttempts)
+	}
+	store, ok := r.store.(OrderedDeliveryStore)
+	if !ok {
+		return 0, errors.New("relay: ordered event claimed without ordered store capability")
+	}
+	return store.BeginOrderedAttempt(ctx, ev.ID, r.cfg.InstanceID, ev.OrderingEpoch,
+		r.cfg.MaxAttempts, r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin)
+}
+
+func (r *Relay) markDelivered(ctx context.Context, ev Event) error {
+	if ev.OrderingKey == "" {
+		return r.store.MarkDelivered(ctx, ev.ID, r.cfg.InstanceID)
+	}
+	store, ok := r.store.(OrderedDeliveryStore)
+	if !ok {
+		return errors.New("relay: ordered event missing ordered store capability")
+	}
+	return store.MarkOrderedDelivered(ctx, ev, r.cfg.InstanceID)
 }
 
 func nonNegativeSeconds(duration time.Duration) float64 {
@@ -399,7 +487,7 @@ func (r *Relay) onPublishFailure(ctx context.Context, ev Event, pubErr error) {
 	}
 
 	delay := delay(ev.Attempts, r.cfg.BaseDelay, r.cfg.MaxDelay, r.rnd)
-	if err := r.store.MarkRetry(markCtx, ev.ID, r.cfg.InstanceID, delay, lastErr); err != nil {
+	if err := r.markRetry(markCtx, ev, delay, lastErr); err != nil {
 		r.log.Error("mark retry failed; event remains inflight",
 			"event_id", ev.ID.String(),
 			"relay_instance", r.cfg.InstanceID,
@@ -419,10 +507,29 @@ func (r *Relay) onPublishFailure(ctx context.Context, ev Event, pubErr error) {
 	)
 }
 
+func (r *Relay) markRetry(ctx context.Context, ev Event, delay time.Duration, lastError string) error {
+	if ev.OrderingKey == "" {
+		return r.store.MarkRetry(ctx, ev.ID, r.cfg.InstanceID, delay, lastError)
+	}
+	store, ok := r.store.(OrderedDeliveryStore)
+	if !ok {
+		return errors.New("relay: ordered event missing ordered store capability")
+	}
+	return store.MarkOrderedRetry(ctx, ev, r.cfg.InstanceID, delay, lastError)
+}
+
 func (r *Relay) markDead(ctx context.Context, ev Event, reason string) {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := r.store.MarkDead(markCtx, ev.ID, r.cfg.InstanceID, reason); err != nil {
+	var err error
+	if ev.OrderingKey == "" {
+		err = r.store.MarkDead(markCtx, ev.ID, r.cfg.InstanceID, reason)
+	} else if store, ok := r.store.(OrderedDeliveryStore); ok {
+		err = store.MarkOrderedDead(markCtx, ev, r.cfg.InstanceID, reason)
+	} else {
+		err = errors.New("relay: ordered event missing ordered store capability")
+	}
+	if err != nil {
 		r.log.Error("mark dead failed; event remains inflight",
 			"event_id", ev.ID.String(),
 			"relay_instance", r.cfg.InstanceID,
@@ -477,6 +584,11 @@ func (r *Relay) refreshStats(ctx context.Context) {
 	r.metrics.SetOldestPending(st.OldestPendingSeconds)
 	r.metrics.SetRelayPaused(st.Paused)
 	r.metrics.SetRelayInstances(float64(st.RelaysActive), float64(st.RelaysStale))
+	r.metrics.SetOrderingState(
+		float64(st.OrderedStreams), float64(st.BlockedOrderedStreams),
+		float64(st.GapStreams), float64(st.DeadBlockedStreams),
+		float64(st.OwnedPartitions), float64(st.HandoffPartitions), st.MaxGapAgeSeconds,
+	)
 }
 
 func (r *Relay) heartbeatLoop(ctx context.Context, store PresenceStore) {
@@ -535,6 +647,9 @@ func toMessage(ev Event) broker.Message {
 	delete(headers, broker.HeaderAttempt)
 	delete(headers, broker.HeaderOriginalEvent)
 	delete(headers, broker.HeaderReplayBatch)
+	delete(headers, broker.HeaderOrderingKey)
+	delete(headers, broker.HeaderSequence)
+	delete(headers, broker.HeaderPartition)
 	delete(headers, broker.HeaderTraceparent)
 	delete(headers, broker.HeaderTracestate)
 	headers[broker.HeaderEventID] = ev.ID.String()
@@ -546,6 +661,11 @@ func toMessage(ev Event) broker.Message {
 	}
 	if ev.ReplayBatchID != nil {
 		headers[broker.HeaderReplayBatch] = ev.ReplayBatchID.String()
+	}
+	if ev.OrderingKey != "" && ev.OrderingPartition != nil {
+		headers[broker.HeaderOrderingKey] = ev.OrderingKey
+		headers[broker.HeaderSequence] = strconv.FormatInt(ev.OrderingSequence, 10)
+		headers[broker.HeaderPartition] = strconv.Itoa(int(*ev.OrderingPartition))
 	}
 	if ev.Traceparent != "" {
 		headers[broker.HeaderTraceparent] = ev.Traceparent

@@ -26,6 +26,17 @@ emitlane_dead_events
 emitlane_delivery_duration_seconds
 emitlane_publish_duration_seconds
 emitlane_oldest_pending_seconds
+
+emitlane_ordering_streams
+emitlane_ordering_streams_blocked
+emitlane_ordering_streams_gap
+emitlane_ordering_streams_dead_blocked
+emitlane_ordering_partitions_owned
+emitlane_ordering_partitions_handoff
+emitlane_ordering_partition_acquisitions_total
+emitlane_ordering_partition_rebalances_total
+emitlane_ordering_delivery_wait_seconds
+emitlane_ordering_gap_age_seconds
 ```
 
 The failure counter has one bounded `result` label (`retryable` or
@@ -58,7 +69,7 @@ order.create
    └── emitlane.enqueue
              │
              ▼
-      emitlane.publish
+      emitlane.publish / emitlane.ordering.publish
              │
              ▼
           kafka.send
@@ -80,6 +91,11 @@ Also keep application-level correlation metadata:
 correlation_id
 causation_id
 ```
+
+Ordered operations add bounded spans for partition acquire/renew/handoff,
+ordered claim, ordered publish, and atomic stream advance. Ownership is not
+represented by a lifetime span. Trace attributes may contain event/ordering
+identity for diagnosis, but never payload.
 
 ## Logging
 
@@ -108,14 +124,17 @@ emitlane migrate up
 emitlane dead list
 emitlane dead retry EVENT_ID
 emitlane doctor
+emitlane ordering streams --blocked
+emitlane ordering inspect --destination orders.events --key order:123
+emitlane ordering partitions
 ```
 
-Status, general event inspection, replay, and benchmark commands remain
-post-v0.1 roadmap items.
+Status, redacted event inspection, audited replay, ordering inspection, and the
+benchmark harness are implemented.
 
 ### `doctor`
 
-Desired checks:
+Implemented checks include:
 
 ```text
 ✓ PostgreSQL connection
@@ -126,11 +145,14 @@ Desired checks:
 ✓ LISTEN/NOTIFY path
 ✓ clock sanity
 ✓ relay instance visibility
+✓ schema v3 ordering tables, indexes, and constraints
+✓ exactly 64 virtual partition rows
+✓ ordering ownership query permissions
 ```
 
 `doctor` should become a differentiating DX feature.
 
-## Admin API — post-v0.1
+## Admin API
 
 Proposed endpoints:
 
@@ -148,29 +170,35 @@ POST /v1/relay/resume
 
 GET /healthz
 GET /readyz
+
+GET /v1/ordering/streams
+GET /v1/ordering/stream
+GET /v1/ordering/partitions
 ```
 
-All mutating operator actions should eventually be audit logged.
+Mutating operator actions are audit logged in the same transaction as their
+state change. Ordering reads never expose payload.
 
 ## Replay
 
-Example future CLI:
+Implemented CLI example:
 
 ```bash
-emitlane replay \
+emitlane replay range \
   --destination orders.events \
   --from "2026-09-01T10:00:00Z" \
   --to "2026-09-01T11:00:00Z"
 ```
 
-Replay design goals:
+Replay properties:
 
-- preserve original event identity where useful;
+- create a new event identity while preserving source provenance;
 - attach a separate replay identifier/provenance;
 - make it visible to downstream consumers that a delivery is a replay;
 - do not accidentally destroy dedup semantics without documentation.
 
-Replay semantics require a separate detailed design before implementation.
+Ordered historical events require explicit `--unordered`; see
+[Replay safety](REPLAY.md).
 
 ## Dashboard — later
 

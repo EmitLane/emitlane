@@ -297,3 +297,29 @@ The Admin API and CLI call the same service. Mutations and their audit record
 commit in one PostgreSQL transaction. Replay clones raw stored bytes into a new
 UUIDv7 event and never performs broker I/O in that transaction. The ordinary
 relay later publishes the clone under the existing at-least-once protocol.
+
+## v0.3 ordered data plane
+
+Ordered delivery is an additive path beside the unchanged unordered claim path.
+The writer initializes durable stream metadata inside the application's
+transaction. Relay presence feeds deterministic desired ownership for 64
+virtual partitions, while PostgreSQL partition leases and epochs remain the
+authority.
+
+```text
+application transaction
+  ├─ business version N
+  ├─ ordering_streams initialization/validation
+  └─ outbox event (ordering key, N, virtual partition)
+
+Relay reconcile ──> partition lease + epoch + handoff barrier
+Relay claim     ──> only event matching stream.next_sequence
+Relay publish   ──> Kafka key affinity, outside SQL transaction
+Relay ACK       ──> atomic event delivered + stream advance
+```
+
+The final pre-send fence requires enough partition lease for the configured
+publish timeout and safety margin. Ownership handoff waits at least the prior
+publish window plus that margin, preventing stale network sends from appearing
+after a replacement owner has advanced the stream under the documented Kafka
+client bound. See [Ordered delivery](ORDERED_DELIVERY.md).

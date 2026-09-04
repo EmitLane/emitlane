@@ -157,7 +157,7 @@ Keep:
 - last error;
 - original ID.
 
-Operator actions later:
+Operator actions:
 
 ```text
 emitlane dead list
@@ -203,7 +203,7 @@ EmitLane chooses the duplicate and makes deduplication explicit.
 
 ## Pause, retry, and replay
 
-Pause prevents new claims across v0.2 PostgreSQL relays. Work already claimed may
+Pause prevents new claims across v0.2+ PostgreSQL relays. Work already claimed may
 finish, including the delivered acknowledgement after Kafka ACK. Paused relays
 remain healthy; pause is operator state, not a dependency failure.
 
@@ -215,3 +215,26 @@ new delivery lifecycle. The source remains unchanged. A replay can therefore run
 downstream business logic again, and Inbox correctly treats it as a new event.
 Replay still has at-least-once semantics and can itself be duplicated in the
 Kafka-ACK/database-ACK crash window.
+
+For an ordered source, default replay returns a conflict because reusing its
+historical domain sequence would violate stream progress. Explicit unordered
+replay creates a new ID with no active ordering fields, preserves original
+ordering metadata as provenance headers, and leaves the stream cursor unchanged.
+
+## Ordered streams
+
+v0.3 ordering is opt-in per `(destination, ordering_key)`. The application
+assigns a positive monotonic sequence. Only the event equal to the stream's
+durable `next_sequence` can be claimed. Missing, retrying, and dead expected
+events block later sequence numbers but do not block independent streams.
+
+Kafka ACK and stream advancement are not atomic. If the process dies between
+them, the current sequence may be published again. The atomic PostgreSQL
+delivered/advance transition keeps N+1 blocked until N is durable. Partition
+leases, epochs, a final pre-send fence, a bounded publish timeout, and delayed
+handoff prevent a stale owner from sending N after a replacement has progressed
+to N+1 under the documented client timing assumptions.
+
+This remains at-least-once delivery. It is not global ordering, cross-topic
+ordering, sequence generation, or end-to-end exactly once. See
+[Ordered delivery](ORDERED_DELIVERY.md).

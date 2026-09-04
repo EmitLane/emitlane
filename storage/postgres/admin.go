@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/emitlane/emitlane/broker"
 	adminapi "github.com/emitlane/emitlane/internal/admin"
 )
 
@@ -33,24 +34,31 @@ const adminEventColumns = `
     delivered_at,
 	octet_length(payload) AS payload_size,
     replayed_from_event_id,
-    replay_batch_id`
+    replay_batch_id,
+    ordering_key,
+    ordering_sequence,
+    ordering_partition`
 
 func scanAdminEvent(row rowScanner, includeSensitive bool) (adminapi.Event, error) {
 	var (
-		e           adminapi.Event
-		correlation *string
-		causation   *string
-		owner       *string
-		lastError   *string
-		key         []byte
-		payload     []byte
-		headers     []byte
+		e                 adminapi.Event
+		correlation       *string
+		causation         *string
+		owner             *string
+		lastError         *string
+		key               []byte
+		payload           []byte
+		headers           []byte
+		orderingKey       *string
+		orderingSequence  *int64
+		orderingPartition *int16
 	)
 	dest := []any{
 		&e.ID, &e.Destination, &e.Type, &e.ContentType, &e.SchemaVersion,
 		&correlation, &causation, &e.Status, &e.Attempts, &e.AvailableAt,
 		&owner, &e.LeaseUntil, &lastError, &e.CreatedAt, &e.DeliveredAt,
 		&e.PayloadSize, &e.ReplayedFromEventID, &e.ReplayBatchID,
+		&orderingKey, &orderingSequence, &orderingPartition,
 	}
 	if includeSensitive {
 		dest = append(dest, &key, &payload, &headers)
@@ -62,6 +70,11 @@ func scanAdminEvent(row rowScanner, includeSensitive bool) (adminapi.Event, erro
 	e.CausationID = deref(causation)
 	e.LeaseOwner = deref(owner)
 	e.LastError = deref(lastError)
+	e.OrderingKey = deref(orderingKey)
+	if orderingSequence != nil {
+		e.OrderingSequence = *orderingSequence
+	}
+	e.OrderingPartition = orderingPartition
 	if includeSensitive {
 		keyBase64 := base64.StdEncoding.EncodeToString(key)
 		payloadBase64 := base64.StdEncoding.EncodeToString(payload)
@@ -158,6 +171,16 @@ WHERE control.singleton = TRUE`
 	); err != nil {
 		return adminapi.Stats{}, fmt.Errorf("operational stats: %w", err)
 	}
+	ordering, err := s.readOrderingStats(ctx)
+	if err != nil {
+		return adminapi.Stats{}, err
+	}
+	st.OrderedStreams = ordering.streams
+	st.BlockedOrderedStreams = ordering.blocked
+	st.GapStreams = ordering.gaps
+	st.DeadBlockedStreams = ordering.deadBlocked
+	st.OwnedPartitions = ordering.owned
+	st.HandoffPartitions = ordering.handoff
 	return st, nil
 }
 
@@ -283,26 +306,30 @@ WHERE id = $1`, id); err != nil {
 }
 
 type replaySource struct {
-	ID            uuid.UUID
-	Destination   string
-	EventType     string
-	MessageKey    []byte
-	Payload       []byte
-	ContentType   string
-	Headers       []byte
-	SchemaVersion int
-	CorrelationID *string
-	CausationID   *string
+	ID                uuid.UUID
+	Destination       string
+	EventType         string
+	MessageKey        []byte
+	Payload           []byte
+	ContentType       string
+	Headers           []byte
+	SchemaVersion     int
+	CorrelationID     *string
+	CausationID       *string
+	OrderingKey       *string
+	OrderingSequence  *int64
+	OrderingPartition *int16
 }
 
 const replaySourceColumns = `id, destination, event_type, message_key, payload, content_type,
-headers, schema_version, correlation_id, causation_id`
+headers, schema_version, correlation_id, causation_id, ordering_key, ordering_sequence, ordering_partition`
 
 func scanReplaySource(row rowScanner) (replaySource, error) {
 	var source replaySource
 	err := row.Scan(&source.ID, &source.Destination, &source.EventType, &source.MessageKey,
 		&source.Payload, &source.ContentType, &source.Headers, &source.SchemaVersion,
-		&source.CorrelationID, &source.CausationID)
+		&source.CorrelationID, &source.CausationID, &source.OrderingKey,
+		&source.OrderingSequence, &source.OrderingPartition)
 	return source, err
 }
 
@@ -315,6 +342,24 @@ func newV7() (uuid.UUID, error) {
 }
 
 func cloneReplay(ctx context.Context, tx pgx.Tx, source replaySource, eventID, batchID uuid.UUID, mutation adminapi.Mutation) error {
+	headers := source.Headers
+	if source.OrderingKey != nil {
+		if mutation.OrderingMode != "unordered" {
+			return fmt.Errorf("%w: ordered event %s requires ordering_mode=unordered", adminapi.ErrConflict, source.ID)
+		}
+		values, err := mapHeaders(source.Headers)
+		if err != nil {
+			return fmt.Errorf("ordered replay headers %s: %w", source.ID, err)
+		}
+		values[broker.HeaderOriginalOrderingKey] = *source.OrderingKey
+		if source.OrderingSequence != nil {
+			values[broker.HeaderOriginalSequence] = fmt.Sprint(*source.OrderingSequence)
+		}
+		headers, err = json.Marshal(values)
+		if err != nil {
+			return fmt.Errorf("encode ordered replay provenance %s: %w", source.ID, err)
+		}
+	}
 	const insert = `
 INSERT INTO emitlane.outbox_events (
     id, destination, event_type, message_key, payload, content_type, headers,
@@ -325,7 +370,7 @@ INSERT INTO emitlane.outbox_events (
     'pending', 0, NOW(), NOW(), $13, $14
 )`
 	_, err := tx.Exec(ctx, insert, eventID, source.Destination, source.EventType, source.MessageKey,
-		source.Payload, source.ContentType, source.Headers, source.SchemaVersion,
+		source.Payload, source.ContentType, headers, source.SchemaVersion,
 		source.CorrelationID, source.CausationID, mutation.Traceparent, mutation.Tracestate,
 		source.ID, batchID)
 	if err != nil {
@@ -369,7 +414,7 @@ WHERE id = $1 AND status IN ('delivered', 'dead') FOR SHARE`
 		return adminapi.ReplayResult{}, err
 	}
 	if err := insertAudit(ctx, tx, "event.replay", mutation, &sourceID, &batchID,
-		map[string]any{"new_event_id": eventID.String(), "count": 1}); err != nil {
+		map[string]any{"new_event_id": eventID.String(), "count": 1, "ordering_mode": mutation.OrderingMode}); err != nil {
 		return adminapi.ReplayResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('emitlane_events', $1)`, eventID.String()); err != nil {
@@ -459,7 +504,8 @@ func (s *Store) ReplayBatch(ctx context.Context, filter adminapi.EventFilter, mu
 		eventIDs = append(eventIDs, eventID)
 	}
 	if err := insertAudit(ctx, tx, "replay.batch", mutation, nil, &batchID,
-		map[string]any{"count": len(eventIDs), "statuses": filter.Statuses, "destination": filter.Destination, "event_type": filter.EventType}); err != nil {
+		map[string]any{"count": len(eventIDs), "statuses": filter.Statuses, "destination": filter.Destination,
+			"event_type": filter.EventType, "ordering_mode": mutation.OrderingMode}); err != nil {
 		return adminapi.ReplayResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify('emitlane_events', $1)`, batchID.String()); err != nil {

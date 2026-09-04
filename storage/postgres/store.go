@@ -78,19 +78,23 @@ type rowScanner interface {
 
 func scanEvent(row rowScanner) (relay.Event, error) {
 	var (
-		e            relay.Event
-		key          []byte
-		headers      []byte
-		corr         *string
-		caus         *string
-		tp           *string
-		ts           *string
-		owner        *string
-		lastErr      *string
-		leaseUntil   *time.Time
-		delivered    *time.Time
-		replayedFrom *uuid.UUID
-		replayBatch  *uuid.UUID
+		e                 relay.Event
+		key               []byte
+		headers           []byte
+		corr              *string
+		caus              *string
+		tp                *string
+		ts                *string
+		owner             *string
+		lastErr           *string
+		leaseUntil        *time.Time
+		delivered         *time.Time
+		replayedFrom      *uuid.UUID
+		replayBatch       *uuid.UUID
+		orderingKey       *string
+		orderingSeq       *int64
+		orderingPartition *int16
+		orderingEpoch     *int64
 	)
 	err := row.Scan(
 		&e.ID,
@@ -115,6 +119,10 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 		&delivered,
 		&replayedFrom,
 		&replayBatch,
+		&orderingKey,
+		&orderingSeq,
+		&orderingPartition,
+		&orderingEpoch,
 	)
 	if err != nil {
 		return relay.Event{}, err
@@ -134,6 +142,14 @@ func scanEvent(row rowScanner) (relay.Event, error) {
 	e.DeliveredAt = delivered
 	e.ReplayedFromEventID = replayedFrom
 	e.ReplayBatchID = replayBatch
+	e.OrderingKey = deref(orderingKey)
+	if orderingSeq != nil {
+		e.OrderingSequence = *orderingSeq
+	}
+	e.OrderingPartition = orderingPartition
+	if orderingEpoch != nil {
+		e.OrderingEpoch = *orderingEpoch
+	}
 	return e, nil
 }
 
@@ -166,7 +182,11 @@ const eventColumns = `
     created_at,
     delivered_at,
     replayed_from_event_id,
-    replay_batch_id`
+    replay_batch_id,
+    ordering_key,
+    ordering_sequence,
+    ordering_partition,
+    NULL::BIGINT AS ordering_epoch`
 
 // Claim marks a bounded batch inflight and commits before returning.
 // Eligible rows are pending (available now) or inflight with an expired lease.
@@ -199,6 +219,7 @@ WITH picked AS (
     SELECT id
     FROM emitlane.outbox_events
     WHERE available_at <= NOW()
+	  AND ordering_key IS NULL
 	  AND EXISTS (
 	      SELECT 1 FROM emitlane.runtime_control
 	      WHERE singleton = TRUE AND paused = FALSE
@@ -240,7 +261,11 @@ RETURNING
     e.created_at,
     e.delivered_at,
     e.replayed_from_event_id,
-    e.replay_batch_id`
+    e.replay_batch_id,
+    e.ordering_key,
+    e.ordering_sequence,
+    e.ordering_partition,
+    NULL::BIGINT AS ordering_epoch`
 
 	rows, err := tx.Query(ctx, sql, limit, owner, intervalMS(lease))
 	if err != nil {
@@ -410,7 +435,11 @@ SELECT
     created_at,
     delivered_at,
     replayed_from_event_id,
-    replay_batch_id
+    replay_batch_id,
+    ordering_key,
+    ordering_sequence,
+    ordering_partition,
+    NULL::BIGINT AS ordering_epoch
 FROM emitlane.outbox_events
 WHERE status = 'dead'
 ORDER BY created_at DESC
@@ -475,6 +504,17 @@ WHERE control.singleton = TRUE`
 		&st.Paused, &st.RelaysActive, &st.RelaysStale); err != nil {
 		return relay.Stats{}, fmt.Errorf("stats: %w", err)
 	}
+	ordering, err := s.readOrderingStats(ctx)
+	if err != nil {
+		return relay.Stats{}, err
+	}
+	st.OrderedStreams = ordering.streams
+	st.BlockedOrderedStreams = ordering.blocked
+	st.GapStreams = ordering.gaps
+	st.DeadBlockedStreams = ordering.deadBlocked
+	st.OwnedPartitions = ordering.owned
+	st.HandoffPartitions = ordering.handoff
+	st.MaxGapAgeSeconds = ordering.maxGapAge
 	return st, nil
 }
 

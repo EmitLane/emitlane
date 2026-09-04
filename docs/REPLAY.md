@@ -30,6 +30,26 @@ unaudited batch.
 Replayed events retain normal at-least-once semantics. A broker acknowledgement
 followed by a relay crash before the delivered update can duplicate a replay.
 
+## Ordered sources
+
+Default replay of an ordered source returns a conflict. Reusing its historical
+sequence could either violate the durable cursor or create an ambiguous second
+event at a sequence already delivered.
+
+An operator may explicitly choose unordered replay:
+
+```bash
+emitlane replay event <event-id> \
+  --reason "consumer recovery" \
+  --unordered
+```
+
+The clone receives a new UUIDv7, clears active ordering key/sequence/partition,
+and does not modify `ordering_streams.next_sequence`. The source is unchanged.
+`emitlane-original-ordering-key` and `emitlane-original-sequence` are preserved
+as provenance headers and in audit context. EmitLane does not invent a new
+domain sequence.
+
 Replay also depends on the source row still being retained. Configure delivered
 retention according to the replay window your operations require; after cleanup
 deletes a delivered source, EmitLane cannot reconstruct its payload for replay.

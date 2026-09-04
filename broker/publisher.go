@@ -7,14 +7,19 @@ import (
 
 // Header names sent with every published record.
 const (
-	HeaderEventID       = "emitlane-event-id"
-	HeaderEventType     = "emitlane-event-type"
-	HeaderSchemaVersion = "emitlane-schema-version"
-	HeaderAttempt       = "emitlane-attempt"
-	HeaderOriginalEvent = "emitlane-original-event-id"
-	HeaderReplayBatch   = "emitlane-replay-batch-id"
-	HeaderTraceparent   = "traceparent"
-	HeaderTracestate    = "tracestate"
+	HeaderEventID             = "emitlane-event-id"
+	HeaderEventType           = "emitlane-event-type"
+	HeaderSchemaVersion       = "emitlane-schema-version"
+	HeaderAttempt             = "emitlane-attempt"
+	HeaderOriginalEvent       = "emitlane-original-event-id"
+	HeaderReplayBatch         = "emitlane-replay-batch-id"
+	HeaderOrderingKey         = "emitlane-ordering-key"
+	HeaderSequence            = "emitlane-sequence"
+	HeaderPartition           = "emitlane-ordering-partition"
+	HeaderOriginalOrderingKey = "emitlane-original-ordering-key"
+	HeaderOriginalSequence    = "emitlane-original-sequence"
+	HeaderTraceparent         = "traceparent"
+	HeaderTracestate          = "tracestate"
 )
 
 // ErrPermanent indicates a publish failure that should not be retried.

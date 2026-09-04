@@ -19,6 +19,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("EMITLANE_RELAY_BATCH_SIZE", "50")
 	t.Setenv("EMITLANE_RETRY_MAX_ATTEMPTS", "3")
 	t.Setenv("EMITLANE_RELAY_POLL_INTERVAL", "2s")
+	t.Setenv("EMITLANE_ORDERING_REBALANCE_INTERVAL", "3s")
+	t.Setenv("EMITLANE_ORDERING_LEASE_DURATION", "40s")
+	t.Setenv("EMITLANE_ORDERING_SAFETY_MARGIN", "2s")
 	t.Setenv("EMITLANE_INSTANCE_ID", "relay-test")
 	t.Setenv("EMITLANE_RETENTION_DELIVERED", "0")
 	cfg, err := Load()
@@ -33,6 +36,11 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Relay.PollInterval != 2*time.Second {
 		t.Fatalf("poll %s", cfg.Relay.PollInterval)
+	}
+	if cfg.Relay.OrderingRebalanceInterval != 3*time.Second ||
+		cfg.Relay.OrderingLeaseDuration != 40*time.Second || cfg.Relay.OrderingSafetyMargin != 2*time.Second {
+		t.Fatalf("ordering timing: rebalance=%s lease=%s safety=%s",
+			cfg.Relay.OrderingRebalanceInterval, cfg.Relay.OrderingLeaseDuration, cfg.Relay.OrderingSafetyMargin)
 	}
 	if len(cfg.KafkaBrokers) != 2 {
 		t.Fatalf("brokers %v", cfg.KafkaBrokers)

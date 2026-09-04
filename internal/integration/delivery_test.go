@@ -201,10 +201,14 @@ func startEnv(t *testing.T) *env {
 		defer cancel()
 		_, err := shared.pool.Exec(ctx, `
 TRUNCATE public.business_orders, public.business_payments, emitlane.outbox_events,
-         emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances;
+         emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances,
+         emitlane.ordering_streams;
 UPDATE emitlane.runtime_control
 SET paused = FALSE, reason = NULL, updated_at = NOW(), updated_by = 'integration-reset'
-WHERE singleton = TRUE`)
+WHERE singleton = TRUE;
+UPDATE emitlane.ordering_partitions
+SET lease_owner = NULL, lease_until = NULL, epoch = 0,
+    handoff_not_before = NULL, publish_timeout_ms = NULL, updated_at = NOW()`)
 		return err
 	}
 	if err := reset(); err != nil {
@@ -282,6 +286,15 @@ func (e *env) newRelay(t *testing.T, cfg relay.Config, pub broker.Publisher, hoo
 	}
 	if cfg.PresenceStaleAfter == 0 {
 		cfg.PresenceStaleAfter = 500 * time.Millisecond
+	}
+	if cfg.OrderingRebalanceInterval == 0 {
+		cfg.OrderingRebalanceInterval = 50 * time.Millisecond
+	}
+	if cfg.OrderingLeaseDuration == 0 {
+		cfg.OrderingLeaseDuration = 15 * time.Second
+	}
+	if cfg.OrderingSafetyMargin == 0 {
+		cfg.OrderingSafetyMargin = 100 * time.Millisecond
 	}
 	opts = append(opts,
 		relay.WithLogger(e.log),
@@ -434,6 +447,10 @@ func enqueueOrder(t *testing.T, e *env, orderID, topic string, amount int, commi
 }
 
 func (e *env) ensureTopic(t *testing.T, topic string) {
+	e.ensureTopicPartitions(t, topic, 1)
+}
+
+func (e *env) ensureTopicPartitions(t *testing.T, topic string, partitions int32) {
 	t.Helper()
 	cl, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...), kgo.AllowAutoTopicCreation())
 	if err != nil {
@@ -443,7 +460,7 @@ func (e *env) ensureTopic(t *testing.T, topic string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	adm := kadm.NewClient(cl)
-	res, err := adm.CreateTopics(ctx, 1, 1, nil, topic)
+	res, err := adm.CreateTopics(ctx, partitions, 1, nil, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,6 +884,9 @@ func TestMigrationRoundTrip(t *testing.T) {
 			t.Errorf("drop migration test sentinel: %v", err)
 		}
 	})
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
 		t.Fatal(err)
 	}

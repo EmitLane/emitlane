@@ -60,6 +60,15 @@ func (s *stubStore) ReplayBatch(context.Context, EventFilter, Mutation, int) (Re
 func (s *stubStore) ListAudit(context.Context, AuditFilter) (AuditPage, error) {
 	return AuditPage{}, nil
 }
+func (s *stubStore) ListOrderingStreams(context.Context, OrderingStreamFilter) (OrderingStreamPage, error) {
+	return OrderingStreamPage{Streams: []OrderingStream{{Destination: "orders", OrderingKey: "order:1", State: "gap"}}}, nil
+}
+func (s *stubStore) InspectOrderingStream(context.Context, string, string) (OrderingStream, error) {
+	return OrderingStream{Destination: "orders", OrderingKey: "order:1", State: "gap"}, nil
+}
+func (s *stubStore) ListOrderingPartitions(context.Context, time.Duration) ([]OrderingPartition, error) {
+	return []OrderingPartition{{PartitionID: 1, State: "owned"}}, nil
+}
 
 func newTestService(t *testing.T, store Store) *Service {
 	t.Helper()
@@ -175,5 +184,29 @@ func TestAdminRejectsUnknownMutationFields(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/relay/pause", strings.NewReader(`{"reason":"ok","unexpected":true}`)))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown-field code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestOrderingRoutesAndCursorValidation(t *testing.T) {
+	t.Parallel()
+	handler := newHandler(newTestService(t, &stubStore{}), "", false, nil)
+	for _, path := range []string{
+		"/v1/ordering/streams?blocked_only=true",
+		"/v1/ordering/stream?destination=orders&ordering_key=order%3A1",
+		"/v1/ordering/partitions",
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s code=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	cursor, err := EncodeOrderingStreamCursor(OrderingStreamCursor{Destination: "orders", OrderingKey: "order:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeOrderingStreamCursor(cursor)
+	if err != nil || decoded.Destination != "orders" || decoded.OrderingKey != "order:1" {
+		t.Fatalf("ordering cursor=%+v err=%v", decoded, err)
 	}
 }
