@@ -40,7 +40,7 @@ func reportMarkdown(r Result) string {
 	fmt.Fprintf(&b, "| Relay graceful restarts | %d |\n| Relay crash takeovers | %d |\n| Kafka outages | %d |\n| Pause/resume cycles | %d |\n| Partition acquisitions | %d |\n| Partition handoffs | %d |\n\n", r.RelayRestarts, r.RelayCrashTakeovers, r.KafkaOutages, r.PauseCycles, r.PartitionAcquisitions, r.PartitionHandoffs)
 	fmt.Fprintln(&b, "## Final state")
 	fmt.Fprintln(&b)
-	fmt.Fprintf(&b, "Pending: %d  \nInflight: %d  \nDead: %d  \nBlocked ordered streams: %d  \nGap streams: %d\n\n", r.PendingFinal, r.InflightFinal, r.DeadFinal, r.BlockedStreamsFinal, r.GapStreamsFinal)
+	fmt.Fprintf(&b, "Pending: %d  \nInflight: %d  \nDead: %d  \nBlocked ordered streams: %d  \nGap streams: %d  \nIntegrity violations: %d  \nIntegrity warnings: %d\n\n", r.PendingFinal, r.InflightFinal, r.DeadFinal, r.BlockedStreamsFinal, r.GapStreamsFinal, r.IntegrityViolations, r.IntegrityWarnings)
 	fmt.Fprintln(&b, "## Performance")
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "Throughput: %.1f committed events/sec  \nLatency p50/p95/p99: %.2f / %.2f / %.2f ms  \nRecovery: %.2f seconds\n\n", r.ThroughputEventsSec, r.LatencyP50Millis, r.LatencyP95Millis, r.LatencyP99Millis, r.BacklogRecoverySecs)

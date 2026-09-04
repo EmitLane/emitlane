@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
+	integritycheck "github.com/emitlane/emitlane/integrity"
 	adminapi "github.com/emitlane/emitlane/internal/admin"
 	"github.com/emitlane/emitlane/outbox"
 )
@@ -61,23 +62,25 @@ func (s *faultStats) durationSnapshot() map[string]float64 {
 }
 
 type soakRuntime struct {
-	runDir          string
-	cfg             Config
-	started         time.Time
-	phaseMu         sync.RWMutex
-	phase           string
-	progressStop    chan struct{}
-	progressDone    chan struct{}
-	progressOnce    sync.Once
-	progressWriteMu sync.Mutex
-	timelineMu      sync.Mutex
-	timeline        []timelinePoint
-	verifier        *verifier
-	faults          *faultStats
-	relays          *relayGroup
-	env             *soakEnvironment
-	orderedTopic    string
-	unorderedTopic  string
+	runDir              string
+	cfg                 Config
+	started             time.Time
+	phaseMu             sync.RWMutex
+	phase               string
+	progressStop        chan struct{}
+	progressDone        chan struct{}
+	progressOnce        sync.Once
+	progressWriteMu     sync.Mutex
+	timelineMu          sync.Mutex
+	timeline            []timelinePoint
+	verifier            *verifier
+	faults              *faultStats
+	relays              *relayGroup
+	env                 *soakEnvironment
+	orderedTopic        string
+	unorderedTopic      string
+	integrityViolations int64
+	integrityWarnings   int64
 }
 
 func runSoak(ctx context.Context, runDir string, cfg Config) error {
@@ -194,6 +197,28 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 			auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
 			auditSnapshot.regressions, auditSnapshot.skips)
 		r.verifier.adoptAudit(audit)
+	}
+	integrityConfig := integritycheck.DefaultConfig()
+	integrityConfig.StatementTimeout = 2 * time.Minute
+	integrityConfig.MaxFindings = 100
+	integrityVerifier, integrityErr := integritycheck.NewVerifier(r.env.pool, integrityConfig)
+	if integrityErr == nil {
+		integrityCtx, cancelIntegrity := context.WithTimeout(ctx, 2*time.Minute)
+		var integrityReport integritycheck.Report
+		integrityReport, integrityErr = integrityVerifier.Check(integrityCtx, integritycheck.ModeFull)
+		cancelIntegrity()
+		if integrityErr == nil {
+			r.integrityViolations = integrityReport.Summary.Violations
+			r.integrityWarnings = integrityReport.Summary.Warnings
+			log.Printf("final full integrity check completed violations=%d warnings=%d",
+				r.integrityViolations, r.integrityWarnings)
+		}
+	}
+	if integrityErr != nil {
+		r.faults.infrastructure.Add(1)
+		integrityErr = fmt.Errorf("final full integrity check: %w", integrityErr)
+		log.Printf("%v", integrityErr)
+		recoveryErr = errors.Join(recoveryErr, integrityErr)
 	}
 	return r.finish(base, "completed", recoveryErr, 0)
 }
@@ -583,6 +608,8 @@ func (r *soakRuntime) finish(result Result, requestedState string, prior error, 
 	}
 	result.PartitionAcquisitions = r.faults.acquisitions.Load()
 	result.PartitionHandoffs = r.faults.handoffs.Load()
+	result.IntegrityViolations = r.integrityViolations
+	result.IntegrityWarnings = r.integrityWarnings
 	if r.cfg.Duration > 0 {
 		result.ThroughputEventsSec = float64(result.CommittedEvents) / r.cfg.Duration.Seconds()
 	}
