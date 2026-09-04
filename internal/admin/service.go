@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/emitlane/emitlane/integrity"
 	"github.com/emitlane/emitlane/telemetry"
 )
 
@@ -30,6 +31,12 @@ func NewService(store Store, staleAfter time.Duration, metrics *telemetry.Metric
 
 func (s *Service) Stats(ctx context.Context) (Stats, error) {
 	return s.store.OperationalStats(ctx, s.staleAfter)
+}
+
+// Integrity returns the bounded summary verifier. Expensive full verification
+// is intentionally available only through the CLI.
+func (s *Service) Integrity(ctx context.Context) (integrity.Report, error) {
+	return s.store.IntegritySummary(ctx, s.staleAfter)
 }
 
 func (s *Service) ListEvents(ctx context.Context, filter EventFilter) (EventPage, error) {

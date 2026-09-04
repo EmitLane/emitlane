@@ -64,6 +64,7 @@ func newHandler(service *Service, token string, exposePayload bool, logger *slog
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/stats", h.stats)
+	mux.HandleFunc("GET /v1/integrity", h.integrity)
 	mux.HandleFunc("GET /v1/events", h.events)
 	mux.HandleFunc("GET /v1/events/{id}", h.event)
 	mux.HandleFunc("POST /v1/events/{id}/retry", h.retry)
@@ -220,6 +221,19 @@ func (h *handler) decodeJSON(w http.ResponseWriter, r *http.Request, value any) 
 
 func (h *handler) stats(w http.ResponseWriter, r *http.Request) {
 	value, err := h.service.Stats(r.Context())
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, value)
+}
+
+func (h *handler) integrity(w http.ResponseWriter, r *http.Request) {
+	if mode := strings.TrimSpace(r.URL.Query().Get("mode")); mode != "" && mode != "summary" {
+		h.serviceError(w, r, fmt.Errorf("%w: Admin API supports integrity mode summary only", ErrInvalid))
+		return
+	}
+	value, err := h.service.Integrity(r.Context())
 	if err != nil {
 		h.serviceError(w, r, err)
 		return

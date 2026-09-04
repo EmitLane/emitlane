@@ -33,6 +33,13 @@ func TestIntegrityCleanV3Database(t *testing.T) {
 			t.Fatalf("%s partition count=%d", mode, report.Summary.OrderingPartitions)
 		}
 	}
+	adminReport, err := e.store.IntegritySummary(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Admin integrity summary: %v", err)
+	}
+	if adminReport.Mode != integrity.ModeSummary || !adminReport.Clean {
+		t.Fatalf("Admin integrity report: %+v", adminReport)
+	}
 }
 
 func TestIntegrityRetentionDoesNotReportHistoricalGap(t *testing.T) {

@@ -11,16 +11,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/emitlane/emitlane/integrity"
 )
 
 type stubStore struct {
 	stats            Stats
+	integrityReport  integrity.Report
 	event            Event
 	lastReplayFilter EventFilter
 }
 
 func (s *stubStore) OperationalStats(context.Context, time.Duration) (Stats, error) {
 	return s.stats, nil
+}
+func (s *stubStore) IntegritySummary(context.Context, time.Duration) (integrity.Report, error) {
+	return s.integrityReport, nil
 }
 func (s *stubStore) ListEvents(context.Context, EventFilter) (EventPage, error) {
 	return EventPage{Events: []Event{s.event}}, nil
@@ -147,6 +153,39 @@ func TestAdminBearerAuthAndRequestID(t *testing.T) {
 	var stats Stats
 	if err := json.NewDecoder(response.Body).Decode(&stats); err != nil || stats.Pending != 2 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestAdminIntegrityIsAuthenticatedSummaryOnly(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{integrityReport: integrity.Report{
+		Result: "warnings", Mode: integrity.ModeSummary, Clean: true,
+		Summary: integrity.Summary{Warnings: 1}, Findings: []integrity.Finding{{
+			Code: integrity.CodeStreamGap, Severity: integrity.SeverityWarning, Message: "gap",
+		}},
+	}}
+	handler := newHandler(newTestService(t, store), "correct-token", false, nil)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/integrity", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated integrity code=%d", response.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/integrity?mode=summary", nil)
+	req.Header.Set("Authorization", "Bearer correct-token")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"mode":"summary"`) || strings.Contains(response.Body.String(), "payload") {
+		t.Fatalf("integrity response code=%d body=%s", response.Code, response.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/integrity?mode=full", nil)
+	req.Header.Set("Authorization", "Bearer correct-token")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("full integrity mode code=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
