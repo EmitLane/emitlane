@@ -24,6 +24,9 @@ func TestProfiles(t *testing.T) {
 		if cfg.Profile != name || cfg.Relays < 2 || cfg.OrderedStreams < 50 || cfg.OrderedPercent != 80 || !cfg.Faults {
 			t.Fatalf("bad %s profile: %+v", name, cfg)
 		}
+		if cfg.RelayMaxAttempts != 100 || cfg.RelayBaseDelay != 500*time.Millisecond || cfg.RelayMaxDelay != 5*time.Second {
+			t.Fatalf("unsafe transient-fault retry policy for %s: attempts=%d base=%s max=%s", name, cfg.RelayMaxAttempts, cfg.RelayBaseDelay, cfg.RelayMaxDelay)
+		}
 		if err := cfg.validate(); err != nil {
 			t.Fatalf("validate %s: %v", name, err)
 		}

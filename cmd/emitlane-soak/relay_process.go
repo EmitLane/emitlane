@@ -27,6 +27,9 @@ func relayCommand(args []string) error {
 	brokersText := fs.String("brokers", "", "runner-owned Kafka endpoints")
 	instance := fs.String("instance", "", "relay instance id")
 	parentPID := fs.Int("parent-pid", 0, "owning soak process")
+	maxAttempts := fs.Int("max-attempts", soakRelayMaxAttempts, "maximum broker publish attempts")
+	baseDelay := fs.Duration("base-delay", soakRelayBaseDelay, "retry base delay")
+	maxDelay := fs.Duration("max-delay", soakRelayMaxDelay, "retry maximum delay")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -83,8 +86,9 @@ func relayCommand(args []string) error {
 	cfg.OrderingRebalanceInterval = 200 * time.Millisecond
 	cfg.OrderingLeaseDuration = 4 * time.Second
 	cfg.OrderingSafetyMargin = 250 * time.Millisecond
-	cfg.BaseDelay = 100 * time.Millisecond
-	cfg.MaxDelay = 3 * time.Second
+	cfg.MaxAttempts = *maxAttempts
+	cfg.BaseDelay = *baseDelay
+	cfg.MaxDelay = *maxDelay
 	cfg.Retention = 0
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	rly, err := relay.New(cfg, store, publisher, relay.WithLogger(logger), relay.WithPresenceInfo("local-soak", "v0.3-soak"))
@@ -103,12 +107,15 @@ type relayGroup struct {
 	runID       string
 	databaseURL string
 	brokers     string
+	maxAttempts int
+	baseDelay   time.Duration
+	maxDelay    time.Duration
 	next        int
 	children    []*relayChild
 }
 
-func newRelayGroup(runID, databaseURL string, brokers []string) *relayGroup {
-	return &relayGroup{runID: runID, databaseURL: databaseURL, brokers: strings.Join(brokers, ",")}
+func newRelayGroup(runID, databaseURL string, brokers []string, cfg Config) *relayGroup {
+	return &relayGroup{runID: runID, databaseURL: databaseURL, brokers: strings.Join(brokers, ","), maxAttempts: cfg.RelayMaxAttempts, baseDelay: cfg.RelayBaseDelay, maxDelay: cfg.RelayMaxDelay}
 }
 
 func (g *relayGroup) start() (*relayChild, error) {
@@ -120,7 +127,7 @@ func (g *relayGroup) start() (*relayChild, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(executable, "relay", "--database-url", g.databaseURL, "--brokers", g.brokers, "--instance", instance, "--parent-pid", fmt.Sprint(os.Getpid()))
+	cmd := exec.Command(executable, "relay", "--database-url", g.databaseURL, "--brokers", g.brokers, "--instance", instance, "--parent-pid", fmt.Sprint(os.Getpid()), "--max-attempts", fmt.Sprint(g.maxAttempts), "--base-delay", g.baseDelay.String(), "--max-delay", g.maxDelay.String())
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, err

@@ -103,7 +103,7 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 	_ = writeJSON(filepath.Join(runDir, "metadata.json"), base)
 	cleanupCtx := context.Background()
 	defer func() { c, cancel := context.WithTimeout(cleanupCtx, 90*time.Second); defer cancel(); env.close(c) }()
-	r.relays = newRelayGroup(cfg.RunID, env.databaseURL, env.brokers)
+	r.relays = newRelayGroup(cfg.RunID, env.databaseURL, env.brokers, cfg)
 	defer r.relays.stopAll()
 	for i := 0; i < cfg.Relays; i++ {
 		if _, err := r.relays.start(); err != nil {

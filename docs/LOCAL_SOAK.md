@@ -35,6 +35,12 @@ injection. Defaults are:
 - `standard`: 20 minutes, 4 Relays, 1,000 streams, target above 100,000 committed events;
 - `release`: 60 minutes, 4 Relays, 3,500 streams, final local v0.3 release soak.
 
+Soak Relays use a test-specific transient-fault retry policy: 100 maximum
+attempts with 500 ms base delay and a 5 second cap. This keeps deliberate Kafka
+container restarts from exhausting the poison-event budget while still
+exercising durable retry and backoff behavior. The exact policy is recorded in
+`config.json` and `result.json`.
+
 Override the running duration when needed:
 
 ```sh

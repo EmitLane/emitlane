@@ -17,22 +17,29 @@ const (
 	postgresImage  = "postgres:16-alpine"
 	kafkaImage     = "apache/kafka-native:4.3.1"
 	progressPeriod = 5 * time.Second
+
+	soakRelayMaxAttempts = 100
+	soakRelayBaseDelay   = 500 * time.Millisecond
+	soakRelayMaxDelay    = 5 * time.Second
 )
 
 type Config struct {
-	RunID           string        `json:"run_id"`
-	Profile         string        `json:"profile"`
-	Seed            uint64        `json:"seed"`
-	Duration        time.Duration `json:"duration"`
-	RecoveryTimeout time.Duration `json:"recovery_timeout"`
-	Warmup          time.Duration `json:"warmup"`
-	Relays          int           `json:"relays"`
-	OrderedStreams  int           `json:"ordered_streams"`
-	OrderedPercent  int           `json:"ordered_percent"`
-	EventsPerSecond int           `json:"events_per_second"`
-	FaultInterval   time.Duration `json:"fault_interval"`
-	Faults          bool          `json:"faults"`
-	PayloadBytes    int           `json:"payload_bytes"`
+	RunID            string        `json:"run_id"`
+	Profile          string        `json:"profile"`
+	Seed             uint64        `json:"seed"`
+	Duration         time.Duration `json:"duration"`
+	RecoveryTimeout  time.Duration `json:"recovery_timeout"`
+	Warmup           time.Duration `json:"warmup"`
+	Relays           int           `json:"relays"`
+	OrderedStreams   int           `json:"ordered_streams"`
+	OrderedPercent   int           `json:"ordered_percent"`
+	EventsPerSecond  int           `json:"events_per_second"`
+	FaultInterval    time.Duration `json:"fault_interval"`
+	Faults           bool          `json:"faults"`
+	PayloadBytes     int           `json:"payload_bytes"`
+	RelayMaxAttempts int           `json:"relay_max_attempts"`
+	RelayBaseDelay   time.Duration `json:"relay_base_delay"`
+	RelayMaxDelay    time.Duration `json:"relay_max_delay"`
 }
 
 type State struct {
@@ -131,11 +138,11 @@ type Result struct {
 func profile(name string) (Config, error) {
 	switch name {
 	case "quick":
-		return Config{Profile: name, Duration: 90 * time.Second, RecoveryTimeout: 3 * time.Minute, Warmup: 3 * time.Second, Relays: 2, OrderedStreams: 100, OrderedPercent: 80, EventsPerSecond: 40, FaultInterval: 12 * time.Second, Faults: true, PayloadBytes: 256}, nil
+		return Config{Profile: name, Duration: 90 * time.Second, RecoveryTimeout: 3 * time.Minute, Warmup: 3 * time.Second, Relays: 2, OrderedStreams: 100, OrderedPercent: 80, EventsPerSecond: 40, FaultInterval: 12 * time.Second, Faults: true, PayloadBytes: 256, RelayMaxAttempts: soakRelayMaxAttempts, RelayBaseDelay: soakRelayBaseDelay, RelayMaxDelay: soakRelayMaxDelay}, nil
 	case "standard":
-		return Config{Profile: name, Duration: 20 * time.Minute, RecoveryTimeout: 5 * time.Minute, Warmup: 10 * time.Second, Relays: 4, OrderedStreams: 1000, OrderedPercent: 80, EventsPerSecond: 120, FaultInterval: 45 * time.Second, Faults: true, PayloadBytes: 512}, nil
+		return Config{Profile: name, Duration: 20 * time.Minute, RecoveryTimeout: 5 * time.Minute, Warmup: 10 * time.Second, Relays: 4, OrderedStreams: 1000, OrderedPercent: 80, EventsPerSecond: 120, FaultInterval: 45 * time.Second, Faults: true, PayloadBytes: 512, RelayMaxAttempts: soakRelayMaxAttempts, RelayBaseDelay: soakRelayBaseDelay, RelayMaxDelay: soakRelayMaxDelay}, nil
 	case "release":
-		return Config{Profile: name, Duration: time.Hour, RecoveryTimeout: 10 * time.Minute, Warmup: 15 * time.Second, Relays: 4, OrderedStreams: 3500, OrderedPercent: 80, EventsPerSecond: 250, FaultInterval: time.Minute, Faults: true, PayloadBytes: 512}, nil
+		return Config{Profile: name, Duration: time.Hour, RecoveryTimeout: 10 * time.Minute, Warmup: 15 * time.Second, Relays: 4, OrderedStreams: 3500, OrderedPercent: 80, EventsPerSecond: 250, FaultInterval: time.Minute, Faults: true, PayloadBytes: 512, RelayMaxAttempts: soakRelayMaxAttempts, RelayBaseDelay: soakRelayBaseDelay, RelayMaxDelay: soakRelayMaxDelay}, nil
 	default:
 		return Config{}, fmt.Errorf("unknown profile %q (want quick, standard, or release)", name)
 	}
@@ -150,6 +157,9 @@ func (c Config) validate() error {
 	}
 	if c.OrderedPercent < 1 || c.OrderedPercent > 99 {
 		return errors.New("ordered percent must be between 1 and 99")
+	}
+	if c.RelayMaxAttempts < 1 || c.RelayBaseDelay <= 0 || c.RelayMaxDelay < c.RelayBaseDelay {
+		return errors.New("relay retry attempts and delays must define a valid positive policy")
 	}
 	return nil
 }
