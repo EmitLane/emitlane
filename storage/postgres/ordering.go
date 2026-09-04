@@ -7,9 +7,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	internalordering "github.com/emitlane/emitlane/internal/ordering"
 	"github.com/emitlane/emitlane/relay"
+	"github.com/emitlane/emitlane/telemetry"
 )
 
 type partitionRow struct {
@@ -31,8 +35,18 @@ func (s *Store) ReconcileOrderingPartitions(
 	presenceStaleAfter time.Duration,
 	safetyMargin time.Duration,
 ) ([]relay.OrderingPartition, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "emitlane.ordering.partition.reconcile",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	span.SetAttributes(attribute.String("emitlane.relay_instance", owner))
+	recordError := func(err error) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("reconcile ordering partitions begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
@@ -71,6 +85,7 @@ FOR UPDATE`)
 
 	leaseUntil := now.Add(leaseDuration)
 	publishMS := int(intervalMS(publishTimeout))
+	acquired, renewed, released := 0, 0, 0
 	for i := range locked {
 		row := &locked[i]
 		desired := internalordering.DesiredOwner(row.id, members)
@@ -90,6 +105,7 @@ WHERE partition_id=$1 AND lease_owner=$4`, row.id, barrier, now, owner); err != 
 			row.leaseOwner, row.leaseUntil = nil, nil
 			row.epoch++
 			row.handoffNotBefore = &barrier
+			released++
 
 		case desired == owner && actual == owner && valid:
 			if _, err := tx.Exec(ctx, `
@@ -101,6 +117,7 @@ WHERE partition_id=$1 AND lease_owner=$5 AND epoch=$6`,
 			}
 			row.leaseUntil = &leaseUntil
 			row.publishTimeoutMS = &publishMS
+			renewed++
 
 		case desired == owner && (actual == "" || !valid):
 			barrier := row.handoffNotBefore
@@ -123,10 +140,12 @@ WHERE partition_id=$1
 			row.epoch++
 			row.handoffNotBefore = barrier
 			row.publishTimeoutMS = &publishMS
+			acquired++
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("reconcile ordering partitions commit: %w", err)
 	}
 	result := make([]relay.OrderingPartition, 0, len(locked))
@@ -140,6 +159,18 @@ WHERE partition_id=$1
 			HandoffNotBefore: row.handoffNotBefore,
 		})
 	}
+	if acquired > 0 {
+		span.SetName("emitlane.ordering.partition.acquire")
+	} else if released > 0 {
+		span.SetName("emitlane.ordering.partition.handoff")
+	} else {
+		span.SetName("emitlane.ordering.partition.renew")
+	}
+	span.SetAttributes(
+		attribute.Int("emitlane.ordering_partitions_acquired", acquired),
+		attribute.Int("emitlane.ordering_partitions_renewed", renewed),
+		attribute.Int("emitlane.ordering_partitions_released", released),
+	)
 	return result, nil
 }
 
@@ -189,6 +220,11 @@ func releaseBarrier(now time.Time, existing *time.Time, publishTimeoutMS *int, s
 // ReleaseOrderingPartitions gracefully relinquishes all partitions held by an
 // owner and establishes a handoff barrier from the persisted publish window.
 func (s *Store) ReleaseOrderingPartitions(ctx context.Context, owner string, safetyMargin time.Duration) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "emitlane.ordering.partition.handoff",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	span.SetAttributes(attribute.String("emitlane.relay_instance", owner))
 	const query = `
 UPDATE emitlane.ordering_partitions
 SET lease_owner=NULL,
@@ -201,6 +237,8 @@ SET lease_owner=NULL,
     updated_at=NOW()
 WHERE lease_owner=$1`
 	if _, err := s.pool.Exec(ctx, query, owner, intervalMS(safetyMargin)); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("release ordering partitions for %s: %w", owner, err)
 	}
 	return nil

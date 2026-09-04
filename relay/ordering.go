@@ -62,8 +62,27 @@ func (r *Relay) reconcileOrdering(ctx context.Context, store OrderingPartitionSt
 		return
 	}
 	r.orderingMu.Lock()
+	previous := make(map[int16]OrderingPartition, len(r.orderingPartitions))
+	for _, partition := range r.orderingPartitions {
+		previous[partition.PartitionID] = partition
+	}
+	acquisitions := 0
+	rebalanced := false
+	for _, partition := range partitions {
+		prior, existed := previous[partition.PartitionID]
+		if partition.LeaseOwner == r.cfg.InstanceID && (!existed || prior.LeaseOwner != r.cfg.InstanceID) {
+			acquisitions++
+		}
+		if existed && prior.DesiredOwner != partition.DesiredOwner {
+			rebalanced = true
+		}
+	}
 	r.orderingPartitions = partitions
 	r.orderingMu.Unlock()
+	r.metrics.AddOrderingAcquisitions(acquisitions)
+	if rebalanced {
+		r.metrics.IncOrderingRebalance()
+	}
 }
 
 func (r *Relay) releaseOrderingPartitions(store OrderingPartitionStore) {

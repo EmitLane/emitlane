@@ -504,6 +504,17 @@ WHERE control.singleton = TRUE`
 		&st.Paused, &st.RelaysActive, &st.RelaysStale); err != nil {
 		return relay.Stats{}, fmt.Errorf("stats: %w", err)
 	}
+	ordering, err := s.readOrderingStats(ctx)
+	if err != nil {
+		return relay.Stats{}, err
+	}
+	st.OrderedStreams = ordering.streams
+	st.BlockedOrderedStreams = ordering.blocked
+	st.GapStreams = ordering.gaps
+	st.DeadBlockedStreams = ordering.deadBlocked
+	st.OwnedPartitions = ordering.owned
+	st.HandoffPartitions = ordering.handoff
+	st.MaxGapAgeSeconds = ordering.maxGapAge
 	return st, nil
 }
 

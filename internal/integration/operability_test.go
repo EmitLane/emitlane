@@ -414,6 +414,124 @@ func TestReplayCreatesUUIDv7CloneWithProvenanceAndHeaders(t *testing.T) {
 	}
 }
 
+func TestOrderedReplayRequiresExplicitUnorderedMode(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	sourceID := uuid.MustParse(enqueueOrdered(t, e, topic, "order:ordered-replay", 1))
+	runRelay(t, e.newRelay(t, orderedRelayConfig("ordered-replay-relay"), e.publisher(t), relay.FailureHooks{}))
+	e.waitStatus(t, sourceID.String(), "delivered", 20*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service := adminService(t, e, time.Second)
+	if _, err := service.SetPaused(ctx, true, adminapi.Mutation{Actor: "integration", Reason: "inspect replay"}); err != nil {
+		t.Fatal(err)
+	}
+	mutation := adminapi.Mutation{Actor: "integration", Reason: "ordered consumer recovery"}
+	if _, err := service.ReplayEvent(ctx, sourceID, mutation); !errors.Is(err, adminapi.ErrConflict) {
+		t.Fatalf("default ordered replay error = %v, want conflict", err)
+	}
+
+	mutation.OrderingMode = "unordered"
+	result, err := service.ReplayEvent(ctx, sourceID, mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || len(result.EventIDs) != 1 || result.EventIDs[0] == sourceID {
+		t.Fatalf("ordered replay result = %+v", result)
+	}
+	clone, err := service.InspectEvent(ctx, result.EventIDs[0], true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clone.OrderingKey != "" || clone.OrderingSequence != 0 || clone.OrderingPartition != nil {
+		t.Fatalf("unordered replay retained active ordering fields: %+v", clone)
+	}
+	if clone.Headers[broker.HeaderOriginalOrderingKey] != "order:ordered-replay" ||
+		clone.Headers[broker.HeaderOriginalSequence] != "1" {
+		t.Fatalf("unordered replay provenance headers = %+v", clone.Headers)
+	}
+	stream, err := service.InspectOrderingStream(ctx, topic, "order:ordered-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.NextSequence != 2 {
+		t.Fatalf("ordered replay changed stream next sequence to %d", stream.NextSequence)
+	}
+	source, err := service.InspectEvent(ctx, sourceID, false)
+	if err != nil || source.Status != "delivered" || source.OrderingSequence != 1 {
+		t.Fatalf("ordered replay changed source: %+v err=%v", source, err)
+	}
+}
+
+func TestOrderingInspectionReportsGapPaginationPartitionsAndStats(t *testing.T) {
+	e := startEnv(t)
+	topic := topicName(t, e)
+	enqueueOrderedInCommittedTx := func(key string, sequence, start int64) {
+		t.Helper()
+		tx, err := e.pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(context.Background())
+		enqueueOrderedInTx(t, e, tx, topic, key, sequence, start)
+		if err := tx.Commit(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enqueueOrderedInCommittedTx("order:gap-a", 11, 10)
+	enqueueOrderedInCommittedTx("order:gap-b", 21, 20)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	service := adminService(t, e, time.Second)
+	stream, err := service.InspectOrderingStream(ctx, topic, "order:gap-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.State != "gap" || stream.NextSequence != 10 || stream.LowestFutureSequence == nil ||
+		*stream.LowestFutureSequence != 11 || stream.GapSize != 1 || stream.NextEventID != nil {
+		t.Fatalf("gap stream = %+v", stream)
+	}
+
+	first, err := service.ListOrderingStreams(ctx, adminapi.OrderingStreamFilter{Destination: topic, BlockedOnly: true, Limit: 1})
+	if err != nil || len(first.Streams) != 1 || first.NextCursor == "" {
+		t.Fatalf("first stream page = %+v err=%v", first, err)
+	}
+	cursor, err := adminapi.DecodeOrderingStreamCursor(first.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ListOrderingStreams(ctx, adminapi.OrderingStreamFilter{Destination: topic, BlockedOnly: true, Limit: 1, Cursor: cursor})
+	if err != nil || len(second.Streams) != 1 || second.Streams[0].OrderingKey == first.Streams[0].OrderingKey {
+		t.Fatalf("second stream page = %+v err=%v", second, err)
+	}
+
+	registerOrderingRelay(t, e, "ordering-inspection-relay")
+	reconcileOrdering(t, e, "ordering-inspection-relay")
+	partitions, err := service.ListOrderingPartitions(ctx)
+	if err != nil || len(partitions) != 64 {
+		t.Fatalf("ordering partitions = %d err=%v", len(partitions), err)
+	}
+	owned := 0
+	for _, partition := range partitions {
+		if partition.State == "owned" && partition.ActualOwner == "ordering-inspection-relay" {
+			owned++
+		}
+	}
+	if owned != 64 {
+		t.Fatalf("owned ordering partitions = %d, want 64", owned)
+	}
+	stats, err := service.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.OrderedStreams != 2 || stats.BlockedOrderedStreams != 2 || stats.GapStreams != 2 ||
+		stats.DeadBlockedStreams != 0 || stats.OwnedPartitions != 64 {
+		t.Fatalf("ordering stats = %+v", stats)
+	}
+}
+
 func TestInboxTreatsReplayAsNewIdentity(t *testing.T) {
 	e := startEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

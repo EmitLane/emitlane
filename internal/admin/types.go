@@ -44,6 +44,9 @@ type Event struct {
 	PayloadSize         int64             `json:"payload_size"`
 	ReplayedFromEventID *uuid.UUID        `json:"replayed_from_event_id,omitempty"`
 	ReplayBatchID       *uuid.UUID        `json:"replay_batch_id,omitempty"`
+	OrderingKey         string            `json:"ordering_key,omitempty"`
+	OrderingSequence    int64             `json:"ordering_sequence,omitempty"`
+	OrderingPartition   *int16            `json:"ordering_partition,omitempty"`
 	KeyBase64           *string           `json:"message_key_base64,omitempty"`
 	PayloadBase64       *string           `json:"payload_base64,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
@@ -124,20 +127,106 @@ type RelayInstance struct {
 	LastHeartbeatAt time.Time  `json:"last_heartbeat_at"`
 	StoppedAt       *time.Time `json:"stopped_at,omitempty"`
 	State           string     `json:"state"`
+	OrderingCapable bool       `json:"ordering_capable"`
 }
 
 type Stats struct {
-	Pending              int64   `json:"pending"`
-	PendingDue           int64   `json:"pending_due"`
-	PendingScheduled     int64   `json:"pending_scheduled"`
-	Inflight             int64   `json:"inflight"`
-	DeliveredRetained    int64   `json:"delivered_retained"`
-	Dead                 int64   `json:"dead"`
-	OldestPendingSeconds float64 `json:"oldest_pending_seconds"`
-	Paused               bool    `json:"paused"`
-	ActiveRelays         int64   `json:"active_relays"`
-	StaleRelays          int64   `json:"stale_relays"`
-	StoppedRelays        int64   `json:"stopped_relays"`
+	Pending               int64   `json:"pending"`
+	PendingDue            int64   `json:"pending_due"`
+	PendingScheduled      int64   `json:"pending_scheduled"`
+	Inflight              int64   `json:"inflight"`
+	DeliveredRetained     int64   `json:"delivered_retained"`
+	Dead                  int64   `json:"dead"`
+	OldestPendingSeconds  float64 `json:"oldest_pending_seconds"`
+	Paused                bool    `json:"paused"`
+	ActiveRelays          int64   `json:"active_relays"`
+	StaleRelays           int64   `json:"stale_relays"`
+	StoppedRelays         int64   `json:"stopped_relays"`
+	OrderedStreams        int64   `json:"ordered_streams"`
+	BlockedOrderedStreams int64   `json:"blocked_ordered_streams"`
+	GapStreams            int64   `json:"gap_streams"`
+	DeadBlockedStreams    int64   `json:"dead_blocked_streams"`
+	OwnedPartitions       int64   `json:"owned_partitions"`
+	HandoffPartitions     int64   `json:"handoff_partitions"`
+}
+
+type OrderingStreamCursor struct {
+	Destination string `json:"destination"`
+	OrderingKey string `json:"ordering_key"`
+}
+
+func EncodeOrderingStreamCursor(c OrderingStreamCursor) (string, error) {
+	if strings.TrimSpace(c.Destination) == "" || strings.TrimSpace(c.OrderingKey) == "" {
+		return "", fmt.Errorf("%w: ordering stream cursor is incomplete", ErrInvalid)
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("encode ordering stream cursor: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func DecodeOrderingStreamCursor(value string) (*OrderingStreamCursor, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	if len(value) > 4096 {
+		return nil, fmt.Errorf("%w: ordering stream cursor is too long", ErrInvalid)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: malformed ordering stream cursor", ErrInvalid)
+	}
+	var cursor OrderingStreamCursor
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cursor); err != nil || strings.TrimSpace(cursor.Destination) == "" || strings.TrimSpace(cursor.OrderingKey) == "" {
+		return nil, fmt.Errorf("%w: malformed ordering stream cursor", ErrInvalid)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: malformed ordering stream cursor", ErrInvalid)
+	}
+	return &cursor, nil
+}
+
+type OrderingStream struct {
+	Destination          string     `json:"destination"`
+	OrderingKey          string     `json:"ordering_key"`
+	Partition            int16      `json:"partition"`
+	StartSequence        int64      `json:"start_sequence"`
+	NextSequence         int64      `json:"next_sequence"`
+	State                string     `json:"state"`
+	NextEventID          *uuid.UUID `json:"next_event_id,omitempty"`
+	NextEventStatus      string     `json:"next_event_status,omitempty"`
+	NextEventAttempts    int        `json:"next_event_attempts,omitempty"`
+	LowestFutureSequence *int64     `json:"lowest_future_sequence,omitempty"`
+	GapSize              int64      `json:"gap_size,omitempty"`
+	GapAgeSeconds        float64    `json:"gap_age_seconds,omitempty"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+type OrderingStreamFilter struct {
+	State       string
+	Destination string
+	Partition   *int16
+	BlockedOnly bool
+	Limit       int
+	Cursor      *OrderingStreamCursor
+}
+
+type OrderingStreamPage struct {
+	Streams    []OrderingStream `json:"items"`
+	NextCursor string           `json:"next_cursor,omitempty"`
+}
+
+type OrderingPartition struct {
+	PartitionID      int16      `json:"partition_id"`
+	DesiredOwner     string     `json:"desired_owner,omitempty"`
+	ActualOwner      string     `json:"actual_owner,omitempty"`
+	Epoch            int64      `json:"epoch"`
+	LeaseUntil       *time.Time `json:"lease_until,omitempty"`
+	HandoffNotBefore *time.Time `json:"handoff_not_before,omitempty"`
+	State            string     `json:"state"`
 }
 
 type AuditRecord struct {
@@ -164,11 +253,12 @@ type AuditPage struct {
 }
 
 type Mutation struct {
-	Actor       string
-	Reason      string
-	RequestID   string
-	Traceparent string
-	Tracestate  string
+	Actor        string
+	Reason       string
+	RequestID    string
+	Traceparent  string
+	Tracestate   string
+	OrderingMode string
 }
 
 type ReplayPreview struct {
@@ -198,4 +288,7 @@ type Store interface {
 	PreviewReplay(ctx context.Context, filter EventFilter, sampleLimit, executionLimit int) (ReplayPreview, error)
 	ReplayBatch(ctx context.Context, filter EventFilter, mutation Mutation, limit int) (ReplayResult, error)
 	ListAudit(ctx context.Context, filter AuditFilter) (AuditPage, error)
+	ListOrderingStreams(ctx context.Context, filter OrderingStreamFilter) (OrderingStreamPage, error)
+	InspectOrderingStream(ctx context.Context, destination, orderingKey string) (OrderingStream, error)
+	ListOrderingPartitions(ctx context.Context, staleAfter time.Duration) ([]OrderingPartition, error)
 }

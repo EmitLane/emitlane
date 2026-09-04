@@ -72,6 +72,9 @@ func statsCmd(args []string) error {
 	fmt.Printf("paused: %t\npending: %d (%d due, %d scheduled)\ninflight: %d\ndelivered retained: %d\ndead: %d\noldest pending: %.1fs\nrelays: %d active, %d stale, %d stopped\n",
 		stats.Paused, stats.Pending, stats.PendingDue, stats.PendingScheduled, stats.Inflight, stats.DeliveredRetained, stats.Dead,
 		stats.OldestPendingSeconds, stats.ActiveRelays, stats.StaleRelays, stats.StoppedRelays)
+	fmt.Printf("ordering: %d streams, %d blocked (%d gap, %d dead), %d owned partitions, %d handoff\n",
+		stats.OrderedStreams, stats.BlockedOrderedStreams, stats.GapStreams, stats.DeadBlockedStreams,
+		stats.OwnedPartitions, stats.HandoffPartitions)
 	return nil
 }
 
@@ -172,6 +175,10 @@ func eventsInspectCmd(args []string) error {
 	if event.ReplayedFromEventID != nil {
 		fmt.Printf("replayed from: %s\nreplay batch: %s\n", event.ReplayedFromEventID, event.ReplayBatchID)
 	}
+	if event.OrderingKey != "" {
+		fmt.Printf("ordering key: %s\nsequence: %d\npartition: %d\n",
+			event.OrderingKey, event.OrderingSequence, *event.OrderingPartition)
+	}
 	return nil
 }
 
@@ -257,6 +264,7 @@ func replayEventCmd(args []string) error {
 	fs := flag.NewFlagSet("replay event", flag.ContinueOnError)
 	reason := fs.String("reason", "", "operator reason")
 	jsonOutput := fs.Bool("json", false, "print JSON")
+	unordered := fs.Bool("unordered", false, "replay an ordered source outside its historical stream")
 	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
 		return fmt.Errorf("usage: emitlane replay event <event-id> --reason reason")
 	}
@@ -267,7 +275,11 @@ func replayEventCmd(args []string) error {
 		return err
 	}
 	defer pool.Close()
-	result, err := service.ReplayEvent(ctx, id, adminapi.Mutation{Actor: "cli", Reason: *reason})
+	mutation := adminapi.Mutation{Actor: "cli", Reason: *reason}
+	if *unordered {
+		mutation.OrderingMode = "unordered"
+	}
+	result, err := service.ReplayEvent(ctx, id, mutation)
 	if err != nil {
 		return err
 	}
@@ -289,6 +301,7 @@ func replayRangeCmd(args []string) error {
 	limit := fs.Int("limit", adminapi.MaxReplayBatch, "maximum events to replay")
 	execute := fs.Bool("execute", false, "execute the replay; default is preview")
 	jsonOutput := fs.Bool("json", false, "print JSON")
+	unordered := fs.Bool("unordered", false, "replay ordered sources outside their historical streams")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return fmt.Errorf("usage: emitlane replay range [selector] --reason reason [--execute]")
 	}
@@ -318,7 +331,11 @@ func replayRangeCmd(args []string) error {
 		fmt.Println("no changes made; pass --execute to create replay events")
 		return nil
 	}
-	result, err := service.ReplayBatch(ctx, filter, adminapi.Mutation{Actor: "cli", Reason: *reason})
+	mutation := adminapi.Mutation{Actor: "cli", Reason: *reason}
+	if *unordered {
+		mutation.OrderingMode = "unordered"
+	}
+	result, err := service.ReplayBatch(ctx, filter, mutation)
 	if err != nil {
 		return err
 	}
@@ -326,6 +343,128 @@ func replayRangeCmd(args []string) error {
 		return writeJSON(result)
 	}
 	fmt.Printf("created %d replay event(s) in batch %s\n", result.Created, result.ReplayBatchID)
+	return nil
+}
+
+func orderingCmd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: emitlane ordering streams|inspect|partitions")
+	}
+	switch args[0] {
+	case "streams":
+		return orderingStreamsCmd(args[1:])
+	case "inspect":
+		return orderingInspectCmd(args[1:])
+	case "partitions":
+		return orderingPartitionsCmd(args[1:])
+	default:
+		return fmt.Errorf("usage: emitlane ordering streams|inspect|partitions")
+	}
+}
+
+func orderingStreamsCmd(args []string) error {
+	fs := flag.NewFlagSet("ordering streams", flag.ContinueOnError)
+	state := fs.String("state", "", "computed stream state")
+	destination := fs.String("destination", "", "destination")
+	partitionRaw := fs.Int("partition", -1, "virtual partition 0..63")
+	blocked := fs.Bool("blocked", false, "show only blocked streams")
+	limit := fs.Int("limit", adminapi.DefaultPageSize, "page size")
+	cursorRaw := fs.String("cursor", "", "pagination cursor")
+	jsonOutput := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return fmt.Errorf("usage: emitlane ordering streams [--blocked] [--json]")
+	}
+	cursor, err := adminapi.DecodeOrderingStreamCursor(*cursorRaw)
+	if err != nil {
+		return err
+	}
+	var partition *int16
+	if *partitionRaw >= 0 {
+		value := int16(*partitionRaw)
+		partition = &value
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service, pool, err := openAdminService(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	page, err := service.ListOrderingStreams(ctx, adminapi.OrderingStreamFilter{
+		State: *state, Destination: *destination, Partition: partition, BlockedOnly: *blocked,
+		Limit: *limit, Cursor: cursor,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(page)
+	}
+	for _, stream := range page.Streams {
+		fmt.Printf("%-14s  p%02d  next=%-8d  %-24s  %s\n", stream.State, stream.Partition,
+			stream.NextSequence, oneLine(stream.Destination, 24), stream.OrderingKey)
+	}
+	if page.NextCursor != "" {
+		fmt.Printf("next cursor: %s\n", page.NextCursor)
+	}
+	return nil
+}
+
+func orderingInspectCmd(args []string) error {
+	fs := flag.NewFlagSet("ordering inspect", flag.ContinueOnError)
+	destination := fs.String("destination", "", "destination")
+	key := fs.String("key", "", "ordering key")
+	jsonOutput := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *destination == "" || *key == "" {
+		return fmt.Errorf("usage: emitlane ordering inspect --destination name --key key [--json]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service, pool, err := openAdminService(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	stream, err := service.InspectOrderingStream(ctx, *destination, *key)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(stream)
+	}
+	fmt.Printf("destination: %s\nordering key: %s\npartition: %d\nstart sequence: %d\nnext sequence: %d\nstate: %s\n",
+		stream.Destination, stream.OrderingKey, stream.Partition, stream.StartSequence, stream.NextSequence, stream.State)
+	if stream.LowestFutureSequence != nil {
+		fmt.Printf("lowest future sequence: %d\ngap size: %d\ngap age: %.1fs\n",
+			*stream.LowestFutureSequence, stream.GapSize, stream.GapAgeSeconds)
+	}
+	return nil
+}
+
+func orderingPartitionsCmd(args []string) error {
+	fs := flag.NewFlagSet("ordering partitions", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return fmt.Errorf("usage: emitlane ordering partitions [--json]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service, pool, err := openAdminService(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	partitions, err := service.ListOrderingPartitions(ctx)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return writeJSON(map[string]any{"partitions": partitions})
+	}
+	for _, partition := range partitions {
+		fmt.Printf("%02d  %-7s  desired=%-24s actual=%-24s epoch=%d\n", partition.PartitionID,
+			partition.State, partition.DesiredOwner, partition.ActualOwner, partition.Epoch)
+	}
 	return nil
 }
 

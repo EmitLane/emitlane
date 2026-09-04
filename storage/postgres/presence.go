@@ -62,6 +62,7 @@ WHERE instance_id = $1`, instanceID)
 func (s *Store) ListRelays(ctx context.Context, staleAfter time.Duration) ([]adminapi.RelayInstance, error) {
 	const query = `
 SELECT instance_id, hostname, version, started_at, last_heartbeat_at, stopped_at,
+       ordering_capable,
        CASE
            WHEN stopped_at IS NOT NULL THEN 'stopped'
            WHEN last_heartbeat_at < NOW() - ($1 * INTERVAL '1 millisecond') THEN 'stale'
@@ -78,7 +79,8 @@ ORDER BY instance_id`
 	for rows.Next() {
 		var instance adminapi.RelayInstance
 		if err := rows.Scan(&instance.InstanceID, &instance.Hostname, &instance.Version,
-			&instance.StartedAt, &instance.LastHeartbeatAt, &instance.StoppedAt, &instance.State); err != nil {
+			&instance.StartedAt, &instance.LastHeartbeatAt, &instance.StoppedAt,
+			&instance.OrderingCapable, &instance.State); err != nil {
 			return nil, fmt.Errorf("list relays scan: %w", err)
 		}
 		instances = append(instances, instance)
@@ -89,6 +91,7 @@ ORDER BY instance_id`
 func (s *Store) GetRelay(ctx context.Context, id string, staleAfter time.Duration) (adminapi.RelayInstance, error) {
 	const query = `
 SELECT instance_id, hostname, version, started_at, last_heartbeat_at, stopped_at,
+       ordering_capable,
        CASE
            WHEN stopped_at IS NOT NULL THEN 'stopped'
            WHEN last_heartbeat_at < NOW() - ($2 * INTERVAL '1 millisecond') THEN 'stale'
@@ -99,7 +102,8 @@ WHERE instance_id = $1`
 	var instance adminapi.RelayInstance
 	err := s.pool.QueryRow(ctx, query, id, intervalMS(staleAfter)).Scan(
 		&instance.InstanceID, &instance.Hostname, &instance.Version,
-		&instance.StartedAt, &instance.LastHeartbeatAt, &instance.StoppedAt, &instance.State,
+		&instance.StartedAt, &instance.LastHeartbeatAt, &instance.StoppedAt,
+		&instance.OrderingCapable, &instance.State,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return adminapi.RelayInstance{}, fmt.Errorf("%w: relay %q", adminapi.ErrNotFound, id)

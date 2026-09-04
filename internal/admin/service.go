@@ -139,6 +139,38 @@ func (s *Service) ListAudit(ctx context.Context, filter AuditFilter) (AuditPage,
 	return s.store.ListAudit(ctx, filter)
 }
 
+func (s *Service) ListOrderingStreams(ctx context.Context, filter OrderingStreamFilter) (OrderingStreamPage, error) {
+	filter.State = strings.ToLower(strings.TrimSpace(filter.State))
+	filter.Destination = strings.TrimSpace(filter.Destination)
+	if filter.State != "" && filter.State != "ready" && filter.State != "inflight" &&
+		filter.State != "retry_wait" && filter.State != "gap" && filter.State != "dead_blocked" {
+		return OrderingStreamPage{}, fmt.Errorf("%w: unsupported ordering state %q", ErrInvalid, filter.State)
+	}
+	if filter.Partition != nil && (*filter.Partition < 0 || *filter.Partition >= 64) {
+		return OrderingStreamPage{}, fmt.Errorf("%w: partition must be between 0 and 63", ErrInvalid)
+	}
+	if filter.Limit == 0 {
+		filter.Limit = DefaultPageSize
+	}
+	if filter.Limit < 1 || filter.Limit > MaxPageSize {
+		return OrderingStreamPage{}, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalid, MaxPageSize)
+	}
+	return s.store.ListOrderingStreams(ctx, filter)
+}
+
+func (s *Service) InspectOrderingStream(ctx context.Context, destination, orderingKey string) (OrderingStream, error) {
+	destination = strings.TrimSpace(destination)
+	orderingKey = strings.TrimSpace(orderingKey)
+	if destination == "" || orderingKey == "" {
+		return OrderingStream{}, fmt.Errorf("%w: destination and ordering_key are required", ErrInvalid)
+	}
+	return s.store.InspectOrderingStream(ctx, destination, orderingKey)
+}
+
+func (s *Service) ListOrderingPartitions(ctx context.Context) ([]OrderingPartition, error) {
+	return s.store.ListOrderingPartitions(ctx, s.staleAfter)
+}
+
 func normalizeEventFilter(filter *EventFilter, replay bool) error {
 	filter.Destination = strings.TrimSpace(filter.Destination)
 	filter.EventType = strings.TrimSpace(filter.EventType)
@@ -190,6 +222,7 @@ func normalizeMutation(ctx context.Context, mutation Mutation, reasonRequired bo
 	mutation.Actor = strings.TrimSpace(mutation.Actor)
 	mutation.Reason = strings.TrimSpace(mutation.Reason)
 	mutation.RequestID = strings.TrimSpace(mutation.RequestID)
+	mutation.OrderingMode = strings.ToLower(strings.TrimSpace(mutation.OrderingMode))
 	if mutation.Actor == "" || len(mutation.Actor) > 256 {
 		return Mutation{}, fmt.Errorf("%w: actor is required", ErrInvalid)
 	}
@@ -213,6 +246,9 @@ func normalizeMutation(ctx context.Context, mutation Mutation, reasonRequired bo
 	}
 	if mutation.Traceparent == "" {
 		mutation.Traceparent, mutation.Tracestate = telemetry.InjectTrace(ctx)
+	}
+	if mutation.OrderingMode != "" && mutation.OrderingMode != "unordered" {
+		return Mutation{}, fmt.Errorf("%w: ordering_mode must be unordered", ErrInvalid)
 	}
 	return mutation, nil
 }

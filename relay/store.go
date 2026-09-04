@@ -40,13 +40,20 @@ type Event struct {
 
 // Stats is a point-in-time snapshot of durable relay state.
 type Stats struct {
-	Pending              int64
-	Inflight             int64
-	Dead                 int64
-	OldestPendingSeconds float64
-	Paused               bool
-	RelaysActive         int64
-	RelaysStale          int64
+	Pending               int64
+	Inflight              int64
+	Dead                  int64
+	OldestPendingSeconds  float64
+	Paused                bool
+	RelaysActive          int64
+	RelaysStale           int64
+	OrderedStreams        int64
+	BlockedOrderedStreams int64
+	GapStreams            int64
+	DeadBlockedStreams    int64
+	OwnedPartitions       int64
+	HandoffPartitions     int64
+	MaxGapAgeSeconds      float64
 }
 
 // Store is the relay's durable outbox port. Implementations must commit Claim

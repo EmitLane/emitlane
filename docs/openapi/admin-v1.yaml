@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EmitLane Admin API
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Operational API for redacted inspection, relay control, retry, and replay.
     Replay creates a new event identity and can execute downstream business logic again.
@@ -91,7 +91,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/RequiredMutation" }
+            schema: { $ref: "#/components/schemas/OrderedReplayMutation" }
       responses:
         "201":
           description: Replay created atomically with audit
@@ -225,6 +225,62 @@ paths:
                     items: { $ref: "#/components/schemas/Audit" }
                   next_cursor: { type: string }
         default: { $ref: "#/components/responses/Error" }
+  /ordering/streams:
+    get:
+      summary: List ordered streams and their computed operational state
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [ready, inflight, retry_wait, gap, dead_blocked] }
+        - { name: destination, in: query, schema: { type: string } }
+        - { name: partition, in: query, schema: { type: integer, minimum: 0, maximum: 63 } }
+        - { name: blocked_only, in: query, schema: { type: boolean, default: false } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Ordered stream keyset page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/OrderingStream" }
+                  next_cursor: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+  /ordering/stream:
+    get:
+      summary: Inspect one ordered stream without exposing event payload
+      parameters:
+        - { name: destination, in: query, required: true, schema: { type: string } }
+        - { name: ordering_key, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Ordered stream
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderingStream" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+  /ordering/partitions:
+    get:
+      summary: List desired and leased virtual-partition ownership
+      responses:
+        "200":
+          description: All 64 virtual ordering partitions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [partitions]
+                properties:
+                  partitions:
+                    type: array
+                    items: { $ref: "#/components/schemas/OrderingPartition" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
@@ -259,7 +315,7 @@ components:
   schemas:
     Stats:
       type: object
-      required: [paused, pending, pending_due, pending_scheduled, inflight, delivered_retained, dead, oldest_pending_seconds, active_relays, stale_relays, stopped_relays]
+      required: [paused, pending, pending_due, pending_scheduled, inflight, delivered_retained, dead, oldest_pending_seconds, active_relays, stale_relays, stopped_relays, ordered_streams, blocked_ordered_streams, gap_streams, dead_blocked_streams, owned_partitions, handoff_partitions]
       properties:
         paused: { type: boolean }
         pending: { type: integer, format: int64 }
@@ -272,6 +328,12 @@ components:
         active_relays: { type: integer, format: int64 }
         stale_relays: { type: integer, format: int64 }
         stopped_relays: { type: integer, format: int64 }
+        ordered_streams: { type: integer, format: int64 }
+        blocked_ordered_streams: { type: integer, format: int64 }
+        gap_streams: { type: integer, format: int64 }
+        dead_blocked_streams: { type: integer, format: int64 }
+        owned_partitions: { type: integer, format: int64 }
+        handoff_partitions: { type: integer, format: int64 }
     Event:
       type: object
       required: [id, destination, event_type, content_type, schema_version, status, attempts, available_at, created_at, payload_size]
@@ -294,6 +356,9 @@ components:
         payload_size: { type: integer, format: int64, minimum: 0 }
         replayed_from_event_id: { type: string, format: uuid }
         replay_batch_id: { type: string, format: uuid }
+        ordering_key: { type: string }
+        ordering_sequence: { type: integer, format: int64, minimum: 1 }
+        ordering_partition: { type: integer, minimum: 0, maximum: 63 }
         message_key_base64: { type: string, contentEncoding: base64 }
         payload_base64: { type: string, contentEncoding: base64 }
         headers:
@@ -301,7 +366,7 @@ components:
           additionalProperties: { type: string }
     RelayInstance:
       type: object
-      required: [instance_id, hostname, version, started_at, last_heartbeat_at, state]
+      required: [instance_id, hostname, version, started_at, last_heartbeat_at, state, ordering_capable]
       properties:
         instance_id: { type: string }
         hostname: { type: string }
@@ -310,6 +375,7 @@ components:
         last_heartbeat_at: { type: string, format: date-time }
         stopped_at: { type: string, format: date-time }
         state: { type: string, enum: [active, stale, stopped] }
+        ordering_capable: { type: boolean }
     Control:
       type: object
       required: [paused, updated_at, updated_by]
@@ -328,6 +394,16 @@ components:
         - { $ref: "#/components/schemas/Mutation" }
         - type: object
           required: [reason]
+    OrderedReplayMutation:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 4096 }
+        ordering_mode:
+          type: string
+          enum: [unordered]
+          description: Required acknowledgement when replaying an ordered source.
     ReplayFilter:
       type: object
       additionalProperties: false
@@ -341,6 +417,10 @@ components:
           items: { type: string, enum: [delivered, dead] }
         limit: { type: integer, minimum: 1, maximum: 1000, default: 1000 }
         reason: { type: string, minLength: 1, maxLength: 4096 }
+        ordering_mode:
+          type: string
+          enum: [unordered]
+          description: Required acknowledgement when the selection includes ordered sources.
     ReplayRequest:
       allOf:
         - { $ref: "#/components/schemas/ReplayFilter" }
@@ -377,6 +457,34 @@ components:
         replay_batch_id: { type: string, format: uuid }
         details: { type: object }
         created_at: { type: string, format: date-time }
+    OrderingStream:
+      type: object
+      required: [destination, ordering_key, partition, start_sequence, next_sequence, state, updated_at]
+      properties:
+        destination: { type: string }
+        ordering_key: { type: string }
+        partition: { type: integer, minimum: 0, maximum: 63 }
+        start_sequence: { type: integer, format: int64, minimum: 1 }
+        next_sequence: { type: integer, format: int64, minimum: 1 }
+        state: { type: string, enum: [ready, inflight, retry_wait, gap, dead_blocked] }
+        next_event_id: { type: string, format: uuid }
+        next_event_status: { type: string, enum: [pending, inflight, delivered, dead] }
+        next_event_attempts: { type: integer, minimum: 0 }
+        lowest_future_sequence: { type: integer, format: int64, minimum: 1 }
+        gap_size: { type: integer, format: int64, minimum: 0 }
+        gap_age_seconds: { type: number, minimum: 0 }
+        updated_at: { type: string, format: date-time }
+    OrderingPartition:
+      type: object
+      required: [partition_id, epoch, state]
+      properties:
+        partition_id: { type: integer, minimum: 0, maximum: 63 }
+        desired_owner: { type: string }
+        actual_owner: { type: string }
+        epoch: { type: integer, format: int64, minimum: 0 }
+        lease_until: { type: string, format: date-time }
+        handoff_not_before: { type: string, format: date-time }
+        state: { type: string, enum: [owned, handoff, expired, unowned] }
     Error:
       type: object
       required: [error]

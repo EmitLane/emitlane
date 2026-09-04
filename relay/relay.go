@@ -354,6 +354,15 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 		attribute.Int("emitlane.attempt", ev.Attempts),
 		attribute.String("emitlane.relay_instance", r.cfg.InstanceID),
 	)
+	if ev.OrderingKey != "" && ev.OrderingPartition != nil {
+		span.SetName("emitlane.ordering.publish")
+		span.SetAttributes(
+			attribute.String("emitlane.ordering_key", ev.OrderingKey),
+			attribute.Int64("emitlane.ordering_sequence", ev.OrderingSequence),
+			attribute.Int("emitlane.ordering_partition", int(*ev.OrderingPartition)),
+			attribute.Int64("emitlane.ordering_epoch", ev.OrderingEpoch),
+		)
+	}
 	traceparent, tracestate := telemetry.InjectTrace(pubCtx)
 	setHeader(msg.Headers, broker.HeaderTraceparent, traceparent)
 	setHeader(msg.Headers, broker.HeaderTracestate, tracestate)
@@ -372,6 +381,9 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 	}
 
 	start := r.clock.Now()
+	if ev.OrderingKey != "" {
+		r.metrics.ObserveOrderingDeliveryWait(nonNegativeSeconds(start.Sub(ev.AvailableAt)))
+	}
 	err = r.pub.Publish(pubCtx, msg)
 	r.metrics.ObservePublish(nonNegativeSeconds(r.clock.Now().Sub(start)))
 	if err != nil {
@@ -572,6 +584,11 @@ func (r *Relay) refreshStats(ctx context.Context) {
 	r.metrics.SetOldestPending(st.OldestPendingSeconds)
 	r.metrics.SetRelayPaused(st.Paused)
 	r.metrics.SetRelayInstances(float64(st.RelaysActive), float64(st.RelaysStale))
+	r.metrics.SetOrderingState(
+		float64(st.OrderedStreams), float64(st.BlockedOrderedStreams),
+		float64(st.GapStreams), float64(st.DeadBlockedStreams),
+		float64(st.OwnedPartitions), float64(st.HandoffPartitions), st.MaxGapAgeSeconds,
+	)
 }
 
 func (r *Relay) heartbeatLoop(ctx context.Context, store PresenceStore) {

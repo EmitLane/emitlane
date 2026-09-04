@@ -242,6 +242,17 @@ func RequiredTables() []string {
 	}
 }
 
+func RequiredConstraints() []struct{ Table, Name string } {
+	return []struct{ Table, Name string }{
+		{Table: "outbox_events", Name: "outbox_ordering_state_check"},
+		{Table: "ordering_streams", Name: "ordering_stream_partition_check"},
+		{Table: "ordering_streams", Name: "ordering_stream_start_check"},
+		{Table: "ordering_streams", Name: "ordering_stream_next_check"},
+		{Table: "ordering_partitions", Name: "ordering_partition_lease_check"},
+		{Table: "ordering_partitions", Name: "ordering_partition_epoch_check"},
+	}
+}
+
 func TableExists(ctx context.Context, pool *pgxpool.Pool, tableName string) (bool, error) {
 	var exists bool
 	err := pool.QueryRow(ctx, `SELECT EXISTS (
@@ -280,6 +291,22 @@ SELECT EXISTS (
     WHERE schemaname = 'emitlane' AND indexname = $1
 )`, indexName).Scan(&exists)
 	return exists, err
+}
+
+func ConstraintExists(ctx context.Context, pool *pgxpool.Pool, tableName, constraintName string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_schema='emitlane' AND table_name=$1 AND constraint_name=$2
+)`, tableName, constraintName).Scan(&exists)
+	return exists, err
+}
+
+func OrderingPartitionCount(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.ordering_partitions`).Scan(&count)
+	return count, err
 }
 
 // SchemaExists reports whether the emitlane schema is present.
@@ -357,6 +384,14 @@ type OperabilityPrivileges struct {
 	AuditInsert    bool
 }
 
+type OrderingPrivileges struct {
+	StreamsSelect    bool
+	StreamsInsert    bool
+	StreamsUpdate    bool
+	PartitionsSelect bool
+	PartitionsUpdate bool
+}
+
 // CheckRelayPrivileges inspects the current PostgreSQL role without mutating
 // application data.
 func CheckRelayPrivileges(ctx context.Context, pool *pgxpool.Pool) (RelayPrivileges, error) {
@@ -392,4 +427,21 @@ SELECT
 		return OperabilityPrivileges{}, fmt.Errorf("check operability privileges: %w", err)
 	}
 	return p, nil
+}
+
+func CheckOrderingPrivileges(ctx context.Context, pool *pgxpool.Pool) (OrderingPrivileges, error) {
+	var privileges OrderingPrivileges
+	err := pool.QueryRow(ctx, `
+SELECT
+    has_table_privilege(current_user, 'emitlane.ordering_streams', 'SELECT'),
+    has_table_privilege(current_user, 'emitlane.ordering_streams', 'INSERT'),
+    has_table_privilege(current_user, 'emitlane.ordering_streams', 'UPDATE'),
+    has_table_privilege(current_user, 'emitlane.ordering_partitions', 'SELECT'),
+    has_table_privilege(current_user, 'emitlane.ordering_partitions', 'UPDATE')
+`).Scan(&privileges.StreamsSelect, &privileges.StreamsInsert, &privileges.StreamsUpdate,
+		&privileges.PartitionsSelect, &privileges.PartitionsUpdate)
+	if err != nil {
+		return OrderingPrivileges{}, fmt.Errorf("check ordering privileges: %w", err)
+	}
+	return privileges, nil
 }

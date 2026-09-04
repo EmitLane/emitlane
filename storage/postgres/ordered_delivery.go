@@ -6,8 +6,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/emitlane/emitlane/relay"
+	"github.com/emitlane/emitlane/telemetry"
 )
 
 // ClaimOrdered leases only the expected sequence of independently eligible
@@ -19,11 +23,24 @@ func (s *Store) ClaimOrdered(
 	eventLease time.Duration,
 	minimumPartitionLease time.Duration,
 ) ([]relay.Event, error) {
+	ctx, span := telemetry.Tracer().Start(ctx, "emitlane.ordering.claim",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("emitlane.relay_instance", owner),
+		attribute.Int("emitlane.batch_size", limit),
+	)
+	recordError := func(err error) {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	if limit <= 0 {
 		return nil, nil
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("claim ordered begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
@@ -71,6 +88,7 @@ RETURNING
     e.ordering_partition, picked.epoch`
 	rows, err := tx.Query(ctx, query, limit, owner, intervalMS(eventLease), intervalMS(minimumPartitionLease))
 	if err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("claim ordered query: %w", err)
 	}
 	defer rows.Close()
@@ -78,16 +96,20 @@ RETURNING
 	for rows.Next() {
 		event, err := scanEvent(rows)
 		if err != nil {
+			recordError(err)
 			return nil, fmt.Errorf("claim ordered scan: %w", err)
 		}
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("claim ordered rows: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
+		recordError(err)
 		return nil, fmt.Errorf("claim ordered commit: %w", err)
 	}
+	span.SetAttributes(attribute.Int("emitlane.claimed", len(events)))
 	return events, nil
 }
 
@@ -128,6 +150,18 @@ RETURNING event.attempts`
 // MarkOrderedDelivered atomically advances stream progress and marks the
 // acknowledged event delivered under the same event/partition fence.
 func (s *Store) MarkOrderedDelivered(ctx context.Context, event relay.Event, owner string) error {
+	ctx, span := telemetry.Tracer().Start(ctx, "emitlane.ordering.stream.advance",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("messaging.destination.name", event.Destination),
+		attribute.String("emitlane.event_id", event.ID.String()),
+		attribute.String("emitlane.ordering_key", event.OrderingKey),
+		attribute.Int64("emitlane.ordering_sequence", event.OrderingSequence),
+		attribute.Int64("emitlane.ordering_epoch", event.OrderingEpoch),
+		attribute.String("emitlane.relay_instance", owner),
+	)
 	const query = `
 WITH authority AS (
     SELECT event.id, event.destination, event.ordering_key,
@@ -163,10 +197,15 @@ FROM advanced
 WHERE event.id = advanced.id`
 	tag, err := s.pool.Exec(ctx, query, event.ID, owner, event.OrderingEpoch, event.OrderingSequence)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("mark ordered delivered %s: %w", event.ID, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("mark ordered delivered %s: stale owner, epoch, lease, or sequence", event.ID)
+		err := fmt.Errorf("mark ordered delivered %s: stale owner, epoch, lease, or sequence", event.ID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 	return nil
 }

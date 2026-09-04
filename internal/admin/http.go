@@ -76,6 +76,9 @@ func newHandler(service *Service, token string, exposePayload bool, logger *slog
 	mux.HandleFunc("POST /v1/replays/preview", h.previewReplay)
 	mux.HandleFunc("POST /v1/replays", h.replayBatch)
 	mux.HandleFunc("GET /v1/audit", h.audit)
+	mux.HandleFunc("GET /v1/ordering/streams", h.orderingStreams)
+	mux.HandleFunc("GET /v1/ordering/stream", h.orderingStream)
+	mux.HandleFunc("GET /v1/ordering/partitions", h.orderingPartitions)
 	return h.requestID(h.recover(h.authenticate(mux)))
 }
 
@@ -331,11 +334,13 @@ func (h *handler) replayEvent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var body mutationBody
+	var body replayMutationBody
 	if !h.decodeJSON(w, r, &body) {
 		return
 	}
-	result, err := h.service.ReplayEvent(r.Context(), id, h.mutation(r, body.Reason))
+	mutation := h.mutation(r, body.Reason)
+	mutation.OrderingMode = body.OrderingMode
+	result, err := h.service.ReplayEvent(r.Context(), id, mutation)
 	if err != nil {
 		h.serviceError(w, r, err)
 		return
@@ -343,6 +348,11 @@ func (h *handler) replayEvent(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("admin event replay committed", "request_id", requestID(r), "source_event_id", id,
 		"replay_batch_id", result.ReplayBatchID, "created", result.Created, "actor", "admin-api")
 	h.writeJSON(w, http.StatusCreated, result)
+}
+
+type replayMutationBody struct {
+	Reason       string `json:"reason"`
+	OrderingMode string `json:"ordering_mode"`
 }
 
 func (h *handler) eventID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -355,13 +365,14 @@ func (h *handler) eventID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bo
 }
 
 type replayBody struct {
-	Statuses    []string   `json:"statuses"`
-	Destination string     `json:"destination"`
-	EventType   string     `json:"event_type"`
-	CreatedFrom *time.Time `json:"created_after"`
-	CreatedTo   *time.Time `json:"created_before"`
-	Limit       int        `json:"limit"`
-	Reason      string     `json:"reason"`
+	Statuses     []string   `json:"statuses"`
+	Destination  string     `json:"destination"`
+	EventType    string     `json:"event_type"`
+	CreatedFrom  *time.Time `json:"created_after"`
+	CreatedTo    *time.Time `json:"created_before"`
+	Limit        int        `json:"limit"`
+	Reason       string     `json:"reason"`
+	OrderingMode string     `json:"ordering_mode"`
 }
 
 func (b replayBody) filter() EventFilter {
@@ -387,7 +398,9 @@ func (h *handler) replayBatch(w http.ResponseWriter, r *http.Request) {
 	if !h.decodeJSON(w, r, &body) {
 		return
 	}
-	result, err := h.service.ReplayBatch(r.Context(), body.filter(), h.mutation(r, body.Reason))
+	mutation := h.mutation(r, body.Reason)
+	mutation.OrderingMode = body.OrderingMode
+	result, err := h.service.ReplayBatch(r.Context(), body.filter(), mutation)
 	if err != nil {
 		h.serviceError(w, r, err)
 		return
@@ -395,6 +408,66 @@ func (h *handler) replayBatch(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("admin replay batch committed", "request_id", requestID(r), "replay_batch_id", result.ReplayBatchID,
 		"created", result.Created, "actor", "admin-api")
 	h.writeJSON(w, http.StatusCreated, result)
+}
+
+func (h *handler) orderingStreams(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limit, err := queryLimit(r, DefaultPageSize)
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	cursor, err := DecodeOrderingStreamCursor(query.Get("cursor"))
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	var partition *int16
+	if raw := strings.TrimSpace(query.Get("partition")); raw != "" {
+		value, parseErr := strconv.ParseInt(raw, 10, 16)
+		if parseErr != nil {
+			h.serviceError(w, r, fmt.Errorf("%w: partition must be an integer", ErrInvalid))
+			return
+		}
+		parsed := int16(value)
+		partition = &parsed
+	}
+	blockedOnly := false
+	if raw := strings.TrimSpace(query.Get("blocked_only")); raw != "" {
+		blockedOnly, err = strconv.ParseBool(raw)
+		if err != nil {
+			h.serviceError(w, r, fmt.Errorf("%w: blocked_only must be true or false", ErrInvalid))
+			return
+		}
+	}
+	page, err := h.service.ListOrderingStreams(r.Context(), OrderingStreamFilter{
+		State: query.Get("state"), Destination: query.Get("destination"), Partition: partition,
+		BlockedOnly: blockedOnly, Limit: limit, Cursor: cursor,
+	})
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, page)
+}
+
+func (h *handler) orderingStream(w http.ResponseWriter, r *http.Request) {
+	stream, err := h.service.InspectOrderingStream(r.Context(),
+		r.URL.Query().Get("destination"), r.URL.Query().Get("ordering_key"))
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, stream)
+}
+
+func (h *handler) orderingPartitions(w http.ResponseWriter, r *http.Request) {
+	partitions, err := h.service.ListOrderingPartitions(r.Context())
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"partitions": partitions})
 }
 
 func (h *handler) audit(w http.ResponseWriter, r *http.Request) {

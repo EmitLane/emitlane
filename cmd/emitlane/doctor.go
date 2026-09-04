@@ -109,7 +109,7 @@ func doctorCmd(args []string) error {
 				check("table "+table, nil, "")
 			}
 		}
-		for _, column := range []string{"replayed_from_event_id", "replay_batch_id"} {
+		for _, column := range []string{"replayed_from_event_id", "replay_batch_id", "ordering_key", "ordering_sequence", "ordering_partition"} {
 			ok, columnErr := postgres.ColumnExists(ctx, pool, "outbox_events", column)
 			if columnErr != nil {
 				check("outbox_events."+column, columnErr, "")
@@ -118,6 +118,25 @@ func doctorCmd(args []string) error {
 			} else {
 				check("outbox_events."+column, nil, "")
 			}
+		}
+		for _, constraint := range postgres.RequiredConstraints() {
+			ok, constraintErr := postgres.ConstraintExists(ctx, pool, constraint.Table, constraint.Name)
+			name := constraint.Table + "." + constraint.Name
+			if constraintErr != nil {
+				check(name, constraintErr, "")
+			} else if !ok {
+				check(name, fmt.Errorf("missing"), "")
+			} else {
+				check(name, nil, "")
+			}
+		}
+		partitionCount, partitionErr := postgres.OrderingPartitionCount(ctx, pool)
+		if partitionErr != nil {
+			check("ordering partition seed", partitionErr, "")
+		} else if partitionCount != 64 {
+			check("ordering partition seed", fmt.Errorf("found %d rows, expected 64", partitionCount), "")
+		} else {
+			check("ordering partition seed", nil, "exactly 64 rows")
 		}
 		controlExists, controlErr := postgres.RuntimeControlExists(ctx, pool)
 		if controlErr != nil {
@@ -176,6 +195,23 @@ func doctorCmd(args []string) error {
 				check("v0.2 runtime database permissions", fmt.Errorf("missing %s", strings.Join(missing, ", ")), "")
 			} else {
 				check("v0.2 runtime database permissions", nil, "available")
+			}
+		}
+		orderingPrivileges, orderingErr := postgres.CheckOrderingPrivileges(ctx, pool)
+		if orderingErr != nil {
+			check("v0.3 ordering database permissions", orderingErr, "")
+		} else {
+			missing := make([]string, 0, 5)
+			if !orderingPrivileges.StreamsSelect || !orderingPrivileges.StreamsInsert || !orderingPrivileges.StreamsUpdate {
+				missing = append(missing, "SELECT/INSERT/UPDATE ordering_streams")
+			}
+			if !orderingPrivileges.PartitionsSelect || !orderingPrivileges.PartitionsUpdate {
+				missing = append(missing, "SELECT/UPDATE ordering_partitions")
+			}
+			if len(missing) > 0 {
+				check("v0.3 ordering database permissions", fmt.Errorf("missing %s", strings.Join(missing, ", ")), "")
+			} else {
+				check("v0.3 ordering database permissions", nil, "available")
 			}
 		}
 		nctx, ncancel := context.WithTimeout(ctx, 5*time.Second)
