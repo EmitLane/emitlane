@@ -566,6 +566,7 @@ func (r *Relay) markDead(ctx context.Context, ev Event, reason string) {
 }
 
 func (r *Relay) logOrderedFence(ev Event, operation string) {
+	r.metrics.IncOrderingFenced(operation)
 	attributes := []any{
 		"event_id", ev.ID.String(),
 		"relay_instance", r.cfg.InstanceID,

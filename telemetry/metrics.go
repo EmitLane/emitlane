@@ -37,6 +37,9 @@ type Metrics struct {
 	orderingRebalances   prometheus.Counter
 	orderingDeliveryWait prometheus.Histogram
 	orderingGapAge       prometheus.Gauge
+	orderingFenced       *prometheus.CounterVec
+	integrityChecks      *prometheus.CounterVec
+	integrityDuration    *prometheus.HistogramVec
 }
 
 // NewMetrics registers instruments with reg. The only label is the bounded
@@ -153,6 +156,22 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		orderingRebalances:   prometheus.NewCounter(prometheus.CounterOpts{Namespace: namespace, Name: "ordering_partition_rebalances_total", Help: "Desired ownership maps changed after Relay membership changes."}),
 		orderingDeliveryWait: prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: namespace, Name: "ordering_delivery_wait_seconds", Help: "Wait from ordered event availability to broker publish start.", Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300}}),
 		orderingGapAge:       prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "ordering_gap_age_seconds", Help: "Age of the oldest currently observed ordered gap."}),
+		orderingFenced: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "ordering_fenced_attempts_total",
+			Help:      "Expected ordered transitions discarded after losing durable authority.",
+		}, []string{"operation"}),
+		integrityChecks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "integrity_checks_total",
+			Help:      "Completed integrity checks by bounded mode and result.",
+		}, []string{"mode", "result"}),
+		integrityDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "integrity_check_duration_seconds",
+			Help:      "Integrity check duration by bounded mode.",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		}, []string{"mode"}),
 	}
 	// CounterVec collectors are otherwise absent from exposition until their
 	// first observation. Initialize the complete, bounded label set so operators
@@ -165,6 +184,15 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	}
 	for _, operation := range []string{"register", "heartbeat", "stop"} {
 		m.presenceFailures.WithLabelValues(operation)
+	}
+	for _, operation := range []string{"begin_attempt", "retry", "dead", "delivered"} {
+		m.orderingFenced.WithLabelValues(operation)
+	}
+	for _, mode := range []string{"summary", "full", "stream"} {
+		m.integrityDuration.WithLabelValues(mode)
+		for _, result := range []string{"clean", "warnings", "violations", "error"} {
+			m.integrityChecks.WithLabelValues(mode, result)
+		}
 	}
 	collectors := []prometheus.Collector{
 		m.enqueued,
@@ -196,6 +224,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.orderingRebalances,
 		m.orderingDeliveryWait,
 		m.orderingGapAge,
+		m.orderingFenced,
+		m.integrityChecks,
+		m.integrityDuration,
 	}
 	registered := make([]prometheus.Collector, 0, len(collectors))
 	for _, c := range collectors {
@@ -253,6 +284,37 @@ func (m *Metrics) IncDead() {
 		return
 	}
 	m.dead.Inc()
+}
+
+// IncOrderingFenced records one expected conditional ordered-transition miss.
+// Unknown operations are ignored rather than creating an unbounded label.
+func (m *Metrics) IncOrderingFenced(operation string) {
+	if m == nil || !oneOf(operation, "begin_attempt", "retry", "dead", "delivered") {
+		return
+	}
+	m.orderingFenced.WithLabelValues(operation).Inc()
+}
+
+// ObserveIntegrityCheck records a check using only the fixed public mode and
+// result enums. Unknown values are ignored to preserve label cardinality.
+func (m *Metrics) ObserveIntegrityCheck(mode, result string, seconds float64) {
+	if m == nil || !oneOf(mode, "summary", "full", "stream") || !oneOf(result, "clean", "warnings", "violations", "error") {
+		return
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	m.integrityChecks.WithLabelValues(mode, result).Inc()
+	m.integrityDuration.WithLabelValues(mode).Observe(seconds)
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // ObservePublish records non-negative broker publish latency in seconds.

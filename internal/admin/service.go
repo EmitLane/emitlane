@@ -36,7 +36,14 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 // Integrity returns the bounded summary verifier. Expensive full verification
 // is intentionally available only through the CLI.
 func (s *Service) Integrity(ctx context.Context) (integrity.Report, error) {
-	return s.store.IntegritySummary(ctx, s.staleAfter)
+	started := time.Now()
+	report, err := s.store.IntegritySummary(ctx, s.staleAfter)
+	result := "error"
+	if err == nil {
+		result = report.Result
+	}
+	s.metrics.ObserveIntegrityCheck(string(integrity.ModeSummary), result, time.Since(started).Seconds())
+	return report, err
 }
 
 func (s *Service) ListEvents(ctx context.Context, filter EventFilter) (EventPage, error) {

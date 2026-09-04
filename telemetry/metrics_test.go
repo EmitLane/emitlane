@@ -33,6 +33,10 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 	metrics.AddOrderingAcquisitions(4)
 	metrics.IncOrderingRebalance()
 	metrics.ObserveOrderingDeliveryWait(0.2)
+	metrics.IncOrderingFenced("begin_attempt")
+	metrics.IncOrderingFenced("unbounded-value-must-be-ignored")
+	metrics.ObserveIntegrityCheck("summary", "clean", 0.03)
+	metrics.ObserveIntegrityCheck("unbounded-mode", "clean", 0.03)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -72,9 +76,21 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 		"emitlane_ordering_partition_rebalances_total",
 		"emitlane_ordering_delivery_wait_seconds",
 		"emitlane_ordering_gap_age_seconds",
+		"emitlane_ordering_fenced_attempts_total",
+		"emitlane_integrity_checks_total",
+		"emitlane_integrity_check_duration_seconds",
 	} {
 		if !got[name] {
 			t.Errorf("metric family %s is missing", name)
+		}
+	}
+	for _, family := range families {
+		for _, metric := range family.Metric {
+			for _, label := range metric.Label {
+				if label.GetValue() == "unbounded-value-must-be-ignored" || label.GetValue() == "unbounded-mode" {
+					t.Fatalf("unbounded metric label escaped validation: %s=%s", label.GetName(), label.GetValue())
+				}
+			}
 		}
 	}
 }
@@ -101,4 +117,6 @@ func TestNilMetricsIsNoOp(t *testing.T) {
 	metrics.AddOrderingAcquisitions(1)
 	metrics.IncOrderingRebalance()
 	metrics.ObserveOrderingDeliveryWait(1)
+	metrics.IncOrderingFenced("begin_attempt")
+	metrics.ObserveIntegrityCheck("summary", "clean", 1)
 }
