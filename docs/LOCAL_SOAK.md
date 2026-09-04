@@ -33,7 +33,7 @@ injection. Defaults are:
 
 - `quick`: 90 seconds, 2 Relays, 100 ordered streams, about 3,600 committed events;
 - `standard`: 20 minutes, 4 Relays, 1,000 streams, target above 100,000 committed events;
-- `release`: 60 minutes, 4 Relays, 3,500 streams, final local v0.3 release soak.
+- `release`: 60 minutes, 4 Relays, 3,500 streams, final local v0.4 release soak.
 
 Soak Relays use a test-specific transient-fault retry policy: 100 maximum
 attempts with 500 ms base delay and a 5 second cap. This keeps deliberate Kafka
@@ -108,13 +108,16 @@ from offset zero through a captured end offset for every test partition. The
 audit prevents a long-lived observer's offset recovery across broker restarts
 from creating false losses, while still failing if an acknowledged event is
 actually absent from Kafka. Only after this audit are missing committed events
-called lost.
+called lost. The runner then performs a full read-only integrity check before
+destroying its PostgreSQL and Kafka infrastructure. The Kafka audit and database
+integrity check are independent gates; neither substitutes for the other.
 
 At-least-once duplicates are expected and reported but do not fail a run.
 Correctness fails when any committed event is lost, an ordered stream regresses
 or skips unexpectedly, final queue/blocked/gap state is nonzero, or the runner
-records an infrastructure error. Throughput and latency are reported, never
-used as arbitrary pass/fail thresholds.
+records an infrastructure error or integrity violation. Integrity warnings are
+reported for operator review but do not fail the default verdict. Throughput and
+latency are reported, never used as arbitrary pass/fail thresholds.
 
 ## Artifacts
 
@@ -136,11 +139,12 @@ Detailed diagnostics are bounded to the first 100 failures. Reports do not
 contain payloads or unbounded event-ID lists. `.emitlane/` is ignored by Git.
 Every report records `git_commit`, `git_branch`, and `git_dirty`. Dirty reports
 also contain `git_diff_sha256`, including untracked content, so their source can
-be distinguished. A dirty release-profile run is rejected by default.
+be distinguished. Results and reports include `integrity_violations` and
+`integrity_warnings`. A dirty release-profile run is rejected by default.
 
 ## Release run
 
-Before a v0.3 release, start the full run manually and let it finish:
+Before a v0.4 release, start the full run manually and let it finish:
 
 ```sh
 make soak-start PROFILE=release
@@ -161,5 +165,5 @@ distinct scenarios; neither substitutes for the other.
 
 Do not close Docker or suspend the computer while it is running. A release soak
 passes only when every committed ID was observed, ordering stayed monotonic,
-and the recovered database has no pending, inflight, dead, blocked, or gap
-state.
+the recovered database has no pending, inflight, dead, blocked, or gap state,
+and the final full verifier reports zero integrity violations.
