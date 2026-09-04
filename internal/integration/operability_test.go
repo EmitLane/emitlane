@@ -120,6 +120,161 @@ VALUES ($1, 'migration.events', 'migration.test', $2, $3,
 	}
 }
 
+func TestMigrationV2ToV3PreservesReleasedData(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if err := pgstore.MigrateUp(cleanupCtx, e.pool); err != nil {
+			t.Errorf("restore v3 schema: %v", err)
+		}
+	})
+
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
+	version, err := pgstore.SchemaVersion(ctx, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version = %d, want released v2", version)
+	}
+
+	eventID := uuid.New()
+	replaySourceID := uuid.New()
+	replayBatchID := uuid.New()
+	if _, err := e.pool.Exec(ctx, `
+INSERT INTO emitlane.outbox_events
+    (id, destination, event_type, payload, replayed_from_event_id, replay_batch_id)
+VALUES ($1, 'migration.v2.events', 'migration.v2', $2, $3, $4)`,
+		eventID, []byte("v2-payload"), replaySourceID, replayBatchID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `
+INSERT INTO emitlane.relay_instances
+    (instance_id, hostname, version, started_at, last_heartbeat_at)
+VALUES ('migration-v2-relay', 'test-host', 'v0.2.0', NOW(), NOW())`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pgstore.MigrateUp(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
+	version, err = pgstore.SchemaVersion(ctx, e.pool)
+	if err != nil || version != pgstore.CurrentSchemaVersion() {
+		t.Fatalf("schema version after upgrade = %d, err=%v", version, err)
+	}
+
+	var payload []byte
+	var gotSourceID, gotBatchID uuid.UUID
+	var orderingKey *string
+	var orderingSequence *int64
+	var orderingPartition *int16
+	if err := e.pool.QueryRow(ctx, `
+SELECT payload, replayed_from_event_id, replay_batch_id,
+       ordering_key, ordering_sequence, ordering_partition
+FROM emitlane.outbox_events
+WHERE id = $1`, eventID).Scan(
+		&payload, &gotSourceID, &gotBatchID,
+		&orderingKey, &orderingSequence, &orderingPartition,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "v2-payload" || gotSourceID != replaySourceID || gotBatchID != replayBatchID {
+		t.Fatalf("v2 event changed during upgrade: payload=%q source=%s batch=%s", payload, gotSourceID, gotBatchID)
+	}
+	if orderingKey != nil || orderingSequence != nil || orderingPartition != nil {
+		t.Fatalf("v2 event acquired ordering metadata: key=%v sequence=%v partition=%v", orderingKey, orderingSequence, orderingPartition)
+	}
+
+	var partitions int
+	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.ordering_partitions`).Scan(&partitions); err != nil {
+		t.Fatal(err)
+	}
+	if partitions != 64 {
+		t.Fatalf("partition seed rows = %d, want 64", partitions)
+	}
+	var orderingCapable bool
+	if err := e.pool.QueryRow(ctx, `
+SELECT ordering_capable
+FROM emitlane.relay_instances
+WHERE instance_id = 'migration-v2-relay'`).Scan(&orderingCapable); err != nil {
+		t.Fatal(err)
+	}
+	if orderingCapable {
+		t.Fatal("released v0.2 relay was incorrectly marked ordering-capable")
+	}
+}
+
+func TestSchemaV3GuardsOrderedRowsFromReleasedV2Claim(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	topic := topicName(t, e)
+	orderedID := enqueueOrdered(t, e, topic, "order:rolling-upgrade", 1)
+	unorderedID := enqueueOrder(t, e, "ord-v2-claim", topic, 20, true)
+	if _, err := e.pool.Exec(ctx, `
+INSERT INTO emitlane.relay_instances
+    (instance_id, hostname, version, started_at, last_heartbeat_at)
+VALUES ('released-v2-relay', 'test-host', 'v0.2.0', NOW(), NOW())`); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the released v0.2 claim shape. It has no ordering predicate and
+	// therefore exercises the schema-v3 trigger that protects ordered rows.
+	rows, err := e.pool.Query(ctx, `
+WITH picked AS (
+    SELECT id
+    FROM emitlane.outbox_events
+    WHERE available_at <= NOW()
+      AND EXISTS (
+          SELECT 1 FROM emitlane.runtime_control
+          WHERE singleton = TRUE AND paused = FALSE
+      )
+      AND (
+            status = 'pending'
+         OR (status = 'inflight' AND lease_until IS NOT NULL AND lease_until <= NOW())
+      )
+    ORDER BY available_at, created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 10
+)
+UPDATE emitlane.outbox_events AS e
+SET status = 'inflight',
+    lease_owner = 'released-v2-relay',
+    lease_until = NOW() + INTERVAL '15 seconds'
+FROM picked
+WHERE e.id = picked.id
+RETURNING e.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var claimed []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		claimed = append(claimed, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 || claimed[0].String() != unorderedID {
+		t.Fatalf("released v0.2 claim returned %v, want only unordered %s", claimed, unorderedID)
+	}
+	if status := e.eventStatus(t, orderedID); status != "pending" {
+		t.Fatalf("released v0.2 relay claimed ordered event: status=%s", status)
+	}
+	if event := e.getEvent(t, unorderedID); event.Status != "inflight" || event.LeaseOwner != "released-v2-relay" {
+		t.Fatalf("released v0.2 relay did not claim unordered event: status=%s owner=%s", event.Status, event.LeaseOwner)
+	}
+}
+
 func TestDurablePauseStopsClaimsAcrossRelaysAndResumeRecovers(t *testing.T) {
 	e := startEnv(t)
 	service := adminService(t, e, time.Second)
