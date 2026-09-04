@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/EmitLane/emitlane/compare/v0.2.0...v0.3.0) (2026-09-04)
+
+
+### Features
+
+* **ordering:** add ordered delivery ([#10](https://github.com/EmitLane/emitlane/issues/10)) ([55bd802](https://github.com/EmitLane/emitlane/commit/55bd802ad8917bf6bfddf51022b91cd39d100c79))
+
 ## [0.2.0](https://github.com/EmitLane/emitlane/compare/v0.1.0...v0.2.0) (2026-09-02)
 
 
