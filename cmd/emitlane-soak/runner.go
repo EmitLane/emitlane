@@ -82,8 +82,17 @@ type soakRuntime struct {
 
 func runSoak(ctx context.Context, runDir string, cfg Config) error {
 	r := &soakRuntime{runDir: runDir, cfg: cfg, started: time.Now().UTC(), phase: "initializing", progressStop: make(chan struct{}), progressDone: make(chan struct{}), verifier: newVerifier(), faults: newFaultStats(), orderedTopic: "emitlane-soak-ordered-" + cfg.RunID, unorderedTopic: "emitlane-soak-unordered-" + cfg.RunID}
-	branch, commit := gitIdentity()
-	base := Result{RunID: cfg.RunID, Profile: cfg.Profile, Seed: cfg.Seed, StartedAt: r.started, GitBranch: branch, GitCommit: commit, GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH, CPU: platformCPU(), DockerVersion: dockerVersion(), KafkaVersion: kafkaImage, Configuration: cfg, OrderedStreams: cfg.OrderedStreams, FaultDurations: map[string]float64{}}
+	if cfg.Source.Commit == "" {
+		provenance, err := gitProvenance(".")
+		if err != nil {
+			return fmt.Errorf("inspect Git provenance: %w", err)
+		}
+		cfg.Source = provenance
+	}
+	if err := validateReleaseProvenance(cfg); err != nil {
+		return err
+	}
+	base := Result{RunID: cfg.RunID, Profile: cfg.Profile, Seed: cfg.Seed, StartedAt: r.started, GitBranch: cfg.Source.Branch, GitCommit: cfg.Source.Commit, GitDirty: cfg.Source.Dirty, GitDiffSHA256: cfg.Source.DiffSHA256, ReleaseEvidence: cfg.Profile == "release" && !cfg.Source.Dirty, GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH, CPU: platformCPU(), DockerVersion: dockerVersion(), KafkaVersion: kafkaImage, Configuration: cfg, OrderedStreams: cfg.OrderedStreams, FaultDurations: map[string]float64{}}
 	_ = writeJSON(filepath.Join(runDir, "metadata.json"), base)
 	r.writeProgress("running")
 	go r.progressLoop()

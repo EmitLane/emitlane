@@ -35,7 +35,7 @@ soak-build:
 	@go build -o $(SOAK_BIN) ./cmd/emitlane-soak
 
 soak-start: soak-build
-	@$(SOAK_BIN) start --profile "$(PROFILE)" $(if $(DURATION),--duration "$(DURATION)") $(if $(RECOVERY_TIMEOUT),--recovery-timeout "$(RECOVERY_TIMEOUT)") $(if $(SEED),--seed "$(SEED)") $(if $(RELAYS),--relays "$(RELAYS)") $(if $(STREAMS),--streams "$(STREAMS)") $(if $(RATE),--rate "$(RATE)")
+	@$(SOAK_BIN) start --profile "$(PROFILE)" $(if $(DURATION),--duration "$(DURATION)") $(if $(RECOVERY_TIMEOUT),--recovery-timeout "$(RECOVERY_TIMEOUT)") $(if $(SEED),--seed "$(SEED)") $(if $(RELAYS),--relays "$(RELAYS)") $(if $(STREAMS),--streams "$(STREAMS)") $(if $(RATE),--rate "$(RATE)") $(if $(ALLOW_DIRTY),--allow-dirty)
 
 soak-status:
 	@test -x $(SOAK_BIN) || $(MAKE) --no-print-directory soak-build

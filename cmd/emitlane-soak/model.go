@@ -40,6 +40,15 @@ type Config struct {
 	RelayMaxAttempts int           `json:"relay_max_attempts"`
 	RelayBaseDelay   time.Duration `json:"relay_base_delay"`
 	RelayMaxDelay    time.Duration `json:"relay_max_delay"`
+	AllowDirty       bool          `json:"allow_dirty,omitempty"`
+	Source           GitProvenance `json:"source"`
+}
+
+type GitProvenance struct {
+	Commit     string `json:"git_commit"`
+	Branch     string `json:"git_branch"`
+	Dirty      bool   `json:"git_dirty"`
+	DiffSHA256 string `json:"git_diff_sha256,omitempty"`
 }
 
 type State struct {
@@ -93,6 +102,9 @@ type Result struct {
 	FailureReason         string             `json:"failure_reason,omitempty"`
 	GitBranch             string             `json:"git_branch"`
 	GitCommit             string             `json:"git_commit"`
+	GitDirty              bool               `json:"git_dirty"`
+	GitDiffSHA256         string             `json:"git_diff_sha256,omitempty"`
+	ReleaseEvidence       bool               `json:"valid_release_evidence"`
 	GoVersion             string             `json:"go_version"`
 	OS                    string             `json:"os"`
 	Arch                  string             `json:"arch"`

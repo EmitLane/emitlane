@@ -216,12 +216,6 @@ func (e *soakEnvironment) pingKafka(ctx context.Context) error {
 	return client.Ping(pingCtx)
 }
 
-func gitIdentity() (string, string) {
-	branch, _ := exec.Command("git", "branch", "--show-current").Output()
-	commit, _ := exec.Command("git", "rev-parse", "HEAD").Output()
-	return strings.TrimSpace(string(branch)), strings.TrimSpace(string(commit))
-}
-
 func dockerVersion() string {
 	out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output()
 	if err != nil {

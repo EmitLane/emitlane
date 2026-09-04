@@ -85,6 +85,7 @@ func startCommand(args []string) error {
 	relays := fs.Int("relays", 0, "override relay count")
 	streams := fs.Int("streams", 0, "override ordered stream count")
 	rate := fs.Int("rate", 0, "override target events per second")
+	allowDirty := fs.Bool("allow-dirty", false, "allow a dirty release-profile run (not valid release evidence)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -115,7 +116,16 @@ func startCommand(args []string) error {
 	} else {
 		cfg.Seed = *seedFlag
 	}
+	cfg.AllowDirty = *allowDirty
 	if err := cfg.validate(); err != nil {
+		return err
+	}
+	provenance, err := gitProvenance(".")
+	if err != nil {
+		return fmt.Errorf("inspect Git provenance: %w", err)
+	}
+	cfg.Source = provenance
+	if err := validateReleaseProvenance(cfg); err != nil {
 		return err
 	}
 	if runDir, currentErr := currentRun(root); currentErr == nil {
