@@ -40,10 +40,12 @@ func (c Config) Validate() error {
 // Publisher publishes records with franz-go and waits for produce results.
 //
 // EmitLane owns retry/backoff. The client is configured with required acks=all,
-// idempotent producing, and no additional record retries so a definite failed
-// ProduceSync becomes one EmitLane attempt. In-flight idempotent requests are
-// not cancelled: franz-go must resolve their broker outcome before the caller
-// can safely retry without opening a producer-sequence gap.
+// non-idempotent producing, and no additional record retries. Disabling Kafka
+// producer idempotence is deliberate: ordered ownership handoff requires the
+// caller's publish context to bound stale application-side publication. An
+// in-flight request may have reached Kafka before cancellation, so EmitLane's
+// durable retry may create a duplicate. This is the documented at-least-once
+// outcome and avoids retaining ambiguous producer-sequence state across tries.
 type Publisher struct {
 	client *kgo.Client
 }
@@ -65,6 +67,7 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID(clientID),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.DisableIdempotentWrite(),
 		kgo.RecordRetries(0),
 		kgo.RecordDeliveryTimeout(cfg.PublishTimeout),
 		kgo.ProduceRequestTimeout(cfg.PublishTimeout),

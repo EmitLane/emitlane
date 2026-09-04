@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -156,15 +157,77 @@ func TestVerdict(t *testing.T) {
 }
 
 func TestReportGenerationDeterministic(t *testing.T) {
-	r := Result{RunID: "run-1", Profile: "release", Seed: 7, GitCommit: "abc", OS: "darwin", Arch: "arm64", DurationSeconds: 60, CommittedEvents: 2, ObservedUniqueEvents: 2, BrokerRecords: 3, DuplicateRecords: 1}
+	r := Result{RunID: "run-1", Profile: "release", Seed: 7, GitCommit: "abc", GitBranch: "main", GitDirty: true, GitDiffSHA256: "1234", OS: "darwin", Arch: "arm64", DurationSeconds: 60, CommittedEvents: 2, ObservedUniqueEvents: 2, BrokerRecords: 3, DuplicateRecords: 1}
 	a, b := reportMarkdown(r), reportMarkdown(r)
 	if a != b {
 		t.Fatal("report is not deterministic")
 	}
-	for _, want := range []string{"**Result: PASS**", "timeline.svg", "Committed events | 2", "At-least-once duplicates | 1", "PASS: all committed event IDs"} {
+	for _, want := range []string{"**Result: PASS**", "Git branch: `main`", "Git dirty: `true`", "Git diff SHA-256: `1234`", "NOT REPRODUCIBLE RELEASE EVIDENCE", "timeline.svg", "Committed events | 2", "At-least-once duplicates | 1", "PASS: all committed event IDs"} {
 		if !strings.Contains(a, want) {
 			t.Fatalf("missing %q in report", want)
 		}
+	}
+}
+
+func TestGitProvenanceAndReleaseGate(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+		}
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.name", "EmitLane Test")
+	runGit("config", "user.email", "test@emitlane.invalid")
+	tracked := filepath.Join(dir, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "tracked.txt")
+	runGit("commit", "-m", "test: baseline")
+
+	clean, err := gitProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Dirty || clean.DiffSHA256 != "" || clean.Branch != "main" || len(clean.Commit) != 40 {
+		t.Fatalf("clean provenance=%+v", clean)
+	}
+	if err := validateReleaseProvenance(Config{Profile: "release", Source: clean}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(tracked, []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("extra\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := gitProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty.Dirty || len(dirty.DiffSHA256) != 64 {
+		t.Fatalf("dirty provenance=%+v", dirty)
+	}
+	if err := validateReleaseProvenance(Config{Profile: "release", Source: dirty}); err == nil {
+		t.Fatal("dirty release profile was accepted without override")
+	}
+	if err := validateReleaseProvenance(Config{Profile: "release", Source: dirty, AllowDirty: true}); err != nil {
+		t.Fatalf("developer override rejected: %v", err)
+	}
+	firstDigest := dirty.DiffSHA256
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err = gitProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty.DiffSHA256 == firstDigest {
+		t.Fatal("digest did not include untracked file content")
 	}
 }
 

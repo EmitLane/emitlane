@@ -150,20 +150,32 @@ during this interval but cannot claim or publish ordered work before H. Thus:
 H >= ownership loss/takeover + maximum prior publish window + safety margin
 ```
 
-The model assumes the Kafka client honors its record delivery timeout: after P,
-it does not initiate a new send for that record. franz-go is configured with
+franz-go is configured with Kafka producer idempotence disabled, `acks=all`,
 zero record retries, a record delivery timeout and produce request timeout no
-greater than P, and the relay never calls Publish with an already expired or
-cancelled context. Kafka transactions are not introduced: transactional IDs
+greater than P. Disabling producer idempotence is intentional: franz-go can
+cancel a non-idempotent in-flight request at the caller deadline instead of
+keeping it live to resolve producer-sequence state. The relay never calls
+Publish with an already expired or cancelled context.
+
+Cancellation bounds the old Relay client's participation; it does not recall a
+request that Kafka may already have accepted. If the acknowledgement is lost,
+the durable outbox retry may therefore publish N again. The handoff barrier
+keeps a replacement from starting until the old client has stopped
+participating plus the safety margin, so duplicates remain before advancement:
+`N,N,N+1` is valid while `N,N+1,N` is not under the documented client/network
+bound. Kafka transactions are not introduced: transactional IDs
 would require per-partition producer lifecycle and fencing coordination while
 still not atomically committing PostgreSQL state, so they do not remove the
 ACK/SQL crash duplicate and would add a second durable protocol.
 
-Residual assumptions are explicit: an arbitrarily faulty broker/client that
-delivers a record later than its configured delivery bound can violate strict
-non-regression, as can external publication to the topic with the same stream
-key. Clock comparisons and lease/barrier creation use PostgreSQL time, so host
-clock skew does not weaken the database invariant.
+Residual assumptions are explicit: after the client deadline, the broker or
+network must not retain an unaccepted request and process it outside the bounded
+handoff window. A request already accepted before the ambiguous failure may be
+visible after cancellation and may be duplicated by retry. An arbitrarily
+faulty broker/network that delays accepting old request bytes past the client
+bound can violate strict non-regression, as can external publication to the
+topic with the same stream key. Clock comparisons and lease/barrier creation
+use PostgreSQL time, so host clock skew does not weaken the database invariant.
 
 ## Ordered claim and publish flow
 

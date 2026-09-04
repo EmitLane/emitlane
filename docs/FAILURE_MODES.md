@@ -21,6 +21,12 @@ The relay may not know whether Kafka accepted the record. Recovery favors a
 possible duplicate over loss. After the lease expires the event is published
 again if it is not yet `delivered`.
 
+Kafka producer idempotence is disabled so the Relay's publish deadline remains
+a real application-side bound. Cancelling an attempt does not recall a request
+Kafka already accepted; the retry can therefore duplicate it. With no producer
+sequence state carried across attempts, a later record cannot be reported as
+the ambiguous earlier sequence while silently disappearing.
+
 ## Crash after Kafka ACK, before `delivered`
 
 Kafka may already have the record. The database still shows `inflight` or, after
@@ -33,6 +39,8 @@ Publish fails. The relay schedules retry: `status=pending`, `available_at` in th
 future, lease cleared, `last_error` stored (truncated to 4 KiB). Exponential
 backoff with full jitter avoids a thundering herd. After `max_attempts` the event
 becomes `dead`. Events remain durable in PostgreSQL for the whole outage.
+Pause/unpause and actual same-container stop/start are separate regression
+scenarios because they exercise different connection and broker recovery paths.
 
 ## Permanent broker errors
 

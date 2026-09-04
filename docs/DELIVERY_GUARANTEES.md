@@ -29,6 +29,13 @@ Kafka acknowledgement is required before the row is marked `delivered`. If the
 process dies after broker ACK and before the database update, the event remains
 recoverable and **may be published again**. That duplicate window is intentional.
 
+The Kafka producer uses `acks=all`, disables Kafka producer idempotence, and
+performs no client record retries. EmitLane deliberately chooses a bounded,
+ambiguous at-least-once attempt: cancellation may race with Kafka accepting the
+request, and PostgreSQL retry may duplicate it. Disabling producer sequence
+state prevents a later distinct event from being falsely acknowledged against
+an unresolved earlier sequence.
+
 ## Attempts
 
 `attempts` is the number of broker publish attempts that have been started. The

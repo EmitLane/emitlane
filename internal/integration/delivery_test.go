@@ -41,6 +41,7 @@ type env struct {
 	databaseURL string
 	pool        *pgxpool.Pool
 	brokers     []string
+	kafka       testcontainers.Container
 	store       *pgstore.Store
 	writer      *outbox.Writer
 	log         *slog.Logger
@@ -181,6 +182,7 @@ func startEnv(t *testing.T) *env {
 			databaseURL: conn,
 			pool:        pool,
 			brokers:     brokers,
+			kafka:       kafkaC,
 			store:       store,
 			writer:      outbox.NewWriter(),
 			log:         log,

@@ -15,7 +15,15 @@ func reportMarkdown(r Result) string {
 	fmt.Fprintln(&b, "# EmitLane local soak report")
 	fmt.Fprintln(&b)
 	fmt.Fprintf(&b, "**Result: %s**\n\n", result)
-	fmt.Fprintf(&b, "- Run ID: `%s`\n- Profile: `%s`\n- Duration: `%s`\n- Seed: `%d`\n- Git commit: `%s`\n- Platform: `%s/%s`\n\n", r.RunID, r.Profile, time.Duration(r.DurationSeconds*float64(time.Second)).Round(time.Second), r.Seed, r.GitCommit, r.OS, r.Arch)
+	fmt.Fprintf(&b, "- Run ID: `%s`\n- Profile: `%s`\n- Duration: `%s`\n- Seed: `%d`\n- Git commit: `%s`\n- Git branch: `%s`\n- Git dirty: `%t`\n", r.RunID, r.Profile, time.Duration(r.DurationSeconds*float64(time.Second)).Round(time.Second), r.Seed, r.GitCommit, r.GitBranch, r.GitDirty)
+	if r.GitDiffSHA256 != "" {
+		fmt.Fprintf(&b, "- Git diff SHA-256: `%s`\n", r.GitDiffSHA256)
+	}
+	fmt.Fprintf(&b, "- Valid release evidence: `%t`\n- Platform: `%s/%s`\n\n", r.ReleaseEvidence, r.OS, r.Arch)
+	if r.Profile == "release" && r.GitDirty {
+		fmt.Fprintln(&b, "**NOT REPRODUCIBLE RELEASE EVIDENCE: working tree was dirty.**")
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintln(&b, "## Timeline")
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "![Committed and observed events, backlog, and injected faults](timeline.svg)")

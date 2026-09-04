@@ -134,6 +134,9 @@ required.
 
 Detailed diagnostics are bounded to the first 100 failures. Reports do not
 contain payloads or unbounded event-ID lists. `.emitlane/` is ignored by Git.
+Every report records `git_commit`, `git_branch`, and `git_dirty`. Dirty reports
+also contain `git_diff_sha256`, including untracked content, so their source can
+be distinguished. A dirty release-profile run is rejected by default.
 
 ## Release run
 
@@ -145,6 +148,16 @@ make soak-status
 make soak-logs
 make soak-report
 ```
+
+`PROFILE=release` requires a clean working tree. A developer may explicitly use
+`ALLOW_DIRTY=1`, but the JSON and Markdown reports label that run as **not valid
+release evidence**. The final release run must use the exact clean patch commit.
+
+The seeded soak's frequent Kafka outages remain pause/unpause faults. Release
+validation additionally runs the integration regression that stops and starts
+the same Kafka container, drains the durable outbox, and independently audits
+committed event IDs. Pause outages and broker restarts must be reported as
+distinct scenarios; neither substitutes for the other.
 
 Do not close Docker or suspend the computer while it is running. A release soak
 passes only when every committed ID was observed, ordering stayed monotonic,
