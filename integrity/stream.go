@@ -33,8 +33,8 @@ func (v *Verifier) InspectStream(ctx context.Context, destination, orderingKey s
 		return StreamInspection{}, fmt.Errorf("integrity: begin stream snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	timeoutMS := (v.config.StatementTimeout + time.Millisecond - 1) / time.Millisecond
-	if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`, strconv.FormatInt(int64(timeoutMS), 10)); err != nil {
+	timeoutValue := strconv.FormatInt(int64((v.config.StatementTimeout+time.Millisecond-1)/time.Millisecond), 10)
+	if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`, timeoutValue); err != nil {
 		return StreamInspection{}, fmt.Errorf("integrity: set stream statement timeout: %w", err)
 	}
 	var databaseNow time.Time
