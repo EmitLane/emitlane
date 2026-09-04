@@ -333,6 +333,10 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 	}
 	attempt, err := r.beginAttempt(ctx, ev)
 	if err != nil {
+		if errors.Is(err, ErrFenced) {
+			r.logOrderedFence(ev, "begin_attempt")
+			return
+		}
 		r.log.Error("begin publish attempt failed; event remains recoverable",
 			"event_id", ev.ID.String(),
 			"relay_instance", r.cfg.InstanceID,
@@ -412,6 +416,10 @@ func (r *Relay) handle(ctx context.Context, ev Event) {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := r.markDelivered(markCtx, ev); err != nil {
+		if errors.Is(err, ErrFenced) {
+			r.logOrderedFence(ev, "delivered")
+			return
+		}
 		r.log.Error("mark delivered failed after broker ack; event remains recoverable",
 			"event_id", ev.ID.String(),
 			"destination", ev.Destination,
@@ -488,6 +496,10 @@ func (r *Relay) onPublishFailure(ctx context.Context, ev Event, pubErr error) {
 
 	delay := delay(ev.Attempts, r.cfg.BaseDelay, r.cfg.MaxDelay, r.rnd)
 	if err := r.markRetry(markCtx, ev, delay, lastErr); err != nil {
+		if errors.Is(err, ErrFenced) {
+			r.logOrderedFence(ev, "retry")
+			return
+		}
 		r.log.Error("mark retry failed; event remains inflight",
 			"event_id", ev.ID.String(),
 			"relay_instance", r.cfg.InstanceID,
@@ -530,6 +542,10 @@ func (r *Relay) markDead(ctx context.Context, ev Event, reason string) {
 		err = errors.New("relay: ordered event missing ordered store capability")
 	}
 	if err != nil {
+		if errors.Is(err, ErrFenced) {
+			r.logOrderedFence(ev, "dead")
+			return
+		}
 		r.log.Error("mark dead failed; event remains inflight",
 			"event_id", ev.ID.String(),
 			"relay_instance", r.cfg.InstanceID,
@@ -547,6 +563,19 @@ func (r *Relay) markDead(ctx context.Context, ev Event, reason string) {
 		"status", "dead",
 		"error", reason,
 	)
+}
+
+func (r *Relay) logOrderedFence(ev Event, operation string) {
+	attributes := []any{
+		"event_id", ev.ID.String(),
+		"relay_instance", r.cfg.InstanceID,
+		"claimed_epoch", ev.OrderingEpoch,
+		"operation", operation,
+	}
+	if ev.OrderingPartition != nil {
+		attributes = append(attributes, "ordering_partition", *ev.OrderingPartition)
+	}
+	r.log.Debug("ordered transition fenced; stale work discarded", attributes...)
 }
 
 func (r *Relay) statsLoop(ctx context.Context) {

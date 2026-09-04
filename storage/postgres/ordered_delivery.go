@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -142,6 +144,9 @@ RETURNING event.attempts`
 	var attempt int
 	if err := s.pool.QueryRow(ctx, query, id, owner, epoch, maxAttempts,
 		intervalMS(minimumPartitionLease)).Scan(&attempt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("begin ordered publish attempt %s: %w", id, relay.ErrFenced)
+		}
 		return 0, fmt.Errorf("begin ordered publish attempt %s: %w", id, err)
 	}
 	return attempt, nil
@@ -202,10 +207,7 @@ WHERE event.id = advanced.id`
 		return fmt.Errorf("mark ordered delivered %s: %w", event.ID, err)
 	}
 	if tag.RowsAffected() != 1 {
-		err := fmt.Errorf("mark ordered delivered %s: stale owner, epoch, lease, or sequence", event.ID)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
+		return fmt.Errorf("mark ordered delivered %s: %w", event.ID, relay.ErrFenced)
 	}
 	return nil
 }
@@ -230,7 +232,7 @@ WHERE event.id=$1
 		return fmt.Errorf("mark ordered retry %s: %w", event.ID, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("mark ordered retry %s: stale owner, epoch, lease, or sequence", event.ID)
+		return fmt.Errorf("mark ordered retry %s: %w", event.ID, relay.ErrFenced)
 	}
 	return nil
 }
@@ -253,7 +255,7 @@ WHERE event.id=$1
 		return fmt.Errorf("mark ordered dead %s: %w", event.ID, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("mark ordered dead %s: stale owner, epoch, lease, or sequence", event.ID)
+		return fmt.Errorf("mark ordered dead %s: %w", event.ID, relay.ErrFenced)
 	}
 	return nil
 }
