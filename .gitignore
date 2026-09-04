@@ -12,6 +12,7 @@ dist/
 coverage.*
 *.prof
 *.pprof
+/.emitlane/
 
 # Editor and operating-system metadata
 .DS_Store
