@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/EmitLane/emitlane/compare/v0.3.2...v0.4.0) (2026-09-07)
+
+
+### Features
+
+* **integrity:** add correctness verification and diagnostics ([3fd46f4](https://github.com/EmitLane/emitlane/commit/3fd46f421670430602cb476c41419651da94f581))
+
 ## [0.3.2](https://github.com/EmitLane/emitlane/compare/v0.3.1...v0.3.2) (2026-09-04)
 
 
