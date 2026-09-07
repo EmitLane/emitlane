@@ -20,4 +20,11 @@ func TestConfigValidate(t *testing.T) {
 	if err := config.Validate(); err == nil {
 		t.Fatal("expected unsafe renewal/lease configuration")
 	}
+	config = DefaultConfig()
+	config.Consumer = "billing-v1"
+	config.InstanceID = "billing-1"
+	config.Jitter = 1.1
+	if err := config.Validate(); err == nil {
+		t.Fatal("expected invalid jitter")
+	}
 }

@@ -191,6 +191,48 @@ FROM emitlane.inbox_events WHERE consumer=$1 AND event_id=$2`, consumer, eventID
 	return event, nil
 }
 
+func (s *InboxStore) RetryDead(ctx context.Context, request inbox.RetryRequest) error {
+	request.Consumer = strings.TrimSpace(request.Consumer)
+	request.Actor = strings.TrimSpace(request.Actor)
+	request.Reason = strings.TrimSpace(request.Reason)
+	request.RequestID = strings.TrimSpace(request.RequestID)
+	if request.Consumer == "" || request.EventID == uuid.Nil || request.Actor == "" || request.Reason == "" {
+		return fmt.Errorf("%w: consumer, event ID, actor, and retry reason are required", inbox.ErrInvalidRequest)
+	}
+	if len(request.Actor) > 256 || len(request.Reason) > 4096 || len(request.RequestID) > 256 {
+		return fmt.Errorf("%w: retry audit fields exceed their bounds", inbox.ErrInvalidRequest)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("inbox retry dead: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	tag, err := tx.Exec(ctx, `
+UPDATE emitlane.inbox_events
+SET status='retry_wait', processed_at=NULL, available_at=NOW(),
+    lease_owner=NULL, lease_token=NULL, lease_until=NULL, updated_at=NOW()
+WHERE consumer=$1 AND event_id=$2 AND status='dead'`, request.Consumer, request.EventID)
+	if err != nil {
+		return fmt.Errorf("inbox retry dead: update: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: Inbox event is not dead", inbox.ErrLifecycleConflict)
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO emitlane.admin_audit_log (
+    id, action, actor, reason, request_id, target_event_id, details
+) VALUES ($1, 'inbox.retry', $2, $3, NULLIF($4,''), $5,
+          jsonb_build_object('consumer',$6::TEXT))`,
+		uuid.New(), request.Actor, request.Reason, request.RequestID, request.EventID, request.Consumer)
+	if err != nil {
+		return fmt.Errorf("inbox retry dead: audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("inbox retry dead: commit: %w", err)
+	}
+	return nil
+}
+
 func requireInboxLease(rows int64) error {
 	if rows != 1 {
 		return inbox.ErrLeaseLost
@@ -233,3 +275,4 @@ func scanInboxEvent(row rowScanner) (inbox.Event, error) {
 }
 
 var _ inbox.Store = (*InboxStore)(nil)
+var _ inbox.OperatorStore = (*InboxStore)(nil)

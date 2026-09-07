@@ -45,6 +45,7 @@ type Runtime struct {
 	factory         SourceFactory
 	handler         Handler
 	resolveIdentity IdentityResolver
+	formatError     func(error) string
 	logger          *slog.Logger
 }
 
@@ -58,6 +59,7 @@ func New(config Config, pool *pgxpool.Pool, store inbox.Store, factory SourceFac
 	runtime := &Runtime{
 		config: config, pool: pool, store: store, factory: factory, handler: handler,
 		resolveIdentity: ResolveEventID,
+		formatError:     safeErrorSummary,
 		logger:          slog.Default(),
 	}
 	for _, option := range options {
@@ -242,7 +244,7 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false, retryPoint{eventID: eventID, at: *claim.Event.LeaseUntil}, false
+		return w.transitionFailure(ctx, eventID, claim.Event, err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(handlerCtx)) }()
 	renewCtx, stopRenew := context.WithCancel(handlerCtx)
@@ -257,14 +259,20 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		span.RecordError(renewErr)
 		span.SetStatus(codes.Error, renewErr.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+		if errors.Is(renewErr, inbox.ErrLeaseLost) {
+			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+		}
+		return w.transitionFailure(ctx, eventID, claim.Event, renewErr)
+	}
+	if handlerErr == nil && handlerCtx.Err() != nil {
+		handlerErr = handlerCtx.Err()
 	}
 	if handlerErr != nil {
 		err := handlerErr
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
-		return false, retryPoint{eventID: eventID, at: *claim.Event.LeaseUntil}, false
+		return w.transitionFailure(ctx, eventID, claim.Event, err)
 	}
 	if err := w.runtime.store.MarkProcessed(handlerCtx, tx, w.runtime.config.Consumer, eventID, claim.Event.LeaseToken); err != nil {
 		span.RecordError(err)
@@ -283,6 +291,42 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
 	}
 	return true, retryPoint{}, false
+}
+
+func (w *worker) transitionFailure(ctx context.Context, eventID uuid.UUID, event inbox.Event, failure error) (bool, retryPoint, bool) {
+	transitionTimeout := w.runtime.config.ShutdownTimeout
+	if transitionTimeout > 5*time.Second {
+		transitionTimeout = 5 * time.Second
+	}
+	transitionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), transitionTimeout)
+	defer cancel()
+	lastError := w.runtime.formatError(failure)
+	if inbox.IsPermanent(failure) || event.Attempts >= w.runtime.config.MaxAttempts {
+		if err := w.runtime.store.MarkDead(transitionCtx, w.runtime.config.Consumer, eventID, event.LeaseToken, lastError); err != nil {
+			w.runtime.logger.WarnContext(ctx, "failed to record dead Inbox state", "consumer", w.runtime.config.Consumer,
+				"topic", event.Source.Topic, "partition", event.Source.Partition, "error", err)
+			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+		}
+		return false, retryPoint{eventID: eventID}, true
+	}
+	delay := w.runtime.nextRetryDelay(event.Attempts)
+	if err := w.runtime.store.MarkRetry(transitionCtx, w.runtime.config.Consumer, eventID, event.LeaseToken, delay, lastError); err != nil {
+		w.runtime.logger.WarnContext(ctx, "failed to record Inbox retry", "consumer", w.runtime.config.Consumer,
+			"topic", event.Source.Topic, "partition", event.Source.Partition, "error", err)
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+	}
+	return false, retryPoint{eventID: eventID, at: time.Now().Add(delay)}, false
+}
+
+func safeErrorSummary(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "handler timeout"
+	case inbox.IsPermanent(err):
+		return "permanent handler failure"
+	default:
+		return "retryable handler failure"
+	}
 }
 
 func (w *worker) renewLease(ctx context.Context, eventID, token uuid.UUID) error {

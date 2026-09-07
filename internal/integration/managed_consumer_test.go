@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,4 +219,218 @@ func TestManagedConsumerRenewsHandlerLease(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("renewed event did not reach processed")
+}
+
+func TestManagedConsumerDurableRetryRollsBackFailedAttempt(t *testing.T) {
+	e := startEnv(t)
+	topic := "managed-retry-" + uuid.NewString()
+	group := "managed-retry-group-" + uuid.NewString()
+	e.ensureTopic(t, topic)
+	eventID := uuid.New()
+	produceManagedRecord(t, e, topic, eventID, []byte("retry"))
+	var calls atomic.Int32
+	store := startManagedTestRuntime(t, e, topic, group, "retry-handler-v1", func(config *managed.Config) {
+		config.MaxAttempts = 3
+		config.BaseDelay = 50 * time.Millisecond
+		config.MaxDelay = 100 * time.Millisecond
+		config.Jitter = 0
+	}, func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+		attempt := calls.Add(1)
+		if _, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, $2)`, message.EventID.String(), attempt); err != nil {
+			return err
+		}
+		if attempt == 1 {
+			return errors.New("temporary database rule")
+		}
+		return nil
+	})
+	event := waitManagedInboxStatus(t, store, "retry-handler-v1", eventID, inbox.StatusProcessed, 10*time.Second)
+	if event.Attempts != 2 || calls.Load() != 2 {
+		t.Fatalf("retry event attempts=%d handler calls=%d", event.Attempts, calls.Load())
+	}
+	var effects int
+	if err := e.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.business_payments WHERE order_id=$1`, eventID.String()).Scan(&effects); err != nil {
+		t.Fatal(err)
+	}
+	if effects != 1 {
+		t.Fatalf("protected effects=%d, want 1", effects)
+	}
+}
+
+func TestManagedConsumerPermanentErrorBlocksPartition(t *testing.T) {
+	e := startEnv(t)
+	topic := "managed-dead-" + uuid.NewString()
+	group := "managed-dead-group-" + uuid.NewString()
+	e.ensureTopic(t, topic)
+	deadID := uuid.New()
+	laterID := uuid.New()
+	produceManagedRecord(t, e, topic, deadID, []byte("dead"))
+	produceManagedRecord(t, e, topic, laterID, []byte("later"))
+	var calls atomic.Int32
+	store := startManagedTestRuntime(t, e, topic, group, "dead-handler-v1", nil,
+		func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+			attempt := calls.Add(1)
+			if attempt == 1 {
+				return inbox.Permanent(errors.New("unsupported domain value"))
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, $2)`, message.EventID.String(), attempt)
+			return err
+		})
+	event := waitManagedInboxStatus(t, store, "dead-handler-v1", deadID, inbox.StatusDead, 10*time.Second)
+	if event.Attempts != 1 || event.LastError != "permanent handler failure" {
+		t.Fatalf("dead event=%+v", event)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if calls.Load() != 1 {
+		t.Fatalf("handler calls=%d, later same-partition record ran", calls.Load())
+	}
+	if _, err := store.Get(context.Background(), "dead-handler-v1", laterID); !errors.Is(err, inbox.ErrNotFound) {
+		t.Fatalf("later same-partition Inbox state error=%v", err)
+	}
+	if err := store.RetryDead(context.Background(), inbox.RetryRequest{
+		Consumer: "dead-handler-v1", EventID: deadID,
+		Actor: "integration-test", Reason: "domain value mapping fixed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retried := waitManagedInboxStatus(t, store, "dead-handler-v1", deadID, inbox.StatusProcessed, 10*time.Second)
+	if retried.Attempts != 2 {
+		t.Fatalf("retried attempts=%d, want 2", retried.Attempts)
+	}
+	waitManagedInboxStatus(t, store, "dead-handler-v1", laterID, inbox.StatusProcessed, 10*time.Second)
+	if calls.Load() != 3 {
+		t.Fatalf("handler calls=%d, want dead retry then later record", calls.Load())
+	}
+	var audits int
+	if err := e.pool.QueryRow(context.Background(), `
+SELECT COUNT(*) FROM emitlane.admin_audit_log
+WHERE action='inbox.retry' AND target_event_id=$1 AND reason='domain value mapping fixed'`, deadID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("retry audit rows=%d, want 1", audits)
+	}
+}
+
+func TestManagedConsumerHandlerTimeoutRetriesTransaction(t *testing.T) {
+	e := startEnv(t)
+	topic := "managed-timeout-" + uuid.NewString()
+	group := "managed-timeout-group-" + uuid.NewString()
+	e.ensureTopic(t, topic)
+	eventID := uuid.New()
+	produceManagedRecord(t, e, topic, eventID, []byte("timeout"))
+	var calls atomic.Int32
+	store := startManagedTestRuntime(t, e, topic, group, "timeout-handler-v1", func(config *managed.Config) {
+		config.HandlerTimeout = 120 * time.Millisecond
+		config.LeaseDuration = 600 * time.Millisecond
+		config.LeaseRenewInterval = 150 * time.Millisecond
+		config.BaseDelay = 40 * time.Millisecond
+		config.MaxDelay = 80 * time.Millisecond
+		config.Jitter = 0
+	}, func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+		attempt := calls.Add(1)
+		if _, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, $2)`, message.EventID.String(), attempt); err != nil {
+			return err
+		}
+		if attempt == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	event := waitManagedInboxStatus(t, store, "timeout-handler-v1", eventID, inbox.StatusProcessed, 10*time.Second)
+	if event.Attempts != 2 || calls.Load() != 2 {
+		t.Fatalf("timeout event attempts=%d calls=%d", event.Attempts, calls.Load())
+	}
+	var amount int
+	if err := e.pool.QueryRow(context.Background(), `SELECT amount FROM public.business_payments WHERE order_id=$1`, eventID.String()).Scan(&amount); err != nil {
+		t.Fatal(err)
+	}
+	if amount != 2 {
+		t.Fatalf("committed attempt amount=%d, want 2", amount)
+	}
+}
+
+func produceManagedRecord(t *testing.T, e *env, topic string, eventID uuid.UUID, payload []byte) {
+	t.Helper()
+	producer, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...), kgo.RequiredAcks(kgo.AllISRAcks()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := producer.ProduceSync(ctx, &kgo.Record{
+		Topic: topic, Value: payload,
+		Headers: []kgo.RecordHeader{{Key: managed.EventIDHeader, Value: []byte(eventID.String())}},
+	})
+	if err := result.FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startManagedTestRuntime(
+	t *testing.T,
+	e *env,
+	topic, group, consumerName string,
+	configure func(*managed.Config),
+	handler managed.Handler,
+) *pgstore.InboxStore {
+	t.Helper()
+	factory, err := kafkaadapter.NewConsumerFactory(kafkaadapter.ConsumerConfig{
+		Brokers: e.brokers, Group: group, Topics: []string{topic},
+		SessionTimeout: 6 * time.Second, RebalanceTimeout: 10 * time.Second, FetchMaxWait: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := managed.DefaultConfig()
+	config.Consumer = consumerName
+	config.InstanceID = consumerName + "-instance"
+	config.HandlerTimeout = 2 * time.Second
+	config.LeaseDuration = 2 * time.Second
+	config.LeaseRenewInterval = 500 * time.Millisecond
+	config.MaintenancePoll = 25 * time.Millisecond
+	if configure != nil {
+		configure(&config)
+	}
+	runtime, err := managed.New(config, e.pool, store, factory, handler, managed.WithLogger(e.log))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case runErr := <-done:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				t.Errorf("managed consumer stop: %v", runErr)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("managed consumer did not stop")
+		}
+	})
+	return store
+}
+
+func waitManagedInboxStatus(t *testing.T, store *pgstore.InboxStore, consumerName string, eventID uuid.UUID, status inbox.Status, timeout time.Duration) inbox.Event {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last inbox.Event
+	var lastErr error
+	for time.Now().Before(deadline) {
+		last, lastErr = store.Get(context.Background(), consumerName, eventID)
+		if lastErr == nil && last.Status == status {
+			return last
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("Inbox event %s status=%s error=%v, want %s", eventID, last.Status, lastErr, status)
+	return inbox.Event{}
 }

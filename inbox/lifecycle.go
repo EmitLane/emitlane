@@ -80,3 +80,17 @@ type Store interface {
 	MarkDead(context.Context, string, uuid.UUID, uuid.UUID, string) error
 	Get(context.Context, string, uuid.UUID) (Event, error)
 }
+
+// RetryRequest is an explicit audited operator action. It preserves the event
+// identity, source coordinates, and attempt count.
+type RetryRequest struct {
+	Consumer  string
+	EventID   uuid.UUID
+	Actor     string
+	Reason    string
+	RequestID string
+}
+
+type OperatorStore interface {
+	RetryDead(context.Context, RetryRequest) error
+}

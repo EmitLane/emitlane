@@ -10,6 +10,10 @@ type Config struct {
 	Consumer           string
 	InstanceID         string
 	Concurrency        int
+	MaxAttempts        int
+	BaseDelay          time.Duration
+	MaxDelay           time.Duration
+	Jitter             float64
 	HandlerTimeout     time.Duration
 	LeaseDuration      time.Duration
 	LeaseRenewInterval time.Duration
@@ -20,6 +24,10 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Concurrency:        1,
+		MaxAttempts:        10,
+		BaseDelay:          time.Second,
+		MaxDelay:           30 * time.Minute,
+		Jitter:             1,
 		HandlerTimeout:     2 * time.Minute,
 		LeaseDuration:      30 * time.Second,
 		LeaseRenewInterval: 10 * time.Second,
@@ -37,6 +45,15 @@ func (c Config) Validate() error {
 	}
 	if c.Concurrency < 1 || c.Concurrency > 128 {
 		return fmt.Errorf("consumer: concurrency must be between 1 and 128")
+	}
+	if c.MaxAttempts < 1 {
+		return fmt.Errorf("consumer: max attempts must be >= 1")
+	}
+	if c.BaseDelay <= 0 || c.MaxDelay < c.BaseDelay {
+		return fmt.Errorf("consumer: retry delays must be positive and max must be >= base")
+	}
+	if c.Jitter < 0 || c.Jitter > 1 {
+		return fmt.Errorf("consumer: jitter must be between 0 and 1")
 	}
 	if c.HandlerTimeout <= 0 {
 		return fmt.Errorf("consumer: handler timeout must be > 0")

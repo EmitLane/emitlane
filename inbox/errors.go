@@ -2,6 +2,7 @@ package inbox
 
 import (
 	"errors"
+	"fmt"
 )
 
 // ErrAlreadyProcessed is returned by ProcessStrict when the (consumer, event)
@@ -22,3 +23,25 @@ var ErrLeaseLost = errors.New("inbox: lease lost")
 
 // ErrNotFound is returned when an Inbox identity does not exist.
 var ErrNotFound = errors.New("inbox: event not found")
+
+type permanentError struct {
+	err error
+}
+
+func (e permanentError) Error() string { return fmt.Sprintf("permanent handler failure: %v", e.err) }
+func (e permanentError) Unwrap() error { return e.err }
+
+// Permanent explicitly marks a handler failure as non-retryable. It does not
+// infer classification from error strings.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{err: err}
+}
+
+// IsPermanent reports whether Permanent appears in the error chain.
+func IsPermanent(err error) bool {
+	var target permanentError
+	return errors.As(err, &target)
+}
