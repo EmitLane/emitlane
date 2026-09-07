@@ -36,6 +36,10 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+func WithMetrics(metrics *telemetry.Metrics) Option {
+	return func(runtime *Runtime) { runtime.metrics = metrics }
+}
+
 // Runtime owns Kafka polling, PostgreSQL handler transactions, and offset
 // commits. One group member per configured worker bounds concurrency.
 type Runtime struct {
@@ -47,6 +51,7 @@ type Runtime struct {
 	resolveIdentity IdentityResolver
 	formatError     func(error) string
 	logger          *slog.Logger
+	metrics         *telemetry.Metrics
 }
 
 func New(config Config, pool *pgxpool.Pool, store inbox.Store, factory SourceFactory, handler Handler, options ...Option) (*Runtime, error) {
@@ -126,6 +131,7 @@ type blockedPartition struct {
 	eventID   uuid.UUID
 	resumeAt  time.Time
 	permanent bool
+	reason    string
 }
 
 type worker struct {
@@ -161,14 +167,12 @@ func (w *worker) run(ctx context.Context) error {
 			return fmt.Errorf("consumer %s: poll: %w", w.id, err)
 		}
 
-		resolved, retryAt, permanent := w.process(ctx, record)
+		resolved, retryAt, permanent, reason := w.process(ctx, record)
 		if !resolved {
 			w.source.Rewind(record)
 			partition := TopicPartition{Topic: record.Topic, Partition: record.Partition}
 			w.source.Pause(partition)
-			w.mu.Lock()
-			w.blocked[partition] = blockedPartition{record: record, eventID: retryAt.eventID, resumeAt: retryAt.at, permanent: permanent}
-			w.mu.Unlock()
+			w.block(partition, blockedPartition{record: record, eventID: retryAt.eventID, resumeAt: retryAt.at, permanent: permanent, reason: reason})
 		}
 		w.source.AllowRebalance()
 	}
@@ -179,7 +183,8 @@ type retryPoint struct {
 	at      time.Time
 }
 
-func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryPoint, bool) {
+func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryPoint, bool, string) {
+	started := time.Now()
 	message := Message{
 		Topic: record.Topic, Partition: record.Partition, Offset: record.Offset,
 		Timestamp: record.Timestamp, Key: record.Key, Payload: record.Payload, Headers: record.Headers,
@@ -189,7 +194,8 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		w.runtime.logger.WarnContext(ctx, "consumer protocol error blocks partition",
 			"consumer", w.id, "topic", record.Topic, "partition", record.Partition,
 			"offset", record.Offset, "error", err)
-		return false, retryPoint{}, true
+		w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "protocol_error", time.Since(started).Seconds())
+		return false, retryPoint{}, true, "protocol"
 	}
 	message.EventID = eventID
 	claim, err := w.runtime.store.Claim(ctx, inbox.ClaimRequest{
@@ -200,28 +206,34 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 	if err != nil {
 		w.runtime.logger.WarnContext(ctx, "Inbox claim failed", "consumer", w.id,
 			"topic", record.Topic, "partition", record.Partition, "offset", record.Offset, "error", err)
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
+		w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "error", time.Since(started).Seconds())
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false, "database"
 	}
 	switch claim.Disposition {
 	case inbox.AlreadyProcessed:
 		if err := w.source.Commit(ctx, record); err != nil {
-			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
+			w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "error", time.Since(started).Seconds())
+			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false, "offset_commit"
 		}
-		return true, retryPoint{}, false
+		w.runtime.metrics.IncConsumerDuplicate(w.runtime.config.Consumer)
+		w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "duplicate", time.Since(started).Seconds())
+		return true, retryPoint{}, false, ""
 	case inbox.ClaimDead:
-		return false, retryPoint{eventID: eventID}, true
+		return false, retryPoint{eventID: eventID}, true, "dead"
 	case inbox.ClaimWaiting:
 		resumeAt := claim.Event.AvailableAt
 		if claim.Event.LeaseUntil != nil && claim.Event.LeaseUntil.After(resumeAt) {
 			resumeAt = *claim.Event.LeaseUntil
 		}
-		return false, retryPoint{eventID: eventID, at: resumeAt}, false
+		return false, retryPoint{eventID: eventID, at: resumeAt}, false, "retry"
 	case inbox.Claimed:
 	default:
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false, "database"
 	}
 
 	message.Attempt = claim.Event.Attempts
+	w.runtime.metrics.AddConsumerInflight(w.runtime.config.Consumer, 1)
+	defer w.runtime.metrics.AddConsumerInflight(w.runtime.config.Consumer, -1)
 	handlerCtx := traceContext(ctx, message.Headers)
 	handlerCtx, cancel := context.WithTimeout(handlerCtx, w.runtime.config.HandlerTimeout)
 	w.setActiveCancel(cancel)
@@ -244,7 +256,7 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return w.transitionFailure(ctx, eventID, claim.Event, err)
+		return w.transitionFailure(ctx, eventID, claim.Event, err, started)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(handlerCtx)) }()
 	renewCtx, stopRenew := context.WithCancel(handlerCtx)
@@ -260,9 +272,9 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		span.SetStatus(codes.Error, renewErr.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
 		if errors.Is(renewErr, inbox.ErrLeaseLost) {
-			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false, "database"
 		}
-		return w.transitionFailure(ctx, eventID, claim.Event, renewErr)
+		return w.transitionFailure(ctx, eventID, claim.Event, renewErr, started)
 	}
 	if handlerErr == nil && handlerCtx.Err() != nil {
 		handlerErr = handlerCtx.Err()
@@ -272,28 +284,29 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
-		return w.transitionFailure(ctx, eventID, claim.Event, err)
+		return w.transitionFailure(ctx, eventID, claim.Event, err, started)
 	}
 	if err := w.runtime.store.MarkProcessed(handlerCtx, tx, w.runtime.config.Consumer, eventID, claim.Event.LeaseToken); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
-		return false, retryPoint{eventID: eventID, at: *claim.Event.LeaseUntil}, false
+		return false, retryPoint{eventID: eventID, at: *claim.Event.LeaseUntil}, false, "database"
 	}
 	if err := tx.Commit(handlerCtx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false, "database"
 	}
 	if err := w.source.Commit(ctx, record); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false, "offset_commit"
 	}
-	return true, retryPoint{}, false
+	w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "processed", time.Since(started).Seconds())
+	return true, retryPoint{}, false, ""
 }
 
-func (w *worker) transitionFailure(ctx context.Context, eventID uuid.UUID, event inbox.Event, failure error) (bool, retryPoint, bool) {
+func (w *worker) transitionFailure(ctx context.Context, eventID uuid.UUID, event inbox.Event, failure error, started time.Time) (bool, retryPoint, bool, string) {
 	transitionTimeout := w.runtime.config.ShutdownTimeout
 	if transitionTimeout > 5*time.Second {
 		transitionTimeout = 5 * time.Second
@@ -305,17 +318,22 @@ func (w *worker) transitionFailure(ctx context.Context, eventID uuid.UUID, event
 		if err := w.runtime.store.MarkDead(transitionCtx, w.runtime.config.Consumer, eventID, event.LeaseToken, lastError); err != nil {
 			w.runtime.logger.WarnContext(ctx, "failed to record dead Inbox state", "consumer", w.runtime.config.Consumer,
 				"topic", event.Source.Topic, "partition", event.Source.Partition, "error", err)
-			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+			w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "error", time.Since(started).Seconds())
+			return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false, "database"
 		}
-		return false, retryPoint{eventID: eventID}, true
+		w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "dead", time.Since(started).Seconds())
+		return false, retryPoint{eventID: eventID}, true, "dead"
 	}
 	delay := w.runtime.nextRetryDelay(event.Attempts)
 	if err := w.runtime.store.MarkRetry(transitionCtx, w.runtime.config.Consumer, eventID, event.LeaseToken, delay, lastError); err != nil {
 		w.runtime.logger.WarnContext(ctx, "failed to record Inbox retry", "consumer", w.runtime.config.Consumer,
 			"topic", event.Source.Topic, "partition", event.Source.Partition, "error", err)
-		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+		w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "error", time.Since(started).Seconds())
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false, "database"
 	}
-	return false, retryPoint{eventID: eventID, at: time.Now().Add(delay)}, false
+	w.runtime.metrics.IncConsumerRetry(w.runtime.config.Consumer)
+	w.runtime.metrics.ObserveConsumerRecord(w.runtime.config.Consumer, "retry", time.Since(started).Seconds())
+	return false, retryPoint{eventID: eventID, at: time.Now().Add(delay)}, false, "retry"
 }
 
 func safeErrorSummary(err error) string {
@@ -380,6 +398,10 @@ func (w *worker) resumeDue(ctx context.Context) {
 			continue
 		}
 		w.source.Resume(partition)
+		w.runtime.metrics.AddConsumerPaused(w.runtime.config.Consumer, blocked.reason, -1)
+		if blocked.reason == "dead" {
+			w.runtime.metrics.AddConsumerDead(w.runtime.config.Consumer, -1)
+		}
 		delete(w.blocked, partition)
 	}
 }
@@ -391,8 +413,25 @@ func (w *worker) setActiveCancel(cancel context.CancelFunc) {
 }
 
 func (w *worker) Assigned(partitions map[string][]int32) {
+	w.runtime.metrics.IncConsumerRebalance(w.runtime.config.Consumer)
 	w.runtime.logger.Info("consumer partitions assigned", "consumer", w.runtime.config.Consumer,
 		"worker", w.id, "partitions", partitions)
+}
+
+func (w *worker) block(partition TopicPartition, blocked blockedPartition) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if existing, ok := w.blocked[partition]; ok {
+		w.runtime.metrics.AddConsumerPaused(w.runtime.config.Consumer, existing.reason, -1)
+		if existing.reason == "dead" {
+			w.runtime.metrics.AddConsumerDead(w.runtime.config.Consumer, -1)
+		}
+	}
+	w.blocked[partition] = blocked
+	w.runtime.metrics.AddConsumerPaused(w.runtime.config.Consumer, blocked.reason, 1)
+	if blocked.reason == "dead" {
+		w.runtime.metrics.AddConsumerDead(w.runtime.config.Consumer, 1)
+	}
 }
 
 func (w *worker) Revoked(partitions map[string][]int32) { w.releasePartitions(partitions) }
@@ -415,6 +454,12 @@ func (w *worker) releasePartitions(partitions map[string][]int32) {
 		for _, partition := range values {
 			key := TopicPartition{Topic: topic, Partition: partition}
 			w.source.Resume(key)
+			if blocked, ok := w.blocked[key]; ok {
+				w.runtime.metrics.AddConsumerPaused(w.runtime.config.Consumer, blocked.reason, -1)
+				if blocked.reason == "dead" {
+					w.runtime.metrics.AddConsumerDead(w.runtime.config.Consumer, -1)
+				}
+			}
 			delete(w.blocked, key)
 		}
 	}

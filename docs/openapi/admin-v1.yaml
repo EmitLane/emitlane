@@ -449,7 +449,7 @@ components:
         findings_truncated: { type: boolean }
     IntegritySummary:
       type: object
-      required: [violations, warnings, infos, pending_events, inflight_events, dead_events, active_ordered_events, ordered_streams, ready_streams, inflight_streams, blocked_streams, gap_streams, dead_blocked_streams, retry_wait_streams, stale_event_leases, ordering_partitions, owned_partitions, handoff_partitions, stale_relays]
+      required: [violations, warnings, infos, pending_events, inflight_events, dead_events, active_ordered_events, ordered_streams, ready_streams, inflight_streams, blocked_streams, gap_streams, dead_blocked_streams, retry_wait_streams, stale_event_leases, ordering_partitions, owned_partitions, handoff_partitions, stale_relays, inbox_pending, inbox_inflight, inbox_retry_wait, inbox_processed, inbox_dead, inbox_stale_leases]
       properties:
         violations: { type: integer, format: int64, minimum: 0 }
         warnings: { type: integer, format: int64, minimum: 0 }
@@ -470,18 +470,26 @@ components:
         owned_partitions: { type: integer, format: int64, minimum: 0 }
         handoff_partitions: { type: integer, format: int64, minimum: 0 }
         stale_relays: { type: integer, format: int64, minimum: 0 }
+        inbox_pending: { type: integer, format: int64, minimum: 0 }
+        inbox_inflight: { type: integer, format: int64, minimum: 0 }
+        inbox_retry_wait: { type: integer, format: int64, minimum: 0 }
+        inbox_processed: { type: integer, format: int64, minimum: 0 }
+        inbox_dead: { type: integer, format: int64, minimum: 0 }
+        inbox_stale_leases: { type: integer, format: int64, minimum: 0 }
     IntegrityFinding:
       type: object
       required: [code, severity, message]
       properties:
         code:
           type: string
-          enum: [SCHEMA_VERSION_MISMATCH, PARTITION_COUNT_INVALID, PARTITION_ID_INVALID, PARTITION_EPOCH_INVALID, PARTITION_LEASE_SHAPE_INVALID, PARTITION_OWNER_STALE, PARTITION_HANDOFF_OVERDUE, ORDERING_FIELDS_PARTIAL, ORDERING_PARTITION_MISMATCH, STREAM_PARTITION_MISMATCH, STREAM_CURSOR_INVALID, ACTIVE_SEQUENCE_BEHIND_CURSOR, EXPECTED_SEQUENCE_DUPLICATE, STREAM_GAP, STREAM_DEAD_BLOCKED, STREAM_RETRY_WAIT, STALE_EVENT_LEASE, RUNTIME_CONTROL_INVALID, RELAY_PRESENCE_STALE]
+          enum: [SCHEMA_VERSION_MISMATCH, PARTITION_COUNT_INVALID, PARTITION_ID_INVALID, PARTITION_EPOCH_INVALID, PARTITION_LEASE_SHAPE_INVALID, PARTITION_OWNER_STALE, PARTITION_HANDOFF_OVERDUE, ORDERING_FIELDS_PARTIAL, ORDERING_PARTITION_MISMATCH, STREAM_PARTITION_MISMATCH, STREAM_CURSOR_INVALID, ACTIVE_SEQUENCE_BEHIND_CURSOR, EXPECTED_SEQUENCE_DUPLICATE, STREAM_GAP, STREAM_DEAD_BLOCKED, STREAM_RETRY_WAIT, STALE_EVENT_LEASE, RUNTIME_CONTROL_INVALID, RELAY_PRESENCE_STALE, INBOX_STATE_INVALID, INBOX_LEASE_SHAPE_INVALID, INBOX_SOURCE_METADATA_INVALID, INBOX_PROCESSED_TIMESTAMP_INVALID, INBOX_ATTEMPTS_INVALID, INBOX_STALE_LEASE, INBOX_DEAD_BLOCKED, INBOX_RETRY_WAIT]
         severity: { type: string, enum: [info, warning, violation] }
         message: { type: string }
         destination: { type: string }
+        consumer: { type: string }
         event_id: { type: string, format: uuid }
         partition_id: { type: integer }
+        source_partition: { type: integer, format: int32, minimum: 0 }
         expected: {}
         observed: {}
     Stats:

@@ -101,6 +101,7 @@ func (v *Verifier) Check(ctx context.Context, mode Mode) (Report, error) {
 			checkPartitions,
 			checkRelayPresence,
 			checkEvents,
+			checkInbox,
 			checkStreams,
 		}
 		for _, check := range checks {
@@ -125,12 +126,16 @@ var requiredIndexes = []string{
 	"outbox_created_idx", "outbox_status_created_idx", "outbox_destination_type_created_idx",
 	"outbox_replay_batch_idx", "admin_audit_created_idx", "outbox_ordering_sequence_unique_idx",
 	"outbox_ordered_claim_idx", "ordering_stream_partition_idx",
+	"inbox_due_idx", "inbox_expired_lease_idx", "inbox_dead_idx",
+	"inbox_source_unique_idx", "inbox_processed_retention_idx",
 }
 
 var requiredConstraints = []string{
 	"outbox_ordering_state_check", "ordering_stream_partition_check",
 	"ordering_stream_start_check", "ordering_stream_next_check",
 	"ordering_partition_lease_check", "ordering_partition_epoch_check",
+	"inbox_status_check", "inbox_attempts_check", "inbox_lease_state_check",
+	"inbox_processed_state_check", "inbox_source_metadata_check",
 }
 
 var requiredColumns = map[string][]string{
@@ -139,6 +144,7 @@ var requiredColumns = map[string][]string{
 	"relay_instances":     {"instance_id", "last_heartbeat_at", "stopped_at", "ordering_capable"},
 	"ordering_streams":    {"destination", "ordering_key", "partition_id", "start_sequence", "next_sequence"},
 	"ordering_partitions": {"partition_id", "lease_owner", "lease_until", "epoch", "handoff_not_before", "publish_timeout_ms", "updated_at"},
+	"inbox_events":        {"consumer", "event_id", "status", "attempts", "available_at", "lease_owner", "lease_token", "lease_until", "processed_at", "source_topic", "source_partition", "source_offset"},
 }
 
 func checkSchema(ctx context.Context, tx pgx.Tx, acc *accumulator) (bool, error) {
@@ -152,7 +158,7 @@ WHERE table_schema='emitlane'`)
 	for _, table := range requiredTables {
 		if !tables[table] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v3 table is missing", Expected: table, Observed: "missing"})
+				Message: "required v4 table is missing", Expected: table, Observed: "missing"})
 			runtimeReady = false
 		}
 	}
@@ -161,9 +167,9 @@ WHERE table_schema='emitlane'`)
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM emitlane.schema_migrations`).Scan(&version); err != nil {
 			return false, fmt.Errorf("integrity: inspect schema version: %w", err)
 		}
-		if version != 3 {
+		if version != 4 {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "applied migration version does not match this binary", Expected: 3, Observed: version})
+				Message: "applied migration version does not match this binary", Expected: 4, Observed: version})
 		}
 	}
 
@@ -174,7 +180,7 @@ WHERE table_schema='emitlane'`)
 	for _, index := range requiredIndexes {
 		if !indexes[index] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v3 index is missing", Expected: index, Observed: "missing"})
+				Message: "required v4 index is missing", Expected: index, Observed: "missing"})
 		}
 	}
 
@@ -190,7 +196,7 @@ WHERE namespace.nspname='emitlane'`)
 	for _, constraint := range requiredConstraints {
 		if !constraints[constraint] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v3 constraint is missing", Expected: constraint, Observed: "missing"})
+				Message: "required v4 constraint is missing", Expected: constraint, Observed: "missing"})
 		}
 	}
 
@@ -221,12 +227,110 @@ WHERE table_schema='emitlane'`)
 		for _, column := range names {
 			if !columns[table][column] {
 				acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-					Message: "required v3 column is missing", Expected: table + "." + column, Observed: "missing"})
+					Message: "required v4 column is missing", Expected: table + "." + column, Observed: "missing"})
 				runtimeReady = false
 			}
 		}
 	}
 	return runtimeReady, nil
+}
+
+func checkInbox(ctx context.Context, tx pgx.Tx, acc *accumulator, now time.Time, _ Config, _ Mode) error {
+	rows, err := tx.Query(ctx, `
+SELECT consumer, event_id::TEXT, status, attempts, processed_at,
+       lease_owner, lease_token::TEXT, lease_until,
+       source_topic, source_partition, source_offset, source_timestamp,
+       available_at
+FROM emitlane.inbox_events
+ORDER BY consumer, event_id`)
+	if err != nil {
+		return fmt.Errorf("integrity: inspect Inbox lifecycle: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var consumer, eventID, status string
+		var attempts int
+		var processedAt, leaseUntil, sourceTimestamp *time.Time
+		var leaseOwner, leaseToken, sourceTopic *string
+		var sourcePartition *int32
+		var sourceOffset *int64
+		var availableAt time.Time
+		if err := rows.Scan(&consumer, &eventID, &status, &attempts, &processedAt,
+			&leaseOwner, &leaseToken, &leaseUntil, &sourceTopic, &sourcePartition,
+			&sourceOffset, &sourceTimestamp, &availableAt); err != nil {
+			return fmt.Errorf("integrity: scan Inbox lifecycle: %w", err)
+		}
+		switch status {
+		case "pending":
+			acc.report.Summary.InboxPending++
+		case "inflight":
+			acc.report.Summary.InboxInflight++
+		case "retry_wait":
+			acc.report.Summary.InboxRetryWait++
+			acc.add(Finding{Code: CodeInboxRetryWait, Severity: SeverityWarning,
+				Message: "Inbox event is waiting for retry", Consumer: consumer, EventID: eventID,
+				SourcePartition: sourcePartition, Observed: availableAt.UTC()})
+		case "processed":
+			acc.report.Summary.InboxProcessed++
+		case "dead":
+			acc.report.Summary.InboxDead++
+			acc.add(Finding{Code: CodeInboxDeadBlocked, Severity: SeverityWarning,
+				Message: "dead Inbox event blocks its Kafka partition", Consumer: consumer,
+				EventID: eventID, SourcePartition: sourcePartition})
+		default:
+			acc.add(Finding{Code: CodeInboxStateInvalid, Severity: SeverityViolation,
+				Message: "Inbox lifecycle status is invalid", Consumer: consumer,
+				EventID: eventID, Expected: "pending|inflight|retry_wait|processed|dead", Observed: status})
+		}
+		if attempts < 0 {
+			acc.add(Finding{Code: CodeInboxAttemptsInvalid, Severity: SeverityViolation,
+				Message: "Inbox attempt count is negative", Consumer: consumer, EventID: eventID,
+				Expected: ">= 0", Observed: attempts})
+		}
+		leaseFields := 0
+		if leaseOwner != nil && strings.TrimSpace(*leaseOwner) != "" {
+			leaseFields++
+		}
+		if leaseToken != nil && strings.TrimSpace(*leaseToken) != "" {
+			leaseFields++
+		}
+		if leaseUntil != nil {
+			leaseFields++
+		}
+		if status == "inflight" && leaseFields != 3 || status != "inflight" && leaseFields != 0 {
+			acc.add(Finding{Code: CodeInboxLeaseShapeInvalid, Severity: SeverityViolation,
+				Message: "Inbox lease fields form an invalid shape", Consumer: consumer, EventID: eventID})
+		}
+		if status == "inflight" && leaseUntil != nil && !leaseUntil.After(now) {
+			acc.report.Summary.InboxStaleLeases++
+			acc.add(Finding{Code: CodeInboxStaleLease, Severity: SeverityWarning,
+				Message: "Inbox lease expired and is reclaimable", Consumer: consumer,
+				EventID: eventID, SourcePartition: sourcePartition, Observed: leaseUntil.UTC()})
+		}
+		if (status == "processed") != (processedAt != nil) {
+			acc.add(Finding{Code: CodeInboxProcessedTimestampInvalid, Severity: SeverityViolation,
+				Message: "Inbox processed timestamp does not match status", Consumer: consumer, EventID: eventID})
+		}
+		sourceFields := 0
+		if sourceTopic != nil && strings.TrimSpace(*sourceTopic) != "" {
+			sourceFields++
+		}
+		if sourcePartition != nil {
+			sourceFields++
+		}
+		if sourceOffset != nil {
+			sourceFields++
+		}
+		sourceInvalid := sourceFields != 0 && sourceFields != 3 ||
+			sourcePartition != nil && *sourcePartition < 0 || sourceOffset != nil && *sourceOffset < 0 ||
+			sourceTimestamp != nil && sourceFields != 3 || status != "processed" && sourceFields != 3
+		if sourceInvalid {
+			acc.add(Finding{Code: CodeInboxSourceMetadataInvalid, Severity: SeverityViolation,
+				Message: "Inbox Kafka source metadata forms an invalid shape", Consumer: consumer,
+				EventID: eventID, SourcePartition: sourcePartition})
+		}
+	}
+	return rows.Err()
 }
 
 func stringSet(ctx context.Context, tx pgx.Tx, query string) (map[string]bool, error) {

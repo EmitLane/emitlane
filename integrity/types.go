@@ -27,25 +27,33 @@ const (
 type Code string
 
 const (
-	CodeSchemaVersionMismatch      Code = "SCHEMA_VERSION_MISMATCH"
-	CodePartitionCountInvalid      Code = "PARTITION_COUNT_INVALID"
-	CodePartitionIDInvalid         Code = "PARTITION_ID_INVALID"
-	CodePartitionEpochInvalid      Code = "PARTITION_EPOCH_INVALID"
-	CodePartitionLeaseShapeInvalid Code = "PARTITION_LEASE_SHAPE_INVALID"
-	CodePartitionOwnerStale        Code = "PARTITION_OWNER_STALE"
-	CodePartitionHandoffOverdue    Code = "PARTITION_HANDOFF_OVERDUE"
-	CodeOrderingFieldsPartial      Code = "ORDERING_FIELDS_PARTIAL"
-	CodeOrderingPartitionMismatch  Code = "ORDERING_PARTITION_MISMATCH"
-	CodeStreamPartitionMismatch    Code = "STREAM_PARTITION_MISMATCH"
-	CodeStreamCursorInvalid        Code = "STREAM_CURSOR_INVALID"
-	CodeActiveSequenceBehindCursor Code = "ACTIVE_SEQUENCE_BEHIND_CURSOR"
-	CodeExpectedSequenceDuplicate  Code = "EXPECTED_SEQUENCE_DUPLICATE"
-	CodeStreamGap                  Code = "STREAM_GAP"
-	CodeStreamDeadBlocked          Code = "STREAM_DEAD_BLOCKED"
-	CodeStreamRetryWait            Code = "STREAM_RETRY_WAIT"
-	CodeStaleEventLease            Code = "STALE_EVENT_LEASE"
-	CodeRuntimeControlInvalid      Code = "RUNTIME_CONTROL_INVALID"
-	CodeRelayPresenceStale         Code = "RELAY_PRESENCE_STALE"
+	CodeSchemaVersionMismatch          Code = "SCHEMA_VERSION_MISMATCH"
+	CodePartitionCountInvalid          Code = "PARTITION_COUNT_INVALID"
+	CodePartitionIDInvalid             Code = "PARTITION_ID_INVALID"
+	CodePartitionEpochInvalid          Code = "PARTITION_EPOCH_INVALID"
+	CodePartitionLeaseShapeInvalid     Code = "PARTITION_LEASE_SHAPE_INVALID"
+	CodePartitionOwnerStale            Code = "PARTITION_OWNER_STALE"
+	CodePartitionHandoffOverdue        Code = "PARTITION_HANDOFF_OVERDUE"
+	CodeOrderingFieldsPartial          Code = "ORDERING_FIELDS_PARTIAL"
+	CodeOrderingPartitionMismatch      Code = "ORDERING_PARTITION_MISMATCH"
+	CodeStreamPartitionMismatch        Code = "STREAM_PARTITION_MISMATCH"
+	CodeStreamCursorInvalid            Code = "STREAM_CURSOR_INVALID"
+	CodeActiveSequenceBehindCursor     Code = "ACTIVE_SEQUENCE_BEHIND_CURSOR"
+	CodeExpectedSequenceDuplicate      Code = "EXPECTED_SEQUENCE_DUPLICATE"
+	CodeStreamGap                      Code = "STREAM_GAP"
+	CodeStreamDeadBlocked              Code = "STREAM_DEAD_BLOCKED"
+	CodeStreamRetryWait                Code = "STREAM_RETRY_WAIT"
+	CodeStaleEventLease                Code = "STALE_EVENT_LEASE"
+	CodeRuntimeControlInvalid          Code = "RUNTIME_CONTROL_INVALID"
+	CodeRelayPresenceStale             Code = "RELAY_PRESENCE_STALE"
+	CodeInboxStateInvalid              Code = "INBOX_STATE_INVALID"
+	CodeInboxLeaseShapeInvalid         Code = "INBOX_LEASE_SHAPE_INVALID"
+	CodeInboxSourceMetadataInvalid     Code = "INBOX_SOURCE_METADATA_INVALID"
+	CodeInboxProcessedTimestampInvalid Code = "INBOX_PROCESSED_TIMESTAMP_INVALID"
+	CodeInboxAttemptsInvalid           Code = "INBOX_ATTEMPTS_INVALID"
+	CodeInboxStaleLease                Code = "INBOX_STALE_LEASE"
+	CodeInboxDeadBlocked               Code = "INBOX_DEAD_BLOCKED"
+	CodeInboxRetryWait                 Code = "INBOX_RETRY_WAIT"
 )
 
 var stableCodes = []Code{
@@ -68,6 +76,14 @@ var stableCodes = []Code{
 	CodeStaleEventLease,
 	CodeRuntimeControlInvalid,
 	CodeRelayPresenceStale,
+	CodeInboxStateInvalid,
+	CodeInboxLeaseShapeInvalid,
+	CodeInboxSourceMetadataInvalid,
+	CodeInboxProcessedTimestampInvalid,
+	CodeInboxAttemptsInvalid,
+	CodeInboxStaleLease,
+	CodeInboxDeadBlocked,
+	CodeInboxRetryWait,
 }
 
 // StableCodes returns a copy of the fixed finding-code contract.
@@ -85,15 +101,17 @@ func (c Code) Valid() bool {
 }
 
 type Finding struct {
-	Code        Code     `json:"code"`
-	Severity    Severity `json:"severity"`
-	Message     string   `json:"message"`
-	Destination string   `json:"destination,omitempty"`
-	OrderingKey string   `json:"ordering_key,omitempty"`
-	EventID     string   `json:"event_id,omitempty"`
-	PartitionID *int16   `json:"partition_id,omitempty"`
-	Expected    any      `json:"expected,omitempty"`
-	Observed    any      `json:"observed,omitempty"`
+	Code            Code     `json:"code"`
+	Severity        Severity `json:"severity"`
+	Message         string   `json:"message"`
+	Destination     string   `json:"destination,omitempty"`
+	OrderingKey     string   `json:"ordering_key,omitempty"`
+	EventID         string   `json:"event_id,omitempty"`
+	PartitionID     *int16   `json:"partition_id,omitempty"`
+	Consumer        string   `json:"consumer,omitempty"`
+	SourcePartition *int32   `json:"source_partition,omitempty"`
+	Expected        any      `json:"expected,omitempty"`
+	Observed        any      `json:"observed,omitempty"`
 }
 
 type Summary struct {
@@ -116,6 +134,12 @@ type Summary struct {
 	OwnedPartitions     int64 `json:"owned_partitions"`
 	HandoffPartitions   int64 `json:"handoff_partitions"`
 	StaleRelays         int64 `json:"stale_relays"`
+	InboxPending        int64 `json:"inbox_pending"`
+	InboxInflight       int64 `json:"inbox_inflight"`
+	InboxRetryWait      int64 `json:"inbox_retry_wait"`
+	InboxProcessed      int64 `json:"inbox_processed"`
+	InboxDead           int64 `json:"inbox_dead"`
+	InboxStaleLeases    int64 `json:"inbox_stale_leases"`
 }
 
 type Report struct {
@@ -187,6 +211,9 @@ func (a *accumulator) finish(finishedAt time.Time) Report {
 		if left.Destination != right.Destination {
 			return left.Destination < right.Destination
 		}
+		if left.Consumer != right.Consumer {
+			return left.Consumer < right.Consumer
+		}
 		if left.EventID != right.EventID {
 			return left.EventID < right.EventID
 		}
@@ -197,7 +224,17 @@ func (a *accumulator) finish(finishedAt time.Time) Report {
 		if right.PartitionID != nil {
 			rightPartition = *right.PartitionID
 		}
-		return leftPartition < rightPartition
+		if leftPartition != rightPartition {
+			return leftPartition < rightPartition
+		}
+		leftSourcePartition, rightSourcePartition := int32(-1), int32(-1)
+		if left.SourcePartition != nil {
+			leftSourcePartition = *left.SourcePartition
+		}
+		if right.SourcePartition != nil {
+			rightSourcePartition = *right.SourcePartition
+		}
+		return leftSourcePartition < rightSourcePartition
 	})
 	return a.report
 }

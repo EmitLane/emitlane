@@ -40,6 +40,15 @@ type Metrics struct {
 	orderingFenced       *prometheus.CounterVec
 	integrityChecks      *prometheus.CounterVec
 	integrityDuration    *prometheus.HistogramVec
+	consumerRecords      *prometheus.CounterVec
+	consumerDuration     *prometheus.HistogramVec
+	consumerRetries      *prometheus.CounterVec
+	consumerDuplicates   *prometheus.CounterVec
+	consumerDead         *prometheus.GaugeVec
+	consumerInflight     *prometheus.GaugeVec
+	consumerRebalances   *prometheus.CounterVec
+	consumerPaused       *prometheus.GaugeVec
+	consumerLag          *prometheus.GaugeVec
 }
 
 // NewMetrics registers instruments with reg. The only label is the bounded
@@ -172,13 +181,43 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Help:      "Integrity check duration by bounded mode.",
 			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		}, []string{"mode"}),
+		consumerRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "consumer_records_total",
+			Help: "Managed consumer records by configured consumer and bounded result.",
+		}, []string{"consumer", "result"}),
+		consumerDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace, Name: "consumer_processing_duration_seconds",
+			Help:    "Managed consumer processing duration by configured consumer.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120},
+		}, []string{"consumer"}),
+		consumerRetries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "consumer_retries_total", Help: "Durable managed consumer retries scheduled.",
+		}, []string{"consumer"}),
+		consumerDuplicates: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "consumer_duplicates_total", Help: "Already-processed managed consumer deliveries.",
+		}, []string{"consumer"}),
+		consumerDead: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_dead_events", Help: "Dead managed Inbox events observed by this runtime.",
+		}, []string{"consumer"}),
+		consumerInflight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_inflight", Help: "Managed handlers currently executing.",
+		}, []string{"consumer"}),
+		consumerRebalances: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "consumer_rebalances_total", Help: "Managed consumer assignment callbacks.",
+		}, []string{"consumer"}),
+		consumerPaused: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_paused_partitions", Help: "Partitions paused by bounded reason.",
+		}, []string{"consumer", "reason"}),
+		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_lag_records", Help: "Managed consumer lag by configured consumer and topic.",
+		}, []string{"consumer", "topic"}),
 	}
 	// CounterVec collectors are otherwise absent from exposition until their
 	// first observation. Initialize the complete, bounded label set so operators
 	// can alert on these series before the first failure occurs.
 	m.failed.WithLabelValues("retryable")
 	m.failed.WithLabelValues("permanent")
-	for _, action := range []string{"relay.pause", "relay.resume", "event.retry", "event.replay", "replay.batch"} {
+	for _, action := range []string{"relay.pause", "relay.resume", "event.retry", "event.replay", "replay.batch", "inbox.retry"} {
 		m.adminMutations.WithLabelValues(action, "success")
 		m.adminMutations.WithLabelValues(action, "failure")
 	}
@@ -227,6 +266,15 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.orderingFenced,
 		m.integrityChecks,
 		m.integrityDuration,
+		m.consumerRecords,
+		m.consumerDuration,
+		m.consumerRetries,
+		m.consumerDuplicates,
+		m.consumerDead,
+		m.consumerInflight,
+		m.consumerRebalances,
+		m.consumerPaused,
+		m.consumerLag,
 	}
 	registered := make([]prometheus.Collector, 0, len(collectors))
 	for _, c := range collectors {
@@ -239,6 +287,57 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		registered = append(registered, c)
 	}
 	return m, nil
+}
+
+func (m *Metrics) ObserveConsumerRecord(consumer, result string, seconds float64) {
+	if m == nil || consumer == "" || !oneOf(result, "processed", "duplicate", "retry", "dead", "protocol_error", "error") {
+		return
+	}
+	m.consumerRecords.WithLabelValues(consumer, result).Inc()
+	m.consumerDuration.WithLabelValues(consumer).Observe(max(0, seconds))
+}
+
+func (m *Metrics) IncConsumerRetry(consumer string) {
+	if m != nil && consumer != "" {
+		m.consumerRetries.WithLabelValues(consumer).Inc()
+	}
+}
+
+func (m *Metrics) IncConsumerDuplicate(consumer string) {
+	if m != nil && consumer != "" {
+		m.consumerDuplicates.WithLabelValues(consumer).Inc()
+	}
+}
+
+func (m *Metrics) AddConsumerDead(consumer string, delta float64) {
+	if m != nil && consumer != "" {
+		m.consumerDead.WithLabelValues(consumer).Add(delta)
+	}
+}
+
+func (m *Metrics) AddConsumerInflight(consumer string, delta float64) {
+	if m != nil && consumer != "" {
+		m.consumerInflight.WithLabelValues(consumer).Add(delta)
+	}
+}
+
+func (m *Metrics) IncConsumerRebalance(consumer string) {
+	if m != nil && consumer != "" {
+		m.consumerRebalances.WithLabelValues(consumer).Inc()
+	}
+}
+
+func (m *Metrics) AddConsumerPaused(consumer, reason string, delta float64) {
+	if m == nil || consumer == "" || !oneOf(reason, "retry", "dead", "protocol", "database", "offset_commit") {
+		return
+	}
+	m.consumerPaused.WithLabelValues(consumer, reason).Add(delta)
+}
+
+func (m *Metrics) SetConsumerLag(consumer, topic string, records float64) {
+	if m != nil && consumer != "" && topic != "" {
+		m.consumerLag.WithLabelValues(consumer, topic).Set(max(0, records))
+	}
 }
 
 // IncEnqueued records a successful Writer INSERT call. The caller-owned

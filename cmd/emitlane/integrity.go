@@ -133,6 +133,9 @@ func printIntegrityReport(report integrity.Report) {
 	fmt.Println()
 	fmt.Printf("events: %d pending, %d inflight, %d dead, %d stale leases\n",
 		report.Summary.PendingEvents, report.Summary.InflightEvents, report.Summary.DeadEvents, report.Summary.StaleEventLeases)
+	fmt.Printf("inbox: %d pending, %d inflight, %d retry wait, %d processed, %d dead, %d stale leases\n",
+		report.Summary.InboxPending, report.Summary.InboxInflight, report.Summary.InboxRetryWait,
+		report.Summary.InboxProcessed, report.Summary.InboxDead, report.Summary.InboxStaleLeases)
 	fmt.Printf("ordering: %d streams, %d blocked (%d gap, %d retry wait, %d dead), %d/%d partitions owned\n",
 		report.Summary.OrderedStreams, report.Summary.BlockedStreams, report.Summary.GapStreams,
 		report.Summary.RetryWaitStreams, report.Summary.DeadBlockedStreams,
@@ -178,11 +181,17 @@ func printIntegrityFindings(findings []integrity.Finding) {
 		if finding.Destination != "" {
 			fmt.Printf(" destination=%s", finding.Destination)
 		}
+		if finding.Consumer != "" {
+			fmt.Printf(" consumer=%s", finding.Consumer)
+		}
 		if finding.EventID != "" {
 			fmt.Printf(" event_id=%s", finding.EventID)
 		}
 		if finding.PartitionID != nil {
 			fmt.Printf(" partition=%d", *finding.PartitionID)
+		}
+		if finding.SourcePartition != nil {
+			fmt.Printf(" source_partition=%d", *finding.SourcePartition)
 		}
 		fmt.Println()
 	}

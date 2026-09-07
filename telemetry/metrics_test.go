@@ -37,6 +37,16 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 	metrics.IncOrderingFenced("unbounded-value-must-be-ignored")
 	metrics.ObserveIntegrityCheck("summary", "clean", 0.03)
 	metrics.ObserveIntegrityCheck("unbounded-mode", "clean", 0.03)
+	metrics.ObserveConsumerRecord("billing-v1", "processed", 0.2)
+	metrics.ObserveConsumerRecord("billing-v1", "unbounded-value-must-be-ignored", 0.2)
+	metrics.IncConsumerRetry("billing-v1")
+	metrics.IncConsumerDuplicate("billing-v1")
+	metrics.AddConsumerDead("billing-v1", 1)
+	metrics.AddConsumerInflight("billing-v1", 1)
+	metrics.IncConsumerRebalance("billing-v1")
+	metrics.AddConsumerPaused("billing-v1", "retry", 1)
+	metrics.AddConsumerPaused("billing-v1", "unbounded-value-must-be-ignored", 1)
+	metrics.SetConsumerLag("billing-v1", "orders", 12)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -79,6 +89,15 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 		"emitlane_ordering_fenced_attempts_total",
 		"emitlane_integrity_checks_total",
 		"emitlane_integrity_check_duration_seconds",
+		"emitlane_consumer_records_total",
+		"emitlane_consumer_processing_duration_seconds",
+		"emitlane_consumer_retries_total",
+		"emitlane_consumer_duplicates_total",
+		"emitlane_consumer_dead_events",
+		"emitlane_consumer_inflight",
+		"emitlane_consumer_rebalances_total",
+		"emitlane_consumer_paused_partitions",
+		"emitlane_consumer_lag_records",
 	} {
 		if !got[name] {
 			t.Errorf("metric family %s is missing", name)
@@ -119,4 +138,12 @@ func TestNilMetricsIsNoOp(t *testing.T) {
 	metrics.ObserveOrderingDeliveryWait(1)
 	metrics.IncOrderingFenced("begin_attempt")
 	metrics.ObserveIntegrityCheck("summary", "clean", 1)
+	metrics.ObserveConsumerRecord("billing-v1", "processed", 1)
+	metrics.IncConsumerRetry("billing-v1")
+	metrics.IncConsumerDuplicate("billing-v1")
+	metrics.AddConsumerDead("billing-v1", 1)
+	metrics.AddConsumerInflight("billing-v1", 1)
+	metrics.IncConsumerRebalance("billing-v1")
+	metrics.AddConsumerPaused("billing-v1", "retry", 1)
+	metrics.SetConsumerLag("billing-v1", "orders", 1)
 }
