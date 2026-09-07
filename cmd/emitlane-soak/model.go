@@ -136,6 +136,8 @@ type Result struct {
 	DeadFinal             int64              `json:"dead_final"`
 	BlockedStreamsFinal   int64              `json:"blocked_streams_final"`
 	GapStreamsFinal       int64              `json:"gap_streams_final"`
+	IntegrityViolations   int64              `json:"integrity_violations"`
+	IntegrityWarnings     int64              `json:"integrity_warnings"`
 	InfrastructureErrors  int64              `json:"infrastructure_errors"`
 	ThroughputEventsSec   float64            `json:"throughput_events_sec"`
 	LatencyP50Millis      float64            `json:"latency_p50_ms"`
@@ -207,6 +209,7 @@ func verdict(r Result) error {
 		{"unexpected sequence skips", r.OrderingSkips}, {"pending final", r.PendingFinal},
 		{"inflight final", r.InflightFinal}, {"dead final", r.DeadFinal},
 		{"blocked ordered streams final", r.BlockedStreamsFinal}, {"gap streams final", r.GapStreamsFinal},
+		{"integrity violations", r.IntegrityViolations},
 		{"infrastructure/runner errors", r.InfrastructureErrors},
 	}
 	for _, check := range checks {

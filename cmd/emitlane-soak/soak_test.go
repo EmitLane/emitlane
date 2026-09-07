@@ -154,6 +154,9 @@ func TestVerdict(t *testing.T) {
 	if err := verdict(Result{InfrastructureErrors: 2}); err == nil || !strings.Contains(err.Error(), "infrastructure") {
 		t.Fatalf("verdict=%v", err)
 	}
+	if err := verdict(Result{IntegrityViolations: 1}); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("verdict=%v", err)
+	}
 }
 
 func TestReportGenerationDeterministic(t *testing.T) {
@@ -162,7 +165,7 @@ func TestReportGenerationDeterministic(t *testing.T) {
 	if a != b {
 		t.Fatal("report is not deterministic")
 	}
-	for _, want := range []string{"**Result: PASS**", "Git branch: `main`", "Git dirty: `true`", "Git diff SHA-256: `1234`", "NOT REPRODUCIBLE RELEASE EVIDENCE", "timeline.svg", "Committed events | 2", "At-least-once duplicates | 1", "PASS: all committed event IDs"} {
+	for _, want := range []string{"**Result: PASS**", "Git branch: `main`", "Git dirty: `true`", "Git diff SHA-256: `1234`", "NOT REPRODUCIBLE RELEASE EVIDENCE", "timeline.svg", "Committed events | 2", "At-least-once duplicates | 1", "Integrity violations: 0", "PASS: all committed event IDs"} {
 		if !strings.Contains(a, want) {
 			t.Fatalf("missing %q in report", want)
 		}

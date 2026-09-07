@@ -46,6 +46,9 @@ relay instances.
 - **Opt-in stream ordering** — application-owned sequence numbers, durable
   stream cursors, fenced virtual-partition leases, visible gaps, and Kafka key
   affinity without changing the unordered hot path.
+- **Observable correctness** — read-only summary, full, and targeted stream
+  integrity checks expose durable-state violations and actionable warnings
+  without reading event payloads or mutating protocol state.
 
 ## Quickstart
 
@@ -180,6 +183,8 @@ emitlane audit list [--json]
 emitlane ordering streams [--blocked] [--json]
 emitlane ordering inspect --destination name --key key [--json]
 emitlane ordering partitions [--json]
+emitlane integrity check [--full] [--json] [--strict]
+emitlane integrity stream --destination name --key key [--json] [--strict]
 emitlane version
 ```
 
@@ -192,6 +197,8 @@ Runtime endpoints:
 The versioned Admin API uses a separate listener, is disabled by default, and
 requires bearer authentication for any non-loopback bind. See the
 [Admin API](docs/ADMIN_API.md) and [operations guide](docs/OPERATIONS.md).
+Its authenticated `GET /v1/integrity` endpoint is deliberately limited to the
+bounded summary mode; run full or stream checks from the CLI.
 
 > [!WARNING]
 > Replay creates a new event identity and can intentionally execute downstream
@@ -233,6 +240,7 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Testing and benchmarks](docs/09-TESTING-BENCHMARKS.md)
 - [Admin API](docs/ADMIN_API.md)
 - [Replay safety](docs/REPLAY.md)
+- [Integrity verification](docs/INTEGRITY.md)
 - [Operations runbook](docs/OPERATIONS.md)
 - [Benchmark harness](docs/BENCHMARKING.md)
 - [Upgrading](docs/UPGRADING.md)
@@ -240,10 +248,10 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-`v0.2.0` is the released baseline. This branch implements the v0.3 ordered
-delivery scope: additive schema v3, application-owned sequences, durable stream
-progress, 64 leased virtual partitions with epoch fencing and handoff barriers,
-ordered inspection/replay safeguards, and expanded reliability tests. As a
+`v0.3.2` is the released baseline. This branch implements the v0.4 observable
+correctness scope: bounded read-only integrity verification, targeted stream
+diagnostics, typed expected fencing outcomes, and integrity-aware release-soak
+gates. It does not change schema v3 or the at-least-once delivery contract. As a
 pre-1.0 project, APIs and operational defaults may still change during the
 `v0.x` series.
 

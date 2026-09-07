@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,8 @@ func main() {
 		err = auditCmd(args)
 	case "ordering":
 		err = orderingCmd(args)
+	case "integrity":
+		err = integrityCmd(args)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return
@@ -52,8 +55,15 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "emitlane %s: %v\n", cmd, err)
-		os.Exit(1)
+		exitCode := 1
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			exitCode = coded.ExitCode()
+		}
+		if err.Error() != "" {
+			fmt.Fprintf(os.Stderr, "emitlane %s: %v\n", cmd, err)
+		}
+		os.Exit(exitCode)
 	}
 }
 
@@ -77,6 +87,8 @@ Usage:
   emitlane ordering streams [--blocked] [--json]
   emitlane ordering inspect --destination name --key key [--json]
   emitlane ordering partitions [--json]
+  emitlane integrity check [--full] [--json] [--strict]
+  emitlane integrity stream --destination name --key key [--json]
   emitlane version
 
 Configuration is read from EMITLANE_* environment variables.

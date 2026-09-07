@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EmitLane Admin API
-  version: 0.3.0
+  version: 0.4.0
   description: >-
     Operational API for redacted inspection, relay control, retry, and replay.
     Replay creates a new event identity and can execute downstream business logic again.
@@ -22,6 +22,24 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Stats" }
+        default: { $ref: "#/components/responses/Error" }
+  /integrity:
+    get:
+      summary: Run a bounded read-only integrity summary
+      description: >-
+        Uses one repeatable-read, read-only PostgreSQL snapshot. Full verification
+        is intentionally CLI-only and blocked streams do not change health endpoints.
+      parameters:
+        - name: mode
+          in: query
+          schema: { type: string, enum: [summary], default: summary }
+      responses:
+        "200":
+          description: Bounded integrity report without payloads, headers, or ordering keys
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IntegrityReport" }
+        "400": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events:
     get:
@@ -313,6 +331,58 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    IntegrityReport:
+      type: object
+      required: [result, mode, started_at, finished_at, clean, summary, findings, findings_truncated]
+      properties:
+        result: { type: string, enum: [clean, warnings, violations] }
+        mode: { type: string, enum: [summary] }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        clean: { type: boolean, description: True when no invariant violations exist; warnings may remain. }
+        summary: { $ref: "#/components/schemas/IntegritySummary" }
+        findings:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/IntegrityFinding" }
+        findings_truncated: { type: boolean }
+    IntegritySummary:
+      type: object
+      required: [violations, warnings, infos, pending_events, inflight_events, dead_events, active_ordered_events, ordered_streams, ready_streams, inflight_streams, blocked_streams, gap_streams, dead_blocked_streams, retry_wait_streams, stale_event_leases, ordering_partitions, owned_partitions, handoff_partitions, stale_relays]
+      properties:
+        violations: { type: integer, format: int64, minimum: 0 }
+        warnings: { type: integer, format: int64, minimum: 0 }
+        infos: { type: integer, format: int64, minimum: 0 }
+        pending_events: { type: integer, format: int64, minimum: 0 }
+        inflight_events: { type: integer, format: int64, minimum: 0 }
+        dead_events: { type: integer, format: int64, minimum: 0 }
+        active_ordered_events: { type: integer, format: int64, minimum: 0 }
+        ordered_streams: { type: integer, format: int64, minimum: 0 }
+        ready_streams: { type: integer, format: int64, minimum: 0 }
+        inflight_streams: { type: integer, format: int64, minimum: 0 }
+        blocked_streams: { type: integer, format: int64, minimum: 0 }
+        gap_streams: { type: integer, format: int64, minimum: 0 }
+        dead_blocked_streams: { type: integer, format: int64, minimum: 0 }
+        retry_wait_streams: { type: integer, format: int64, minimum: 0 }
+        stale_event_leases: { type: integer, format: int64, minimum: 0 }
+        ordering_partitions: { type: integer, format: int64, minimum: 0 }
+        owned_partitions: { type: integer, format: int64, minimum: 0 }
+        handoff_partitions: { type: integer, format: int64, minimum: 0 }
+        stale_relays: { type: integer, format: int64, minimum: 0 }
+    IntegrityFinding:
+      type: object
+      required: [code, severity, message]
+      properties:
+        code:
+          type: string
+          enum: [SCHEMA_VERSION_MISMATCH, PARTITION_COUNT_INVALID, PARTITION_ID_INVALID, PARTITION_EPOCH_INVALID, PARTITION_LEASE_SHAPE_INVALID, PARTITION_OWNER_STALE, PARTITION_HANDOFF_OVERDUE, ORDERING_FIELDS_PARTIAL, ORDERING_PARTITION_MISMATCH, STREAM_PARTITION_MISMATCH, STREAM_CURSOR_INVALID, ACTIVE_SEQUENCE_BEHIND_CURSOR, EXPECTED_SEQUENCE_DUPLICATE, STREAM_GAP, STREAM_DEAD_BLOCKED, STREAM_RETRY_WAIT, STALE_EVENT_LEASE, RUNTIME_CONTROL_INVALID, RELAY_PRESENCE_STALE]
+        severity: { type: string, enum: [info, warning, violation] }
+        message: { type: string }
+        destination: { type: string }
+        event_id: { type: string, format: uuid }
+        partition_id: { type: integer }
+        expected: {}
+        observed: {}
     Stats:
       type: object
       required: [paused, pending, pending_due, pending_scheduled, inflight, delivered_retained, dead, oldest_pending_seconds, active_relays, stale_relays, stopped_relays, ordered_streams, blocked_ordered_streams, gap_streams, dead_blocked_streams, owned_partitions, handoff_partitions]

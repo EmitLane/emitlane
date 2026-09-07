@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/emitlane/emitlane/integrity"
 )
 
 const (
@@ -277,6 +279,7 @@ type ReplayResult struct {
 // write the state change and its audit row in one PostgreSQL transaction.
 type Store interface {
 	OperationalStats(ctx context.Context, staleAfter time.Duration) (Stats, error)
+	IntegritySummary(ctx context.Context, staleAfter time.Duration) (integrity.Report, error)
 	ListEvents(ctx context.Context, filter EventFilter) (EventPage, error)
 	InspectEvent(ctx context.Context, id uuid.UUID, includeSensitive bool) (Event, error)
 	ListRelays(ctx context.Context, staleAfter time.Duration) ([]RelayInstance, error)

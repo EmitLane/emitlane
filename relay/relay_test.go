@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +37,9 @@ type orderedMemoryStore struct {
 	*memoryStore
 	beginOrderedCalls int
 	beginOrderedErr   error
+	deliveredErr      error
+	retryErr          error
+	deadErr           error
 }
 
 func (*orderedMemoryStore) ClaimOrdered(context.Context, string, int, time.Duration, time.Duration) ([]Event, error) {
@@ -50,14 +55,23 @@ func (s *orderedMemoryStore) BeginOrderedAttempt(context.Context, uuid.UUID, str
 }
 
 func (s *orderedMemoryStore) MarkOrderedDelivered(_ context.Context, event Event, _ string) error {
+	if s.deliveredErr != nil {
+		return s.deliveredErr
+	}
 	return s.memoryStore.MarkDelivered(context.Background(), event.ID, "")
 }
 
 func (s *orderedMemoryStore) MarkOrderedRetry(_ context.Context, event Event, _ string, delay time.Duration, lastError string) error {
+	if s.retryErr != nil {
+		return s.retryErr
+	}
 	return s.memoryStore.MarkRetry(context.Background(), event.ID, "", delay, lastError)
 }
 
 func (s *orderedMemoryStore) MarkOrderedDead(_ context.Context, event Event, _ string, lastError string) error {
+	if s.deadErr != nil {
+		return s.deadErr
+	}
 	return s.memoryStore.MarkDead(context.Background(), event.ID, "", lastError)
 }
 
@@ -353,6 +367,48 @@ func TestOrderedFinalFenceAndCancelledContextPreventNetworkSend(t *testing.T) {
 		}
 		if len(pub.messages) != 0 {
 			t.Fatalf("cancelled context sent %d broker messages", len(pub.messages))
+		}
+	})
+}
+
+func TestExpectedFenceIsDebugDiagnosticAndRealFailureIsError(t *testing.T) {
+	partition := int16(7)
+	event := Event{
+		ID: uuid.Must(uuid.NewV7()), Destination: "orders.events", Type: "order.changed",
+		SchemaVersion: 1, OrderingKey: "order:fenced", OrderingSequence: 1,
+		OrderingPartition: &partition, OrderingEpoch: 9, CreatedAt: time.Now(),
+	}
+
+	t.Run("fenced", func(t *testing.T) {
+		var output bytes.Buffer
+		store := &orderedMemoryStore{memoryStore: &memoryStore{}, beginOrderedErr: ErrFenced}
+		pub := &trackingPublisher{}
+		rly := testRelay(t, store, pub, nil)
+		rly.log = slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		rly.handle(context.Background(), event)
+		logs := output.String()
+		for _, expected := range []string{"level=DEBUG", "stale work discarded", "operation=begin_attempt", "ordering_partition=7", "claimed_epoch=9"} {
+			if !strings.Contains(logs, expected) {
+				t.Errorf("fence log missing %q: %s", expected, logs)
+			}
+		}
+		if strings.Contains(logs, "level=ERROR") || len(pub.messages) != 0 {
+			t.Fatalf("expected fence logged as error or published: logs=%s messages=%d", logs, len(pub.messages))
+		}
+	})
+
+	t.Run("storage failure", func(t *testing.T) {
+		var output bytes.Buffer
+		store := &orderedMemoryStore{memoryStore: &memoryStore{}, beginOrderedErr: errors.New("database offline")}
+		rly := testRelay(t, store, &trackingPublisher{}, nil)
+		rly.log = slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		rly.handle(context.Background(), event)
+		logs := output.String()
+		if !strings.Contains(logs, "level=ERROR") || !strings.Contains(logs, "database offline") {
+			t.Fatalf("real storage failure was not logged as error: %s", logs)
+		}
+		if strings.Contains(logs, "stale work discarded") {
+			t.Fatalf("real storage failure was mislabeled as fencing: %s", logs)
 		}
 	})
 }

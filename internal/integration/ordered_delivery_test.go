@@ -462,17 +462,22 @@ func TestStaleOrderedOwnerCannotMutateOrAdvance(t *testing.T) {
 	registerOrderingRelay(t, e, "stale-b")
 	reconcileOrdering(t, e, "stale-b")
 
-	if _, err := e.store.BeginOrderedAttempt(context.Background(), event.ID, "stale-a", event.OrderingEpoch, 10, time.Millisecond); err == nil {
-		t.Fatal("stale owner began publish attempt")
+	if _, err := e.store.BeginOrderedAttempt(context.Background(), event.ID, "stale-a", event.OrderingEpoch, 10, time.Millisecond); !errors.Is(err, relay.ErrFenced) {
+		t.Fatalf("stale begin error = %v, want ErrFenced", err)
 	}
-	if err := e.store.MarkOrderedRetry(context.Background(), event, "stale-a", time.Second, "stale"); err == nil {
-		t.Fatal("stale owner marked retry")
+	if err := e.store.MarkOrderedRetry(context.Background(), event, "stale-a", time.Second, "stale"); !errors.Is(err, relay.ErrFenced) {
+		t.Fatalf("stale retry error = %v, want ErrFenced", err)
 	}
-	if err := e.store.MarkOrderedDead(context.Background(), event, "stale-a", "stale"); err == nil {
-		t.Fatal("stale owner marked dead")
+	if err := e.store.MarkOrderedDead(context.Background(), event, "stale-a", "stale"); !errors.Is(err, relay.ErrFenced) {
+		t.Fatalf("stale dead error = %v, want ErrFenced", err)
 	}
-	if err := e.store.MarkOrderedDelivered(context.Background(), event, "stale-a"); err == nil {
-		t.Fatal("stale owner marked delivered")
+	if err := e.store.MarkOrderedDelivered(context.Background(), event, "stale-a"); !errors.Is(err, relay.ErrFenced) {
+		t.Fatalf("stale delivered error = %v, want ErrFenced", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := e.store.BeginOrderedAttempt(cancelled, event.ID, "stale-a", event.OrderingEpoch, 10, time.Millisecond); err == nil || errors.Is(err, relay.ErrFenced) {
+		t.Fatalf("cancelled SQL error = %v, must remain a real operational error", err)
 	}
 	var next int64
 	if err := e.pool.QueryRow(context.Background(), `

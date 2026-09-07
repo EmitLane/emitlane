@@ -120,6 +120,15 @@ ACK, neither durable transition occurs: N remains recoverable, a duplicate N is
 possible, and N+1 remains blocked. A stale epoch cannot claim, start an attempt,
 mark a result, or advance a stream.
 
+These rejected transitions return the typed `relay.ErrFenced` outcome when the
+database statement completed successfully but its ownership/epoch precondition
+matched no row. Relay treats that as an expected stale-work race, logs it at
+debug level, and increments
+`emitlane_ordering_fenced_attempts_total{operation}`. SQL, connection, context,
+and transaction failures remain ordinary errors; they are never relabeled as
+fencing. An `ErrFenced` outcome leaves the event recoverable and cannot advance
+the stream cursor.
+
 ## Stale-publish timing invariant
 
 Database fencing alone cannot recall a Kafka request already sent by an old
@@ -228,6 +237,12 @@ Structured logs and operation-scoped traces may contain ordering identity and
 epoch but never payloads. Doctor validates schema version 3, both ordering
 tables, exactly 64 seed rows, required columns, constraints, indexes, and
 ownership query privileges.
+
+`emitlane integrity check` verifies the same durable protocol shape and runtime
+invariants in a consistent read-only snapshot. Full mode checks every retained
+active ordered event and stream cursor; `emitlane integrity stream` explains one
+stream's blocking and ownership state. Delivered-row retention is valid: the
+durable cursor, not the presence of historical delivered rows, defines progress.
 
 ## Migration, permissions, and downgrade
 
