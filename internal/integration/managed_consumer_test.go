@@ -34,7 +34,7 @@ func TestManagedConsumerCommitsOnlyAfterDurableProcessing(t *testing.T) {
 	result := producer.ProduceSync(produceCtx, &kgo.Record{
 		Topic: topic, Value: []byte("42"),
 		Headers: []kgo.RecordHeader{{Key: managed.EventIDHeader, Value: []byte(eventID.String())}},
-	}, managed.WithLogger(e.log))
+	})
 	produceCancel()
 	producer.Close()
 	if err := result.FirstErr(); err != nil {
@@ -57,6 +57,7 @@ func TestManagedConsumerCommitsOnlyAfterDurableProcessing(t *testing.T) {
 	config.InstanceID = "billing-instance"
 	config.HandlerTimeout = 2 * time.Second
 	config.LeaseDuration = 4 * time.Second
+	config.LeaseRenewInterval = time.Second
 	config.MaintenancePoll = 50 * time.Millisecond
 	runtime, err := managed.New(config, e.pool, inboxStore, factory, func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
 		if message.EventID != eventID || message.Attempt != 1 {
@@ -64,7 +65,7 @@ func TestManagedConsumerCommitsOnlyAfterDurableProcessing(t *testing.T) {
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, 42)`, message.EventID.String())
 		return err
-	})
+	}, managed.WithLogger(e.log))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,4 +124,98 @@ func TestManagedConsumerCommitsOnlyAfterDurableProcessing(t *testing.T) {
 	if !ok || committed.Err != nil || committed.At != 1 {
 		t.Fatalf("committed offset=%+v exists=%t, want 1", committed, ok)
 	}
+}
+
+func TestManagedConsumerRenewsHandlerLease(t *testing.T) {
+	e := startEnv(t)
+	topic := "managed-renew-" + uuid.NewString()
+	group := "managed-renew-group-" + uuid.NewString()
+	e.ensureTopic(t, topic)
+	eventID := uuid.New()
+	producer, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := producer.ProduceSync(context.Background(), &kgo.Record{
+		Topic: topic, Value: []byte("renew"),
+		Headers: []kgo.RecordHeader{{Key: managed.EventIDHeader, Value: []byte(eventID.String())}},
+	})
+	producer.Close()
+	if err := result.FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := kafkaadapter.NewConsumerFactory(kafkaadapter.ConsumerConfig{
+		Brokers: e.brokers, Group: group, Topics: []string{topic},
+		SessionTimeout: 6 * time.Second, RebalanceTimeout: 10 * time.Second, FetchMaxWait: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	config := managed.DefaultConfig()
+	config.Consumer = "renew-v1"
+	config.InstanceID = "renew-instance"
+	config.HandlerTimeout = 3 * time.Second
+	config.LeaseDuration = 600 * time.Millisecond
+	config.LeaseRenewInterval = 150 * time.Millisecond
+	config.MaintenancePoll = 50 * time.Millisecond
+	runtime, err := managed.New(config, e.pool, store, factory, func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+		close(started)
+		select {
+		case <-release:
+			_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, 7)`, message.EventID.String())
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, managed.WithLogger(e.log))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(runCtx) }()
+	defer func() {
+		cancel()
+		select {
+		case runErr := <-done:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				t.Errorf("managed consumer stop: %v", runErr)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("managed consumer did not stop")
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler did not start")
+	}
+	first, err := store.Get(context.Background(), config.Consumer, eventID)
+	if err != nil || first.LeaseUntil == nil {
+		t.Fatalf("initial lease event=%+v err=%v", first, err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	second, err := store.Get(context.Background(), config.Consumer, eventID)
+	if err != nil || second.LeaseUntil == nil {
+		t.Fatalf("renewed lease event=%+v err=%v", second, err)
+	}
+	if !second.LeaseUntil.After(*first.LeaseUntil) {
+		t.Fatalf("lease was not renewed: first=%s second=%s", first.LeaseUntil, second.LeaseUntil)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		event, getErr := store.Get(context.Background(), config.Consumer, eventID)
+		if getErr == nil && event.Status == inbox.StatusProcessed {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("renewed event did not reach processed")
 }

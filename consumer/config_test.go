@@ -16,8 +16,8 @@ func TestConfigValidate(t *testing.T) {
 	if err := config.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	config.LeaseDuration = config.HandlerTimeout
+	config.LeaseRenewInterval = config.LeaseDuration / 2
 	if err := config.Validate(); err == nil {
-		t.Fatal("expected unsafe handler/lease configuration")
+		t.Fatal("expected unsafe renewal/lease configuration")
 	}
 }

@@ -245,7 +245,22 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		return false, retryPoint{eventID: eventID, at: *claim.Event.LeaseUntil}, false
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(handlerCtx)) }()
-	if err := w.runtime.handler(handlerCtx, tx, message); err != nil {
+	renewCtx, stopRenew := context.WithCancel(handlerCtx)
+	renewed := make(chan error, 1)
+	go func() {
+		renewed <- w.renewLease(renewCtx, eventID, claim.Event.LeaseToken)
+	}()
+	handlerErr := w.runtime.handler(handlerCtx, tx, message)
+	stopRenew()
+	renewErr := <-renewed
+	if renewErr != nil {
+		span.RecordError(renewErr)
+		span.SetStatus(codes.Error, renewErr.Error())
+		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
+		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.LeaseDuration)}, false
+	}
+	if handlerErr != nil {
+		err := handlerErr
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		_ = tx.Rollback(context.WithoutCancel(handlerCtx))
@@ -268,6 +283,27 @@ func (w *worker) process(ctx context.Context, record SourceRecord) (bool, retryP
 		return false, retryPoint{eventID: eventID, at: time.Now().Add(w.runtime.config.MaintenancePoll)}, false
 	}
 	return true, retryPoint{}, false
+}
+
+func (w *worker) renewLease(ctx context.Context, eventID, token uuid.UUID) error {
+	ticker := time.NewTicker(w.runtime.config.LeaseRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := w.runtime.store.Renew(ctx, w.runtime.config.Consumer, eventID, token, w.runtime.config.LeaseDuration); err != nil {
+				w.mu.Lock()
+				cancel := w.activeCancel
+				w.mu.Unlock()
+				if cancel != nil {
+					cancel()
+				}
+				return fmt.Errorf("consumer: renew Inbox lease: %w", err)
+			}
+		}
+	}
 }
 
 func traceContext(ctx context.Context, headers []Header) context.Context {

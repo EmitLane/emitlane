@@ -7,22 +7,24 @@ import (
 )
 
 type Config struct {
-	Consumer        string
-	InstanceID      string
-	Concurrency     int
-	HandlerTimeout  time.Duration
-	LeaseDuration   time.Duration
-	MaintenancePoll time.Duration
-	ShutdownTimeout time.Duration
+	Consumer           string
+	InstanceID         string
+	Concurrency        int
+	HandlerTimeout     time.Duration
+	LeaseDuration      time.Duration
+	LeaseRenewInterval time.Duration
+	MaintenancePoll    time.Duration
+	ShutdownTimeout    time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Concurrency:     1,
-		HandlerTimeout:  30 * time.Second,
-		LeaseDuration:   45 * time.Second,
-		MaintenancePoll: 250 * time.Millisecond,
-		ShutdownTimeout: 10 * time.Second,
+		Concurrency:        1,
+		HandlerTimeout:     2 * time.Minute,
+		LeaseDuration:      30 * time.Second,
+		LeaseRenewInterval: 10 * time.Second,
+		MaintenancePoll:    250 * time.Millisecond,
+		ShutdownTimeout:    10 * time.Second,
 	}
 }
 
@@ -39,8 +41,11 @@ func (c Config) Validate() error {
 	if c.HandlerTimeout <= 0 {
 		return fmt.Errorf("consumer: handler timeout must be > 0")
 	}
-	if c.LeaseDuration <= c.HandlerTimeout {
-		return fmt.Errorf("consumer: lease duration must exceed handler timeout")
+	if c.LeaseDuration <= 0 {
+		return fmt.Errorf("consumer: lease duration must be > 0")
+	}
+	if c.LeaseRenewInterval <= 0 || c.LeaseRenewInterval*2 >= c.LeaseDuration {
+		return fmt.Errorf("consumer: lease renew interval must be positive and less than half the lease duration")
 	}
 	if c.MaintenancePoll <= 0 || c.MaintenancePoll >= c.LeaseDuration {
 		return fmt.Errorf("consumer: maintenance poll must be positive and shorter than lease duration")
