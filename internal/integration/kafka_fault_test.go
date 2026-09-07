@@ -100,6 +100,51 @@ func (e *env) restoreKafka(t *testing.T) {
 	}
 }
 
+func (e *env) stopPostgres(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	timeout := 10 * time.Second
+	if err := e.postgres.Stop(ctx, &timeout); err != nil {
+		t.Fatalf("stop PostgreSQL: %v", err)
+	}
+}
+
+func (e *env) startPostgres(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := e.postgres.Start(ctx); err != nil {
+		t.Fatalf("start PostgreSQL: %v", err)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		last = e.pool.Ping(pingCtx)
+		pingCancel()
+		if last == nil {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("PostgreSQL did not become ready: %v", last)
+}
+
+func (e *env) restorePostgres(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	state, err := e.postgres.State(ctx)
+	if err != nil {
+		t.Errorf("inspect PostgreSQL during cleanup: %v", err)
+		return
+	}
+	if !state.Running {
+		e.startPostgres(t)
+	}
+}
+
 func TestKafkaPublisherBoundedAmbiguousRetryPreservesDistinctRecords(t *testing.T) {
 	e := startEnv(t)
 	t.Cleanup(func() { e.restoreKafka(t) })

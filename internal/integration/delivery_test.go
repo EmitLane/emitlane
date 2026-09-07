@@ -42,6 +42,7 @@ type env struct {
 	pool        *pgxpool.Pool
 	brokers     []string
 	kafka       testcontainers.Container
+	postgres    testcontainers.Container
 	store       *pgstore.Store
 	writer      *outbox.Writer
 	log         *slog.Logger
@@ -79,12 +80,27 @@ func startEnv(t *testing.T) *env {
 	sharedOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
+		postgresPort, err := reserveLocalPort()
+		if err != nil {
+			sharedErr = fmt.Errorf("reserve postgres port: %w", err)
+			return
+		}
+		postgresPortString := strconv.Itoa(postgresPort)
 		pgC, err := postgres.Run(ctx,
 			"postgres:16-alpine",
 			postgres.WithDatabase("emitlane"),
 			postgres.WithUsername("emitlane"),
 			postgres.WithPassword("emitlane"),
 			postgres.BasicWaitStrategies(),
+			testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+				if hostConfig.PortBindings == nil {
+					hostConfig.PortBindings = containernetwork.PortMap{}
+				}
+				hostConfig.PortBindings[containernetwork.MustParsePort("5432/tcp")] = []containernetwork.PortBinding{{
+					HostIP:   netip.MustParseAddr("127.0.0.1"),
+					HostPort: postgresPortString,
+				}}
+			}),
 		)
 		if err != nil {
 			sharedErr = fmt.Errorf("postgres container: %w", err)
@@ -183,6 +199,7 @@ func startEnv(t *testing.T) *env {
 			pool:        pool,
 			brokers:     brokers,
 			kafka:       kafkaC,
+			postgres:    pgC,
 			store:       store,
 			writer:      outbox.NewWriter(),
 			log:         log,

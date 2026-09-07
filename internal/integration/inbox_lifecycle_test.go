@@ -5,6 +5,8 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,6 +168,101 @@ func TestInboxLifecycleRetryDeadAndSourceConflict(t *testing.T) {
 	conflict.EventID = uuid.New()
 	if _, err := store.Claim(ctx, conflict); !errors.Is(err, inbox.ErrLifecycleConflict) {
 		t.Fatalf("source conflict error = %v", err)
+	}
+}
+
+func TestInboxLifecycleConcurrentClaimHasSingleLeaseWinner(t *testing.T) {
+	e := startEnv(t)
+	store, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := inbox.ClaimRequest{
+		Consumer: "claim-race-v1", EventID: uuid.New(),
+		Source:     inbox.Source{Topic: "orders", Partition: 0, Offset: 17},
+		LeaseOwner: "racer", LeaseDuration: time.Second,
+	}
+	const contenders = 12
+	start := make(chan struct{})
+	results := make(chan inbox.ClaimResult, contenders)
+	errorsCh := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for index := range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			candidate := request
+			candidate.LeaseOwner = fmt.Sprintf("racer-%d", index)
+			result, err := store.Claim(context.Background(), candidate)
+			results <- result
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	winners := 0
+	for result := range results {
+		if result.Disposition == inbox.Claimed {
+			winners++
+		} else if result.Disposition != inbox.ClaimWaiting {
+			t.Fatalf("unexpected race disposition=%s", result.Disposition)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim race winners=%d, want 1", winners)
+	}
+	event, err := store.Get(context.Background(), request.Consumer, request.EventID)
+	if err != nil || event.Attempts != 1 || event.LeaseToken == uuid.Nil {
+		t.Fatalf("claimed lifecycle=%+v err=%v", event, err)
+	}
+}
+
+func TestInboxLifecycleConcurrentSourceConflictRejectsSecondIdentity(t *testing.T) {
+	e := startEnv(t)
+	store, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errorsCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	for index := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := store.Claim(context.Background(), inbox.ClaimRequest{
+				Consumer: "source-race-v1", EventID: uuid.New(),
+				Source:     inbox.Source{Topic: "orders", Partition: 1, Offset: 23},
+				LeaseOwner: fmt.Sprintf("source-racer-%d", index), LeaseDuration: time.Second,
+			})
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errorsCh)
+	succeeded, conflicted := 0, 0
+	for err := range errorsCh {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, inbox.ErrLifecycleConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected source-race error: %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("source race successes=%d conflicts=%d, want 1/1", succeeded, conflicted)
 	}
 }
 
