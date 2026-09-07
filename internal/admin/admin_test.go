@@ -75,6 +75,16 @@ func (s *stubStore) InspectOrderingStream(context.Context, string, string) (Orde
 func (s *stubStore) ListOrderingPartitions(context.Context, time.Duration) ([]OrderingPartition, error) {
 	return []OrderingPartition{{PartitionID: 1, State: "owned"}}, nil
 }
+func (s *stubStore) InboxStats(context.Context, string) (InboxStats, error) {
+	return InboxStats{Dead: 1}, nil
+}
+func (s *stubStore) ListDeadInbox(context.Context, InboxDeadFilter) ([]InboxEvent, error) {
+	return []InboxEvent{{Consumer: "billing-v1", EventID: uuid.New(), Status: "dead"}}, nil
+}
+func (s *stubStore) InspectInbox(context.Context, string, uuid.UUID) (InboxEvent, error) {
+	return InboxEvent{Consumer: "billing-v1", Status: "dead"}, nil
+}
+func (s *stubStore) RetryDeadInbox(context.Context, string, uuid.UUID, Mutation) error { return nil }
 
 func newTestService(t *testing.T, store Store) *Service {
 	t.Helper()

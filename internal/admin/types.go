@@ -152,6 +152,42 @@ type Stats struct {
 	HandoffPartitions     int64   `json:"handoff_partitions"`
 }
 
+type InboxStats struct {
+	Processed         int64 `json:"processed"`
+	Pending           int64 `json:"pending"`
+	Inflight          int64 `json:"inflight"`
+	RetryWait         int64 `json:"retry_wait"`
+	Dead              int64 `json:"dead"`
+	StaleInflight     int64 `json:"stale_inflight"`
+	DueRetries        int64 `json:"due_retries"`
+	BlockedPartitions int64 `json:"blocked_partitions"`
+}
+
+// InboxEvent intentionally excludes payload, headers, keys, and lease tokens.
+type InboxEvent struct {
+	Consumer        string     `json:"consumer"`
+	EventID         uuid.UUID  `json:"event_id"`
+	Status          string     `json:"status"`
+	Attempts        int        `json:"attempts"`
+	AvailableAt     time.Time  `json:"available_at"`
+	LeaseOwner      string     `json:"lease_owner,omitempty"`
+	LeaseUntil      *time.Time `json:"lease_until,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	FirstSeenAt     time.Time  `json:"first_seen_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
+	SourceTopic     string     `json:"source_topic,omitempty"`
+	SourcePartition *int32     `json:"source_partition,omitempty"`
+	SourceOffset    *int64     `json:"source_offset,omitempty"`
+	SourceTimestamp *time.Time `json:"source_timestamp,omitempty"`
+}
+
+type InboxDeadFilter struct {
+	Consumer string
+	Limit    int
+	Offset   int
+}
+
 type OrderingStreamCursor struct {
 	Destination string `json:"destination"`
 	OrderingKey string `json:"ordering_key"`
@@ -294,4 +330,8 @@ type Store interface {
 	ListOrderingStreams(ctx context.Context, filter OrderingStreamFilter) (OrderingStreamPage, error)
 	InspectOrderingStream(ctx context.Context, destination, orderingKey string) (OrderingStream, error)
 	ListOrderingPartitions(ctx context.Context, staleAfter time.Duration) ([]OrderingPartition, error)
+	InboxStats(ctx context.Context, consumer string) (InboxStats, error)
+	ListDeadInbox(ctx context.Context, filter InboxDeadFilter) ([]InboxEvent, error)
+	InspectInbox(ctx context.Context, consumer string, eventID uuid.UUID) (InboxEvent, error)
+	RetryDeadInbox(ctx context.Context, consumer string, eventID uuid.UUID, mutation Mutation) error
 }

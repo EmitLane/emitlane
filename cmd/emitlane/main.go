@@ -46,6 +46,8 @@ func main() {
 		err = orderingCmd(args)
 	case "integrity":
 		err = integrityCmd(args)
+	case "inbox":
+		err = inboxCmd(args)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return
@@ -89,6 +91,10 @@ Usage:
   emitlane ordering partitions [--json]
   emitlane integrity check [--full] [--json] [--strict]
   emitlane integrity stream --destination name --key key [--json]
+  emitlane inbox stats [--consumer name] [--json]
+  emitlane inbox dead [--consumer name] [--limit 50] [--offset 0] [--json]
+  emitlane inbox inspect --consumer name --event-id uuid [--json]
+  emitlane inbox retry --consumer name --event-id uuid --reason reason
   emitlane version
 
 Configuration is read from EMITLANE_* environment variables.

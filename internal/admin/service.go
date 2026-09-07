@@ -185,6 +185,50 @@ func (s *Service) ListOrderingPartitions(ctx context.Context) ([]OrderingPartiti
 	return s.store.ListOrderingPartitions(ctx, s.staleAfter)
 }
 
+func (s *Service) InboxStats(ctx context.Context, consumer string) (InboxStats, error) {
+	consumer = strings.TrimSpace(consumer)
+	if len(consumer) > 256 {
+		return InboxStats{}, fmt.Errorf("%w: consumer is too long", ErrInvalid)
+	}
+	return s.store.InboxStats(ctx, consumer)
+}
+
+func (s *Service) ListDeadInbox(ctx context.Context, filter InboxDeadFilter) ([]InboxEvent, error) {
+	filter.Consumer = strings.TrimSpace(filter.Consumer)
+	if len(filter.Consumer) > 256 || filter.Offset < 0 {
+		return nil, fmt.Errorf("%w: invalid consumer or offset", ErrInvalid)
+	}
+	if filter.Limit == 0 {
+		filter.Limit = DefaultPageSize
+	}
+	if filter.Limit < 1 || filter.Limit > MaxPageSize {
+		return nil, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalid, MaxPageSize)
+	}
+	return s.store.ListDeadInbox(ctx, filter)
+}
+
+func (s *Service) InspectInbox(ctx context.Context, consumer string, eventID uuid.UUID) (InboxEvent, error) {
+	consumer = strings.TrimSpace(consumer)
+	if consumer == "" || len(consumer) > 256 || eventID == uuid.Nil {
+		return InboxEvent{}, fmt.Errorf("%w: consumer and event ID are required", ErrInvalid)
+	}
+	return s.store.InspectInbox(ctx, consumer, eventID)
+}
+
+func (s *Service) RetryDeadInbox(ctx context.Context, consumer string, eventID uuid.UUID, mutation Mutation) error {
+	consumer = strings.TrimSpace(consumer)
+	if consumer == "" || len(consumer) > 256 || eventID == uuid.Nil {
+		return fmt.Errorf("%w: consumer and event ID are required", ErrInvalid)
+	}
+	mutation, err := normalizeMutation(ctx, mutation, true)
+	if err != nil {
+		return err
+	}
+	err = s.store.RetryDeadInbox(ctx, consumer, eventID, mutation)
+	s.metrics.IncAdminMutation("inbox.retry", resultLabel(err))
+	return err
+}
+
 func normalizeEventFilter(filter *EventFilter, replay bool) error {
 	filter.Destination = strings.TrimSpace(filter.Destination)
 	filter.EventType = strings.TrimSpace(filter.EventType)
