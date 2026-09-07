@@ -164,7 +164,16 @@ func (w *worker) run(ctx context.Context) error {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				continue
 			}
-			return fmt.Errorf("consumer %s: poll: %w", w.id, err)
+			// Broker and group-coordinator outages can surface through Poll as
+			// control-plane errors. The current offset is unresolved, so keep
+			// the member alive and let franz-go reconnect instead of turning a
+			// recoverable Kafka outage into process termination.
+			w.runtime.logger.WarnContext(ctx, "Kafka consumer poll failed; retrying",
+				"consumer", w.runtime.config.Consumer, "worker", w.id, "error", err)
+			if !waitRetry(ctx, w.runtime.config.MaintenancePoll) {
+				return ctx.Err()
+			}
+			continue
 		}
 
 		resolved, retryAt, permanent, reason := w.process(ctx, record)
@@ -175,6 +184,17 @@ func (w *worker) run(ctx context.Context) error {
 			w.block(partition, blockedPartition{record: record, eventID: retryAt.eventID, resumeAt: retryAt.at, permanent: permanent, reason: reason})
 		}
 		w.source.AllowRebalance()
+	}
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

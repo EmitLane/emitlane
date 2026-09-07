@@ -284,7 +284,7 @@ func TestManagedConsumerKafkaStopRestartRecovers(t *testing.T) {
 			return err
 		})
 	defer run.stop(t)
-	assertManagedStillRunning(t, run, 500*time.Millisecond)
+	assertManagedStillRunning(t, run, 3*time.Second)
 	e.startKafka(t)
 	waitManagedInboxStatus(t, store, "kafka-restart-v1", eventID, inbox.StatusProcessed, 30*time.Second)
 }
