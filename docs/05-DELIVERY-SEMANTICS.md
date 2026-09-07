@@ -185,6 +185,39 @@ marker conflict → skip local DB mutation
 
 This gives effective deduplication for effects enclosed by that same transaction.
 
+## Managed consumer semantics
+
+The v0.5 managed consumer extends Inbox with durable
+`pending → inflight → retry_wait|processed|dead` state and manual offset
+management. The protected boundary is:
+
+```text
+handler PostgreSQL writes
++ Inbox processed transition
+→ one PostgreSQL commit
+→ Kafka offset commit
+```
+
+If the database commit succeeds and the offset commit fails, the database state
+is not undone. Kafka may redeliver; the durable `(consumer, event_id)` marker
+suppresses another handler transaction and the offset is retried. If the
+database transaction does not commit, the offset does not advance.
+
+Each claim carries a new random lease token. Renewal and terminal transitions
+must match that token. A stale handler cannot mark an event processed, so its
+transaction—including business changes—must roll back. Lease expiry after a
+crash allows another process to reclaim the same identity.
+
+Retry and dead records block later offsets only in their source partition.
+Healthy partitions continue. A dead record remains the source of truth in
+Kafka and is retried only by an explicit audited operator action. This depends
+on Kafka retaining the record long enough. Inbox intentionally stores source
+coordinates and lifecycle, not the payload.
+
+This is duplicate-safe transactional PostgreSQL processing, not exactly-once
+Kafka consumption, exactly-once external side effects, global ordering, or
+cross-partition ordering. See [Consumer reliability](CONSUMER_RELIABILITY.md).
+
 ## Failure principle
 
 When faced with a choice between:

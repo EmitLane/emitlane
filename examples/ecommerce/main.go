@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,12 +15,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/twmb/franz-go/pkg/kgo"
 
-	"github.com/emitlane/emitlane/broker"
-	"github.com/emitlane/emitlane/inbox"
+	kafkaadapter "github.com/emitlane/emitlane/broker/kafka"
+	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/emitlane/emitlane/outbox"
-	"github.com/emitlane/emitlane/telemetry"
+	pgstore "github.com/emitlane/emitlane/storage/postgres"
 )
 
 type orderCreated struct {
@@ -215,117 +213,44 @@ func rollbackTx(ctx context.Context, log *slog.Logger, tx pgx.Tx) {
 }
 
 func consumePayments(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, brokers, topic string) {
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(splitCSV(brokers)...),
-		kgo.ConsumerGroup("ecommerce-payments"),
-		kgo.ConsumeTopics(topic),
-		kgo.DisableAutoCommit(),
-		kgo.BlockRebalanceOnPoll(),
-	)
+	const consumerName = "ecommerce-payments"
+	store, err := pgstore.NewInboxStore(pool)
 	if err != nil {
-		log.Error("kafka consumer", "error", err)
+		log.Error("create managed Inbox store", "error", err)
 		return
 	}
-	defer cl.Close()
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		fetches := cl.PollRecords(ctx, 1)
-		if fetches.IsClientClosed() {
-			return
-		}
-		for _, fetchErr := range fetches.Errors() {
-			if !errors.Is(fetchErr.Err, context.Canceled) {
-				log.Warn("kafka fetch", "topic", fetchErr.Topic, "partition", fetchErr.Partition, "error", fetchErr.Err)
-			}
-		}
-		records := fetches.Records()
-		if len(records) == 0 {
-			cl.AllowRebalance()
-			continue
-		}
-		rec := records[0]
-		for ctx.Err() == nil {
-			if err := handlePayment(ctx, pool, rec); err != nil {
-				log.Error("payment handler; record will be retried",
-					"topic", rec.Topic,
-					"partition", rec.Partition,
-					"offset", rec.Offset,
-					"error", err,
-				)
-				if !wait(ctx, time.Second) {
-					cl.AllowRebalance()
-					return
-				}
-				continue
-			}
-			if err := cl.CommitRecords(ctx, rec); err != nil {
-				log.Error("commit kafka offset; inbox will deduplicate a retry",
-					"topic", rec.Topic,
-					"partition", rec.Partition,
-					"offset", rec.Offset,
-					"error", err,
-				)
-				if !wait(ctx, time.Second) {
-					cl.AllowRebalance()
-					return
-				}
-				continue
-			}
-			break
-		}
-		cl.AllowRebalance()
-	}
-}
-
-func wait(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
-func handlePayment(ctx context.Context, pool *pgxpool.Pool, rec *kgo.Record) error {
-	var eventID, traceparent, tracestate string
-	for _, h := range rec.Headers {
-		switch h.Key {
-		case broker.HeaderEventID:
-			eventID = string(h.Value)
-		case broker.HeaderTraceparent:
-			traceparent = string(h.Value)
-		case broker.HeaderTracestate:
-			tracestate = string(h.Value)
-		}
-	}
-	if eventID == "" {
-		return fmt.Errorf("missing emitlane-event-id header")
-	}
-	var body orderCreated
-	if err := json.Unmarshal(rec.Value, &body); err != nil {
-		return err
-	}
-	ctx = telemetry.ExtractTrace(ctx, traceparent, tracestate)
-	tx, err := pool.Begin(ctx)
+	factory, err := kafkaadapter.NewConsumerFactory(kafkaadapter.ConsumerConfig{
+		Brokers: splitCSV(brokers), Group: consumerName, Topics: []string{topic},
+		SessionTimeout: 10 * time.Second, RebalanceTimeout: 30 * time.Second,
+		FetchMaxWait: 250 * time.Millisecond,
+	})
 	if err != nil {
+		log.Error("create Kafka consumer source", "error", err)
+		return
+	}
+	config := managed.DefaultConfig()
+	config.Consumer = consumerName
+	config.InstanceID = "ecommerce-" + uuid.NewString()
+	runtime, err := managed.New(config, pool, store, factory, handlePayment, managed.WithLogger(log))
+	if err != nil {
+		log.Error("create managed consumer", "error", err)
+		return
+	}
+	if err := runtime.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Error("managed consumer stopped", "error", err)
+	}
+}
+
+func handlePayment(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+	var body orderCreated
+	if err := json.Unmarshal(message.Payload, &body); err != nil {
 		return err
 	}
-	defer rollbackTx(ctx, slog.Default(), tx)
-	err = inbox.Process(ctx, tx, "payments", eventID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 INSERT INTO public.payments (order_id, amount)
 VALUES ($1, $2)
 ON CONFLICT (order_id) DO NOTHING`, body.OrderID, body.Amount)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return err
 }
 
 func setup(ctx context.Context, pool *pgxpool.Pool) error {

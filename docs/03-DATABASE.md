@@ -167,3 +167,33 @@ keeps released v0.2 processes out of ordered membership.
 The v3 down migration refuses while any ordered stream or ordered outbox row
 exists. It will not silently erase sequence progress. See
 [Ordered delivery](ORDERED_DELIVERY.md) for the claim and fencing protocol.
+
+## Schema version 4
+
+Migration `000004_inbox_lifecycle` additively evolves the existing Inbox primary
+key into a managed consumer state machine. Existing `(consumer, event_id,
+processed_at)` rows remain `processed`; no released migration is edited.
+
+```text
+pending → inflight → processed
+              ├──→ retry_wait → inflight
+              └──→ dead → explicit retry_wait
+```
+
+Lifecycle rows add status, attempts, availability, lease owner/token/expiry,
+bounded diagnostic error, first/updated timestamps, and Kafka topic/partition/
+offset/timestamp. The Kafka key, headers, and payload are not stored. A unique
+partial source-coordinate index prevents one Kafka record from being assigned
+two event identities for the same durable consumer.
+
+Claims use short PostgreSQL transactions and increment attempts only when a new
+lease token is won. Renewal, retry, dead, and processed transitions require that
+token. `processed` is set inside the handler's transaction, so a stale token
+also rolls back protected business writes. Due-retry, expired-lease, dead-list,
+source-coordinate, and processed-retention indexes support recovery and
+operations.
+
+There is no automatic Inbox deletion. Removing a processed marker permits a
+later Kafka replay to execute the handler again, so any future explicit pruning
+must be aligned with the replay and retention horizon. The v4 down migration
+refuses while active managed lifecycle rows exist.

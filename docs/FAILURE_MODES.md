@@ -71,6 +71,31 @@ At-least-once delivery plus the ACK/crash window can present the same event
 twice. For the same `consumer` + `event_id`, Inbox runs the callback once.
 Different consumers process independently.
 
+For the managed consumer, a database commit followed by process death or Kafka
+offset-commit failure leaves Inbox `processed`. Redelivery skips the handler and
+advances the offset once Kafka accepts the commit. The protected PostgreSQL
+effect is not rolled back merely because Kafka commit failed.
+
+## Managed handler failure
+
+A retryable handler failure rolls back its PostgreSQL transaction, records a
+durable future `available_at`, and pauses that source partition. A permanent or
+attempt-exhausted failure becomes `dead`. Later offsets in the same partition
+remain blocked; healthy partitions continue. Recovery from dead is an explicit,
+reasoned, audited `emitlane inbox retry` action.
+
+## Managed consumer death or rebalance
+
+Before Inbox claim, Kafka redelivers. After claim but before handler commit, the
+lease expires and a replacement reclaims. During a cooperative group rebalance,
+the runtime cancels/drains active work before releasing the franz-go rebalance
+gate and never commits an unresolved record. A handler must honor cancellation,
+while the lease-token conditional `processed` update supplies the final fence.
+
+If Kafka or PostgreSQL is temporarily unavailable, the current offset is not
+silently committed. The runtime retries without turning infrastructure failure
+into a permanent domain error and resumes after the dependency returns.
+
 ## Lost or coalesced NOTIFY
 
 Notifications are not the queue. If LISTEN drops, the payload is missing, or

@@ -51,8 +51,8 @@ type Metrics struct {
 	consumerLag          *prometheus.GaugeVec
 }
 
-// NewMetrics registers instruments with reg. The only label is the bounded
-// publish result: retryable or permanent.
+// NewMetrics registers instruments with reg. Labels are bounded enums or
+// configured consumer/topic names; event-derived values are never labels.
 func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	if reg == nil {
 		reg = prometheus.DefaultRegisterer

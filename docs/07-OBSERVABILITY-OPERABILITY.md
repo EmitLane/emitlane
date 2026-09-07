@@ -40,11 +40,26 @@ emitlane_ordering_gap_age_seconds
 emitlane_ordering_fenced_attempts_total{operation}
 emitlane_integrity_checks_total{mode,result}
 emitlane_integrity_check_duration_seconds{mode}
+
+emitlane_consumer_records_total{consumer,result}
+emitlane_consumer_processing_duration_seconds{consumer}
+emitlane_consumer_retries_total{consumer}
+emitlane_consumer_duplicates_total{consumer}
+emitlane_consumer_dead_events{consumer}
+emitlane_consumer_inflight{consumer}
+emitlane_consumer_rebalances_total{consumer}
+emitlane_consumer_paused_partitions{consumer,reason}
+emitlane_consumer_lag_records{consumer,topic}
 ```
 
 The failure counter has one bounded `result` label (`retryable` or
 `permanent`). Event IDs, destinations, keys, correlation IDs, and error text
 are never labels.
+
+Managed consumer `result` and pause `reason` values are fixed enums. Consumer
+and topic are configuration-controlled dimensions and must stay bounded. Never
+use event ID, Kafka offset/partition, lease token, raw error text, or a
+payload-derived value as a label.
 
 `emitlane_events_enqueued_total` is a process-local Writer SDK counter and is
 incremented after a successful INSERT call when `outbox.WithMetrics` is used.
@@ -80,6 +95,11 @@ order.create
              ▼
        order.consume
 ```
+
+The managed runtime creates `emitlane.consumer.process`, extracts W3C context
+from Kafka headers, and propagates the resulting context to the handler
+transaction and downstream Outbox writes. Malformed trace headers do not fail
+business processing.
 
 Store/propagate standard W3C context:
 
@@ -130,6 +150,10 @@ emitlane doctor
 emitlane ordering streams --blocked
 emitlane ordering inspect --destination orders.events --key order:123
 emitlane ordering partitions
+emitlane inbox stats [--consumer billing-v1] [--json]
+emitlane inbox dead [--consumer billing-v1] [--json]
+emitlane inbox inspect --consumer billing-v1 --event-id <uuid>
+emitlane inbox retry --consumer billing-v1 --event-id <uuid> --reason "fixed"
 emitlane integrity check [--full] [--json] [--strict]
 emitlane integrity stream --destination orders.events --key order:123
 ```
@@ -151,6 +175,7 @@ Implemented checks include:
 ✓ clock sanity
 ✓ relay instance visibility
 ✓ schema v3 ordering tables, indexes, and constraints
+✓ schema v4 Inbox lifecycle indexes and constraints
 ✓ exactly 64 virtual partition rows
 ✓ ordering ownership query permissions
 ```
@@ -180,6 +205,10 @@ GET /v1/ordering/streams
 GET /v1/ordering/stream
 GET /v1/ordering/partitions
 GET /v1/integrity
+GET /v1/inbox/stats
+GET /v1/inbox/dead
+GET /v1/inbox/events/{id}
+POST /v1/inbox/events/{id}/retry
 ```
 
 Mutating operator actions are audit logged in the same transaction as their

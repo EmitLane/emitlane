@@ -37,6 +37,10 @@ later offset is a duplicate for that consumer and is safe to commit after the
 processed marker is observed. The same source coordinates with a different
 event ID are a protocol conflict.
 
+The configured consumer name is a stable application/version namespace, not a
+pod or process identifier. Keep it consistent across all members of one logical
+consumer deployment; use `InstanceID` only for ephemeral lease ownership.
+
 Inbox does not persist the Kafka key, headers, or payload. A dead record remains
 in Kafka and blocks its source partition, so Kafka retention must exceed the
 operator response and retry window.
@@ -114,9 +118,12 @@ processed update is the authoritative fence. If an expired attempt wakes after
 another process has reclaimed the row, its update affects no row and its entire
 business transaction rolls back.
 
-Handler timeout must be positive and shorter than the lease duration. Renewal
-must occur often enough to leave a useful safety margin. Configuration is
-validated before Kafka or handler work begins.
+Handler timeout must be positive. It may exceed one lease interval because the
+runtime renews the lease while the handler is active. The renewal interval must
+be less than half the lease duration, and the maintenance poll must be shorter
+than the lease duration. Configuration is validated before Kafka or handler
+work begins. Handlers must honor context cancellation; the token-conditional
+`processed` update remains the fence even when user code returns late.
 
 ## Retry and dead behavior
 
@@ -132,6 +139,18 @@ authenticated/audited retry with a non-empty reason. Retry keeps the same event
 ID, source coordinates, and attempt history. Health endpoints do not fail merely
 because domain work is retrying or dead; CLI, Admin API, logs, metrics, and
 integrity diagnostics expose the condition.
+
+Operators can inspect and recover without reading payloads:
+
+```text
+emitlane inbox stats [--consumer billing-v1] [--json]
+emitlane inbox dead [--consumer billing-v1] [--limit 50] [--offset 0] [--json]
+emitlane inbox inspect --consumer billing-v1 --event-id <uuid> [--json]
+emitlane inbox retry --consumer billing-v1 --event-id <uuid> --reason "handler fixed"
+```
+
+The authenticated Admin API exposes the equivalent `/v1/inbox/*` reads and
+audited retry mutation.
 
 ## Rebalance and crash recovery
 
@@ -183,3 +202,16 @@ application transaction
 Pruning processed Inbox markers is an explicit operator choice. Replaying an
 event after its marker was pruned can run the handler again; retention must be
 selected together with the Kafka replay horizon.
+
+## Telemetry dimensions
+
+Managed consumer metrics cover records by bounded result, processing duration,
+retry and duplicate counts, active handlers, dead/paused partitions, assignment
+callbacks, and lag. `consumer` and `topic` labels are configuration-controlled
+dimensions and must remain bounded. Event IDs, offsets, partitions, lease
+tokens, raw errors, and payload-derived values are never metric labels.
+
+Consumer spans extract W3C `traceparent` and `tracestate`, then propagate the
+resulting context through the handler transaction and any Outbox enqueue.
+Malformed trace context never changes processing correctness. Payloads,
+credentials, and lease tokens are not logged.

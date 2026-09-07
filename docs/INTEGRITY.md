@@ -1,14 +1,15 @@
 # Integrity verification
 
-EmitLane v0.4 verifies that the durable PostgreSQL state used by the outbox,
-ordered-delivery, leasing, and runtime-control protocols is internally
-consistent. Verification is diagnostic and read-only: it never advances a
-stream, retries or deletes an event, changes a lease, or repairs data.
+EmitLane verifies that the durable PostgreSQL state used by the outbox,
+ordered-delivery, managed Inbox, leasing, and runtime-control protocols is
+internally consistent. Verification is diagnostic and read-only: it never
+advances a stream, retries or deletes an event, changes a lease, or repairs data.
 
 Integrity verification does not prove exactly-once delivery, absence of valid
-at-least-once duplicates, Kafka retention, consumer processing, or downstream
-side effects. A Kafka acknowledgement followed by a Relay crash before the
-PostgreSQL delivered transition can still produce a duplicate.
+at-least-once duplicates, Kafka retention, correspondence between Inbox and
+arbitrary business tables, or downstream external side effects. A Kafka
+acknowledgement followed by a Relay crash before the PostgreSQL delivered
+transition can still produce a duplicate.
 
 ## Modes
 
@@ -58,7 +59,7 @@ releases; existing meanings must not be changed silently.
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
-| `SCHEMA_VERSION_MISMATCH` | violation | Required v3 schema objects or protocol shape are missing or incompatible. |
+| `SCHEMA_VERSION_MISMATCH` | violation | Required v4 schema objects or protocol shape are missing or incompatible. |
 | `PARTITION_COUNT_INVALID` | violation | The durable virtual-partition set is not exactly the 64 protocol partitions. |
 | `PARTITION_ID_INVALID` | violation | A required partition ID is missing or an unexpected ID exists. |
 | `PARTITION_EPOCH_INVALID` | violation | A partition epoch is negative. |
@@ -77,6 +78,18 @@ releases; existing meanings must not be changed silently.
 | `STALE_EVENT_LEASE` | warning | An inflight event lease has expired and awaits recovery. |
 | `RUNTIME_CONTROL_INVALID` | violation | The runtime-control singleton is missing, duplicated, or structurally invalid. |
 | `RELAY_PRESENCE_STALE` | warning | A non-stopped Relay presence heartbeat is older than the configured threshold. |
+| `INBOX_STATE_INVALID` | violation | A managed Inbox row has an unknown lifecycle status. |
+| `INBOX_LEASE_SHAPE_INVALID` | violation | Inbox owner, token, and expiry do not match the inflight state. |
+| `INBOX_SOURCE_METADATA_INVALID` | violation | Kafka source coordinates are partial, negative, or missing from managed active state. |
+| `INBOX_PROCESSED_TIMESTAMP_INVALID` | violation | `processed_at` does not match the processed lifecycle state. |
+| `INBOX_ATTEMPTS_INVALID` | violation | An Inbox attempt count is negative. |
+| `INBOX_STALE_LEASE` | warning | An inflight Inbox lease expired and can be reclaimed. |
+| `INBOX_DEAD_BLOCKED` | warning | A dead Inbox event blocks its source Kafka partition. |
+| `INBOX_RETRY_WAIT` | warning | An Inbox event is durably waiting for its retry time. |
+
+Valid `retry_wait`, `dead`, and expired reclaimable Inbox leases are warnings,
+not corruption. Existing legacy processed markers with no Kafka source metadata
+remain valid after migration to schema v4.
 
 ## Retention-aware cursor rules
 

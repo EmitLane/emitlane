@@ -79,3 +79,34 @@ margin, and the rebalance interval must be shorter than the ordering lease.
 Migration v3 cannot be rolled back after ordered state exists. Its down
 migration returns a clear error while any ordered stream or ordered outbox row
 remains; it never silently discards the durable sequence cursor.
+
+## v0.3.0 to v0.4.0
+
+v0.4 adds read-only integrity verification and does not change schema v3. Deploy
+the binary, then run `emitlane doctor` and a bounded `emitlane integrity check`.
+Existing outbox, Inbox, ordering, and relay behavior is unchanged.
+
+## v0.4.0 to v0.5.0
+
+Migration v4 additively evolves `emitlane.inbox_events` into the managed
+lifecycle. It preserves the `(consumer, event_id)` primary key and converts all
+existing markers into valid `processed` rows with their original
+`processed_at`. It adds no payload storage.
+
+Use this rolling order:
+
+1. back up PostgreSQL and apply `emitlane migrate up` from schema 3 to 4;
+2. allow released v0.4 binaries to continue using `inbox.Process` if needed;
+3. deploy v0.5 application binaries;
+4. enable managed consumers only after their Kafka group, durable consumer name,
+   retry policy, lease timing, and retention horizon are configured;
+5. run `emitlane doctor`, `emitlane integrity check`, and `emitlane inbox stats`.
+
+Legacy helper calls keep their v0.4 duplicate behavior on schema v4. They return
+a typed lifecycle conflict if they collide with unfinished managed work rather
+than silently declaring it processed. Do not call a legacy helper from a managed
+handler for the same consumer/event identity.
+
+The v4 down migration refuses rollback while any Inbox row is not a
+legacy-compatible processed marker. Export or resolve managed state before an
+intentional rollback; never discard pending, inflight, retry, or dead work.
