@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/emitlane/emitlane/inbox"
+	adminapi "github.com/emitlane/emitlane/internal/admin"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
 )
 
@@ -222,5 +223,55 @@ func TestLegacyInboxOnSchemaV4AndManagedConflict(t *testing.T) {
 	_ = tx.Rollback(ctx)
 	if !errors.Is(err, inbox.ErrLifecycleConflict) {
 		t.Fatalf("legacy managed conflict = %v", err)
+	}
+}
+
+func TestInboxAdminStatsInspectListAndRetry(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	lifecycle, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := uuid.New()
+	claim, err := lifecycle.Claim(ctx, inbox.ClaimRequest{
+		Consumer: "admin-inbox-v1", EventID: eventID,
+		Source:     inbox.Source{Topic: "admin-input", Partition: 3, Offset: 9},
+		LeaseOwner: "admin-test", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.MarkDead(ctx, "admin-inbox-v1", eventID, claim.Event.LeaseToken, "safe diagnostic"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := pgstore.NewStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := adminapi.NewService(store, 30*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := service.InboxStats(ctx, "admin-inbox-v1")
+	if err != nil || stats.Dead != 1 || stats.BlockedPartitions != 1 {
+		t.Fatalf("Inbox stats=%+v err=%v", stats, err)
+	}
+	dead, err := service.ListDeadInbox(ctx, adminapi.InboxDeadFilter{Consumer: "admin-inbox-v1", Limit: 10})
+	if err != nil || len(dead) != 1 || dead[0].EventID != eventID || dead[0].SourceOffset == nil || *dead[0].SourceOffset != 9 {
+		t.Fatalf("dead Inbox events=%+v err=%v", dead, err)
+	}
+	inspected, err := service.InspectInbox(ctx, "admin-inbox-v1", eventID)
+	if err != nil || inspected.Status != "dead" {
+		t.Fatalf("inspected Inbox event=%+v err=%v", inspected, err)
+	}
+	if err := service.RetryDeadInbox(ctx, "admin-inbox-v1", eventID,
+		adminapi.Mutation{Actor: "integration", Reason: "handler fixed", RequestID: "request-1"}); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := lifecycle.Get(ctx, "admin-inbox-v1", eventID)
+	if err != nil || retried.Status != inbox.StatusRetryWait || retried.Attempts != 1 {
+		t.Fatalf("retried Inbox event=%+v err=%v", retried, err)
 	}
 }

@@ -207,6 +207,18 @@ func (s *InboxStore) RetryDead(ctx context.Context, request inbox.RetryRequest) 
 		return fmt.Errorf("inbox retry dead: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var status inbox.Status
+	if err := tx.QueryRow(ctx, `
+SELECT status FROM emitlane.inbox_events
+WHERE consumer=$1 AND event_id=$2 FOR UPDATE`, request.Consumer, request.EventID).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return inbox.ErrNotFound
+		}
+		return fmt.Errorf("inbox retry dead: select: %w", err)
+	}
+	if status != inbox.StatusDead {
+		return fmt.Errorf("%w: Inbox event is %s, not dead", inbox.ErrLifecycleConflict, status)
+	}
 	tag, err := tx.Exec(ctx, `
 UPDATE emitlane.inbox_events
 SET status='retry_wait', processed_at=NULL, available_at=NOW(),
@@ -216,7 +228,7 @@ WHERE consumer=$1 AND event_id=$2 AND status='dead'`, request.Consumer, request.
 		return fmt.Errorf("inbox retry dead: update: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("%w: Inbox event is not dead", inbox.ErrLifecycleConflict)
+		return fmt.Errorf("%w: Inbox event changed while retrying", inbox.ErrLifecycleConflict)
 	}
 	_, err = tx.Exec(ctx, `
 INSERT INTO emitlane.admin_audit_log (

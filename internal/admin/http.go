@@ -80,6 +80,10 @@ func newHandler(service *Service, token string, exposePayload bool, logger *slog
 	mux.HandleFunc("GET /v1/ordering/streams", h.orderingStreams)
 	mux.HandleFunc("GET /v1/ordering/stream", h.orderingStream)
 	mux.HandleFunc("GET /v1/ordering/partitions", h.orderingPartitions)
+	mux.HandleFunc("GET /v1/inbox/stats", h.inboxStats)
+	mux.HandleFunc("GET /v1/inbox/dead", h.inboxDead)
+	mux.HandleFunc("GET /v1/inbox/events/{id}", h.inboxEvent)
+	mux.HandleFunc("POST /v1/inbox/events/{id}/retry", h.inboxRetry)
 	return h.requestID(h.recover(h.authenticate(mux)))
 }
 
@@ -239,6 +243,75 @@ func (h *handler) integrity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, value)
+}
+
+func (h *handler) inboxStats(w http.ResponseWriter, r *http.Request) {
+	value, err := h.service.InboxStats(r.Context(), r.URL.Query().Get("consumer"))
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, value)
+}
+
+func (h *handler) inboxDead(w http.ResponseWriter, r *http.Request) {
+	limit, err := queryLimit(r, DefaultPageSize)
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	offset := 0
+	if value := strings.TrimSpace(r.URL.Query().Get("offset")); value != "" {
+		offset, err = strconv.Atoi(value)
+		if err != nil || offset < 0 {
+			h.serviceError(w, r, fmt.Errorf("%w: offset must be a non-negative integer", ErrInvalid))
+			return
+		}
+	}
+	items, err := h.service.ListDeadInbox(r.Context(), InboxDeadFilter{
+		Consumer: r.URL.Query().Get("consumer"), Limit: limit, Offset: offset,
+	})
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
+}
+
+func (h *handler) inboxEvent(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.eventID(w, r)
+	if !ok {
+		return
+	}
+	value, err := h.service.InspectInbox(r.Context(), r.URL.Query().Get("consumer"), id)
+	if err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, value)
+}
+
+type inboxRetryBody struct {
+	Consumer string `json:"consumer"`
+	Reason   string `json:"reason"`
+}
+
+func (h *handler) inboxRetry(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.eventID(w, r)
+	if !ok {
+		return
+	}
+	var body inboxRetryBody
+	if !h.decodeJSON(w, r, &body) {
+		return
+	}
+	if err := h.service.RetryDeadInbox(r.Context(), body.Consumer, id, h.mutation(r, body.Reason)); err != nil {
+		h.serviceError(w, r, err)
+		return
+	}
+	h.log.Info("admin Inbox retry committed", "request_id", requestID(r),
+		"consumer", body.Consumer, "event_id", id, "actor", "admin-api")
+	h.writeJSON(w, http.StatusOK, map[string]any{"consumer": body.Consumer, "event_id": id, "status": "retry_wait"})
 }
 
 func (h *handler) events(w http.ResponseWriter, r *http.Request) {
