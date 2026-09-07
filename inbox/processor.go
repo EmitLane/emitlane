@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -105,11 +106,23 @@ func process(ctx context.Context, tx pgx.Tx, consumer, eventID string, fn func(c
 
 	tag, err := nested.Exec(ctx, insertSQL, consumer, parsed)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.ConstraintName == "inbox_legacy_active_conflict" {
+			return false, fmt.Errorf("%w: managed event %s/%s is not processed", ErrLifecycleConflict, consumer, parsed)
+		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return false, fmt.Errorf("inbox: insert marker: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		var status string
+		if err := nested.QueryRow(ctx, `
+SELECT status FROM emitlane.inbox_events WHERE consumer=$1 AND event_id=$2`, consumer, parsed).Scan(&status); err != nil {
+			return false, fmt.Errorf("inbox: inspect duplicate marker: %w", err)
+		}
+		if status != string(StatusProcessed) {
+			return false, fmt.Errorf("%w: managed event %s/%s has status %s", ErrLifecycleConflict, consumer, parsed, status)
+		}
 		span.SetAttributes(attribute.Bool("emitlane.already_processed", true))
 		if err := nested.Commit(ctx); err != nil {
 			return true, fmt.Errorf("inbox: release duplicate savepoint: %w", err)

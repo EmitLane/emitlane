@@ -13,7 +13,7 @@ import (
 	"github.com/emitlane/emitlane/migrations"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 const migrationLockID int64 = 0x454d49544c414e45 // "EMITLANE"
 
@@ -227,6 +227,11 @@ func RequiredIndexes() []string {
 		"outbox_ordering_sequence_unique_idx",
 		"outbox_ordered_claim_idx",
 		"ordering_stream_partition_idx",
+		"inbox_due_idx",
+		"inbox_expired_lease_idx",
+		"inbox_dead_idx",
+		"inbox_source_unique_idx",
+		"inbox_processed_retention_idx",
 	}
 }
 
@@ -250,6 +255,11 @@ func RequiredConstraints() []struct{ Table, Name string } {
 		{Table: "ordering_streams", Name: "ordering_stream_next_check"},
 		{Table: "ordering_partitions", Name: "ordering_partition_lease_check"},
 		{Table: "ordering_partitions", Name: "ordering_partition_epoch_check"},
+		{Table: "inbox_events", Name: "inbox_status_check"},
+		{Table: "inbox_events", Name: "inbox_attempts_check"},
+		{Table: "inbox_events", Name: "inbox_lease_state_check"},
+		{Table: "inbox_events", Name: "inbox_processed_state_check"},
+		{Table: "inbox_events", Name: "inbox_source_metadata_check"},
 	}
 }
 
