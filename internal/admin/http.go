@@ -619,6 +619,9 @@ func queryLimit(r *http.Request, fallback int) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: limit must be an integer", ErrInvalid)
 	}
+	if limit < 1 || limit > MaxPageSize {
+		return 0, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalid, MaxPageSize)
+	}
 	return limit, nil
 }
 
