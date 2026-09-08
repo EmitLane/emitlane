@@ -47,7 +47,16 @@ LIMIT $2 OFFSET $3`, filter.Consumer, filter.Limit, filter.Offset)
 		return nil, fmt.Errorf("list dead Inbox events: %w", err)
 	}
 	defer rows.Close()
-	events := make([]adminapi.InboxEvent, 0, filter.Limit)
+
+	capacity := filter.Limit
+	if capacity < 0 {
+		capacity = 0
+	}
+	if capacity > adminapi.MaxPageSize {
+		capacity = adminapi.MaxPageSize
+	}
+	events := make([]adminapi.InboxEvent, 0, capacity)
+
 	for rows.Next() {
 		event, err := scanInboxEvent(rows)
 		if err != nil {
