@@ -75,6 +75,16 @@ func (s *stubStore) InspectOrderingStream(context.Context, string, string) (Orde
 func (s *stubStore) ListOrderingPartitions(context.Context, time.Duration) ([]OrderingPartition, error) {
 	return []OrderingPartition{{PartitionID: 1, State: "owned"}}, nil
 }
+func (s *stubStore) InboxStats(context.Context, string) (InboxStats, error) {
+	return InboxStats{Dead: 1}, nil
+}
+func (s *stubStore) ListDeadInbox(context.Context, InboxDeadFilter) ([]InboxEvent, error) {
+	return []InboxEvent{{Consumer: "billing-v1", EventID: uuid.New(), Status: "dead"}}, nil
+}
+func (s *stubStore) InspectInbox(context.Context, string, uuid.UUID) (InboxEvent, error) {
+	return InboxEvent{Consumer: "billing-v1", Status: "dead"}, nil
+}
+func (s *stubStore) RetryDeadInbox(context.Context, string, uuid.UUID, Mutation) error { return nil }
 
 func newTestService(t *testing.T, store Store) *Service {
 	t.Helper()
@@ -153,6 +163,39 @@ func TestAdminBearerAuthAndRequestID(t *testing.T) {
 	var stats Stats
 	if err := json.NewDecoder(response.Body).Decode(&stats); err != nil || stats.Pending != 2 {
 		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestAdminInboxEndpointsAreAuthenticatedAndRedacted(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	handler := newHandler(newTestService(t, store), "correct-token", false, nil)
+	eventID := uuid.New()
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet,
+		"/v1/inbox/events/"+eventID.String()+"?consumer=billing-v1", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized code=%d", unauthorized.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/inbox/events/"+eventID.String()+"?consumer=billing-v1", nil)
+	req.Header.Set("Authorization", "Bearer correct-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "payload") ||
+		strings.Contains(response.Body.String(), "lease_token") {
+		t.Fatalf("Inbox inspect code=%d body=%s", response.Code, response.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/inbox/events/"+eventID.String()+"/retry",
+		strings.NewReader(`{"consumer":"billing-v1","reason":"mapping fixed"}`))
+	req.Header.Set("Authorization", "Bearer correct-token")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"retry_wait"`) {
+		t.Fatalf("Inbox retry code=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

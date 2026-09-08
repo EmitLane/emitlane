@@ -138,6 +138,78 @@ type Publisher interface {
 The relay depends only on this small interface. `broker/kafka` implements it
 with franz-go; Kafka types do not leak into relay state.
 
+## Managed consumer
+
+The v0.5 handler receives broker-neutral metadata and the exact PostgreSQL
+transaction that protects its effects:
+
+```go
+type Handler func(context.Context, pgx.Tx, Message) error
+
+type Message struct {
+    EventID   uuid.UUID
+    Topic     string
+    Partition int32
+    Offset    int64
+    Timestamp time.Time
+    Key       []byte
+    Payload   []byte
+    Headers   []Header
+    Attempt   int
+}
+```
+
+Construct the PostgreSQL lifecycle store, franz-go source factory, and runtime:
+
+```go
+inboxStore, err := postgres.NewInboxStore(pool)
+if err != nil {
+    return err
+}
+source, err := kafka.NewConsumerFactory(kafka.ConsumerConfig{
+    Brokers: brokers,
+    Group:   "billing-v1",
+    Topics:  []string{"orders.events"},
+    SessionTimeout:   10 * time.Second,
+    RebalanceTimeout: 30 * time.Second,
+    FetchMaxWait:     250 * time.Millisecond,
+})
+if err != nil {
+    return err
+}
+cfg := consumer.DefaultConfig()
+cfg.Consumer = "billing-v1" // durable deduplication namespace
+cfg.InstanceID = hostname
+
+runtime, err := consumer.New(cfg, pool, inboxStore, source,
+    func(ctx context.Context, tx pgx.Tx, message consumer.Message) error {
+        if err := payments.Apply(ctx, tx, message.EventID, message.Payload); err != nil {
+            return err
+        }
+        _, err := outbox.NewWriter().Enqueue(ctx, tx, outbox.Event{
+            Destination: "payments.events",
+            Type:        "payment.recorded",
+            CausationID: message.EventID.String(),
+        })
+        return err
+    },
+)
+if err != nil {
+    return err
+}
+return runtime.Run(ctx)
+```
+
+`consumer.WithIdentityResolver` supports non-EmitLane producers;
+`consumer.WithLogger` and `consumer.WithMetrics` attach observability. The
+default resolver requires a valid, non-conflicting `emitlane-event-id` UUID
+header. Use `inbox.Permanent(err)` for an explicit non-retryable handler result.
+
+`consumer.Config` bounds concurrency, attempts, exponential retry/jitter,
+handler timeout, lease duration/renewal, maintenance polling, and shutdown.
+Every concurrency slot is a group member processing at most one record at a
+time. Kafka-specific records remain inside `broker/kafka`.
+
 ## Relay
 
 ```go

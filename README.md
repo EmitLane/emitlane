@@ -39,6 +39,9 @@ relay instances.
   visible `dead` state for poison events.
 - **Duplicate-safe consumers** — Inbox records message processing in the same local
   database transaction as the consumer's effects.
+- **Managed Kafka consumption** — optional franz-go runtime owns polling,
+  rebalances, durable retry/dead state, lease-token fencing, and offset commits
+  after PostgreSQL processing.
 - **Operable by default** — structured logs, Prometheus metrics, OpenTelemetry,
   health endpoints, diagnostics, migrations, and dead-letter commands.
 - **Controlled recovery** — durable cluster pause/resume, relay presence,
@@ -183,6 +186,10 @@ emitlane audit list [--json]
 emitlane ordering streams [--blocked] [--json]
 emitlane ordering inspect --destination name --key key [--json]
 emitlane ordering partitions [--json]
+emitlane inbox stats [--consumer name] [--json]
+emitlane inbox dead [--consumer name] [--limit 50] [--offset 0] [--json]
+emitlane inbox inspect --consumer name --event-id uuid [--json]
+emitlane inbox retry --consumer name --event-id uuid --reason "..."
 emitlane integrity check [--full] [--json] [--strict]
 emitlane integrity stream --destination name --key key [--json] [--strict]
 emitlane version
@@ -235,6 +242,7 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Go API](docs/04-GO-API.md)
 - [Delivery semantics](docs/05-DELIVERY-SEMANTICS.md)
 - [Ordering model](docs/06-ORDERING.md)
+- [Consumer reliability](docs/CONSUMER_RELIABILITY.md)
 - [Observability and operations](docs/07-OBSERVABILITY-OPERABILITY.md)
 - [Security and deployment](docs/08-SECURITY-DEPLOYMENT.md)
 - [Testing and benchmarks](docs/09-TESTING-BENCHMARKS.md)
@@ -248,12 +256,11 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-`v0.3.2` is the released baseline. This branch implements the v0.4 observable
-correctness scope: bounded read-only integrity verification, targeted stream
-diagnostics, typed expected fencing outcomes, and integrity-aware release-soak
-gates. It does not change schema v3 or the at-least-once delivery contract. As a
-pre-1.0 project, APIs and operational defaults may still change during the
-`v0.x` series.
+`v0.4.0` is the released baseline. This branch implements the v0.5 consumer
+reliability scope and additive schema v4. Managed processing is duplicate-safe
+for PostgreSQL effects committed with the Inbox transition, while Kafka and the
+relay remain at least once. As a pre-1.0 project, APIs and operational defaults
+may still change during the `v0.x` series.
 
 ## License
 

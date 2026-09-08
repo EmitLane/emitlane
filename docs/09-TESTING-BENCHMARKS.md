@@ -258,3 +258,30 @@ environment.
 Kafka/Relay regression coverage preserves actual broker stop/start and ambiguous
 publish outcomes. Expected stale epoch/ownership transitions must return
 `relay.ErrFenced`; injected SQL failures must remain errors.
+
+## v0.5 consumer reliability coverage
+
+The real PostgreSQL/Kafka suite verifies durable claim races, source-coordinate
+conflicts, legacy Inbox behavior on schema v4, retries, permanent dead state,
+handler timeouts, lease renewal, stale-token fencing against a real business
+table, and audited dead retry.
+
+Kafka scenarios verify that offsets advance only after the business transaction
+and Inbox marker commit. They inject an offset commit failure and a process death
+in that exact window, deliver the same event ID at a later offset, preserve
+same-partition A/B/C order through a retry, and prove that dead or invalid work
+blocks only its own partition. Multiple group members join while a handler is
+inflight; revoke cancellation, lease recovery, graceful replacement, and an
+OS-killed consumer process preserve protected effects.
+
+Fault coverage physically stops and restarts both Kafka and PostgreSQL. The E2E
+test commits application data plus Outbox, relays through Kafka, runs the managed
+handler, writes business data plus a derived Outbox row with Inbox `processed`
+in one transaction, injects redelivery, and proves both protected effects exist
+once.
+
+Performance results are valid only when produced by a reproducible consumer
+profile covering a single partition, many partitions, duplicate-heavy, and
+retry-heavy load. Record throughput and processing percentiles along with DB
+transaction, claim, and offset-commit costs where measurable. Correctness must
+not be weakened to improve a workstation number.

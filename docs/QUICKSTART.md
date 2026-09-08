@@ -116,7 +116,7 @@ GRANT SELECT ON TABLE emitlane.runtime_control TO emitlane_relay;
 GRANT SELECT, INSERT, UPDATE ON TABLE emitlane.relay_instances TO emitlane_relay;
 GRANT DELETE ON TABLE emitlane.outbox_events TO emitlane_relay; -- delivered cleanup only
 
-GRANT INSERT, SELECT ON TABLE emitlane.inbox_events TO emitlane_consumer;
+GRANT INSERT, SELECT, UPDATE ON TABLE emitlane.inbox_events TO emitlane_consumer;
 ```
 
 `pg_notify` / `LISTEN` do not require superuser.

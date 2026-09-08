@@ -27,6 +27,13 @@ same request ID.
 - `GET /v1/integrity`: bounded read-only integrity summary. The optional `mode`
   query parameter accepts only `summary`; full and targeted checks remain CLI
   operations.
+- `GET /v1/inbox/stats`: lifecycle, stale-lease, due-retry, and blocked-partition
+  counts, optionally filtered by consumer.
+- `GET /v1/inbox/dead`: bounded offset-paginated dead Inbox records without
+  payloads, optionally filtered by consumer.
+- `GET /v1/inbox/events/{id}?consumer=...`: one redacted Inbox lifecycle record.
+- `POST /v1/inbox/events/{id}/retry`: same-identity audited retry of a dead Inbox
+  record; the JSON body requires `consumer` and `reason`.
 - `GET /v1/events`: redacted, keyset-paginated event list.
 - `GET /v1/events/{id}`: redacted event inspection.
 - `GET /v1/relays`: active, stale, and stopped relay instances.
@@ -85,6 +92,11 @@ Errors use a stable JSON envelope:
 
 Raw SQL errors and secrets are not returned. The complete machine-readable
 contract is [OpenAPI](openapi/admin-v1.yaml).
+
+Inbox reads expose lifecycle and Kafka source coordinates but never payload,
+key, headers, or lease token. Explicit dead retry preserves identity, source
+coordinates, and attempts. A dead Inbox row is domain state and therefore does
+not make `/healthz` or `/readyz` fail.
 
 Ordered event inspection adds key, sequence, and virtual partition metadata but
 still hides payload. Replay of an ordered source returns `409` unless the body

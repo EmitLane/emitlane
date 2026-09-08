@@ -43,6 +43,22 @@ emitlane events inspect <event-id> --json
 emitlane audit list --json
 ```
 
+Managed Inbox state is separate from Outbox relay state:
+
+```bash
+emitlane inbox stats --consumer billing-v1
+emitlane inbox dead --consumer billing-v1 --limit 50
+emitlane inbox inspect --consumer billing-v1 --event-id <uuid> --json
+emitlane inbox retry --consumer billing-v1 --event-id <uuid> \
+  --reason "handler defect fixed"
+```
+
+`retry_wait` is automatic. `dead` deliberately blocks only the affected Kafka
+partition; later offsets in that partition must not be skipped. The retry
+mutation requires a reason, preserves identity/source/attempt history, and is
+audited. Kafka retains the payload, so confirm that its retention horizon still
+covers the blocked record before retrying. Inbox reads never expose payload.
+
 ## Pause and resume
 
 ```bash
@@ -112,6 +128,15 @@ request ID, time, and safe counts—never payload or credentials.
   targeted stream check plus audit history to isolate the invariant and cause.
 - Integrity warning: inspect the named stream/partition, but do not treat a gap,
   retry wait, stale lease, or expected fencing race as automatic corruption.
+- Managed consumer retry: leave the process running; PostgreSQL `available_at`
+  is durable and the source partition resumes when due.
+- Managed consumer dead: repair the handler/domain condition and use
+  `emitlane inbox retry` with an operator reason. Do not advance Kafka offsets
+  manually past the record.
+- Consumer crash/rebalance: an unfinished transaction rolls back and the lease
+  expires; a committed transaction is recognized as processed on redelivery.
+- Offset commit failure: do not remove the Inbox row. Redelivery is expected and
+  safely commits the already-processed record.
 
 `GET /v1/integrity` is an authenticated, bounded summary check. It is not a
 liveness or readiness endpoint and intentionally does not accept full mode.

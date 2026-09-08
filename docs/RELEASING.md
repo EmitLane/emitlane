@@ -36,6 +36,22 @@ exactly-once result. Integrity warnings are recorded for operator review but do
 not by themselves fail the default soak verdict. Do not publish if the Git tree
 was dirty or the recorded commit and configuration cannot be reproduced.
 
+For v0.5.0, release evidence additionally needs managed consumers on multiple
+Kafka partitions, consumer restart and group rebalance, an actual Kafka fault,
+transient PostgreSQL failure, handler retry, lease reclaim, offset-commit
+recovery, and Outbox-to-Inbox composition. Final managed Inbox pending,
+inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
+duplicate protected database effects, partition-order regressions, and
+integrity violations must be zero. Kafka redeliveries remain allowed.
+
+For v0.5.0, release evidence additionally needs managed consumers on multiple
+Kafka partitions, consumer restart and group rebalance, an actual Kafka fault,
+transient PostgreSQL failure, handler retry, lease reclaim, offset-commit
+recovery, and Outbox-to-Inbox composition. Final managed Inbox pending,
+inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
+duplicate protected database effects, partition-order regressions, and
+integrity violations must be zero. Kafka redeliveries remain allowed.
+
 ## Normal release flow
 
 1. Merge focused pull requests to `main`. Their squash titles must use

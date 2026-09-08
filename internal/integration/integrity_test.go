@@ -14,13 +14,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/emitlane/emitlane/inbox"
 	"github.com/emitlane/emitlane/integrity"
 	internalordering "github.com/emitlane/emitlane/internal/ordering"
 	"github.com/emitlane/emitlane/outbox"
 	"github.com/emitlane/emitlane/relay"
+	pgstore "github.com/emitlane/emitlane/storage/postgres"
 )
 
-func TestIntegrityCleanV3Database(t *testing.T) {
+func TestIntegrityCleanV4Database(t *testing.T) {
 	e := startEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -46,6 +48,148 @@ func TestIntegrityCleanV3Database(t *testing.T) {
 	}
 	if adminReport.Mode != integrity.ModeSummary || !adminReport.Clean {
 		t.Fatalf("Admin integrity report: %+v", adminReport)
+	}
+}
+
+func TestIntegrityUnderstandsValidInboxLifecycle(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	store, err := pgstore.NewInboxStore(e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryRequest := inbox.ClaimRequest{
+		Consumer: "integrity-inbox", EventID: uuid.New(),
+		Source:     inbox.Source{Topic: "orders", Partition: 0, Offset: 1},
+		LeaseOwner: "integrity-a", LeaseDuration: time.Second,
+	}
+	retryClaim, err := store.Claim(ctx, retryRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkRetry(ctx, retryRequest.Consumer, retryRequest.EventID,
+		retryClaim.Event.LeaseToken, time.Hour, "retryable"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadRequest := retryRequest
+	deadRequest.EventID = uuid.New()
+	deadRequest.Source.Offset = 2
+	deadClaim, err := store.Claim(ctx, deadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDead(ctx, deadRequest.Consumer, deadRequest.EventID,
+		deadClaim.Event.LeaseToken, "permanent"); err != nil {
+		t.Fatal(err)
+	}
+
+	staleRequest := retryRequest
+	staleRequest.EventID = uuid.New()
+	staleRequest.Source.Offset = 3
+	staleRequest.LeaseDuration = 40 * time.Millisecond
+	if _, err := store.Claim(ctx, staleRequest); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	legacyID := uuid.New()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inbox.Process(ctx, tx, "integrity-legacy", legacyID.String(),
+		func(context.Context, pgx.Tx) error { return nil }); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := verifier.Check(ctx, integrity.ModeFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.Violations != 0 {
+		t.Fatalf("valid Inbox states produced violations: %+v", report.Findings)
+	}
+	if report.Summary.InboxRetryWait != 1 || report.Summary.InboxDead != 1 ||
+		report.Summary.InboxInflight != 1 || report.Summary.InboxProcessed != 1 ||
+		report.Summary.InboxStaleLeases != 1 {
+		t.Fatalf("Inbox summary: %+v", report.Summary)
+	}
+	for _, code := range []integrity.Code{
+		integrity.CodeInboxRetryWait, integrity.CodeInboxDeadBlocked, integrity.CodeInboxStaleLease,
+	} {
+		if !hasIntegrityCode(report, code) {
+			t.Errorf("finding %s is missing: %+v", code, report.Findings)
+		}
+	}
+}
+
+func TestIntegrityDetectsImpossibleInboxState(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	constraints := []string{
+		"inbox_status_check", "inbox_attempts_check", "inbox_lease_state_check",
+		"inbox_processed_state_check", "inbox_source_metadata_check",
+	}
+	for _, constraint := range constraints {
+		if _, err := e.pool.Exec(ctx, `ALTER TABLE emitlane.inbox_events DROP CONSTRAINT `+constraint); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = e.pool.Exec(cleanupCtx, `DELETE FROM emitlane.inbox_events WHERE consumer='integrity-corrupt'`)
+		statements := []string{
+			`ALTER TABLE emitlane.inbox_events ADD CONSTRAINT inbox_status_check CHECK (status IN ('pending', 'inflight', 'retry_wait', 'processed', 'dead'))`,
+			`ALTER TABLE emitlane.inbox_events ADD CONSTRAINT inbox_attempts_check CHECK (attempts >= 0)`,
+			`ALTER TABLE emitlane.inbox_events ADD CONSTRAINT inbox_lease_state_check CHECK ((status = 'inflight' AND lease_owner IS NOT NULL AND BTRIM(lease_owner) <> '' AND lease_token IS NOT NULL AND lease_until IS NOT NULL) OR (status <> 'inflight' AND lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL))`,
+			`ALTER TABLE emitlane.inbox_events ADD CONSTRAINT inbox_processed_state_check CHECK ((status = 'processed') = (processed_at IS NOT NULL))`,
+			`ALTER TABLE emitlane.inbox_events ADD CONSTRAINT inbox_source_metadata_check CHECK ((source_topic IS NULL AND source_partition IS NULL AND source_offset IS NULL AND source_timestamp IS NULL AND status = 'processed') OR (source_topic IS NOT NULL AND BTRIM(source_topic) <> '' AND source_partition >= 0 AND source_offset >= 0))`,
+		}
+		for _, statement := range statements {
+			if _, err := e.pool.Exec(cleanupCtx, statement); err != nil {
+				t.Errorf("restore Inbox constraint: %v", err)
+			}
+		}
+	})
+	eventID := uuid.New()
+	if _, err := e.pool.Exec(ctx, `
+INSERT INTO emitlane.inbox_events (
+    consumer, event_id, processed_at, status, attempts,
+    lease_owner, source_topic
+) VALUES ('integrity-corrupt', $1, NOW(), 'impossible', -1, 'partial-owner', 'orders')`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := verifier.Check(ctx, integrity.ModeFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []integrity.Code{
+		integrity.CodeInboxStateInvalid,
+		integrity.CodeInboxAttemptsInvalid,
+		integrity.CodeInboxLeaseShapeInvalid,
+		integrity.CodeInboxProcessedTimestampInvalid,
+		integrity.CodeInboxSourceMetadataInvalid,
+	} {
+		if !hasIntegrityCode(report, code) {
+			t.Errorf("corruption finding %s is missing: %+v", code, report.Findings)
+		}
 	}
 }
 

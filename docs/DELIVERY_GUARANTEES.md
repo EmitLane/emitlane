@@ -59,6 +59,22 @@ commit with the inbox row. External side effects (HTTP, card charges, email)
 still need their own idempotency keys. Pass the stable event ID where the
 downstream API supports it.
 
+The v0.5 managed consumer owns Kafka polling and offsets while preserving the
+same durable identity. It claims an Inbox lease, runs the handler, and marks
+`processed` in the same `pgx.Tx` as protected business changes. Only after that
+transaction commits does it commit the Kafka offset. A failure or crash between
+those commits causes redelivery, not repeated protected writes.
+
+Retryable failures roll back the handler transaction and durably wait in
+`retry_wait`. Permanent or exhausted failures become `dead` and block later
+offsets in that source partition until an audited retry. Other partitions may
+continue. Every attempt uses a new lease token, so a stale handler cannot commit
+its Inbox transition or business transaction.
+
+This is duplicate-safe transactional processing for PostgreSQL effects, not
+exactly-once Kafka consumption or exactly-once external side effects. Inbox does
+not store the Kafka payload; dead recovery depends on Kafka retention.
+
 ## Ordering
 
 Unordered events do not guarantee global or per-aggregate order across
@@ -77,3 +93,7 @@ exactly-once ordering.
 Delivered events may be deleted after `EMITLANE_RETENTION_DELIVERED` (default
 7 days). Dead events are never deleted by this cleanup. Ordered stream cursors
 survive delivered-row cleanup, so historical sequence numbers remain rejected.
+
+Managed Inbox processed markers have no automatic retention. If an operator
+later removes one, replaying that event can run the handler again. Choose any
+explicit Inbox retention policy together with the Kafka replay horizon.

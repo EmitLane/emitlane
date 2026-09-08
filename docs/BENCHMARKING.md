@@ -54,3 +54,32 @@ alongside results before comparing runs.
 `.github/workflows/benchmark-smoke.yml` runs a small real dependency smoke test
 on relevant pull requests and by manual dispatch. It validates the harness but
 does not impose a flaky performance threshold.
+
+## Managed consumer profiles
+
+The integration suite also contains opt-in managed consumer profiles against
+real PostgreSQL and Kafka dependencies:
+
+```bash
+EMITLANE_CONSUMER_PERF=1 \
+  go test -tags=integration -count=1 -timeout=10m -v \
+  ./internal/integration -run '^TestManagedConsumerPerformanceProfiles$'
+```
+
+The profiles cover one partition, eight partitions, duplicate-heavy delivery,
+and retry-heavy delivery. Each result reports records per second, processing
+p50/p95/p99, the measured handler transaction boundary, synchronous offset
+commit latency, and Inbox claim rate and latency. These are local observations,
+not release guarantees; preserve the logged dependency versions and machine
+details when comparing runs.
+
+The opt-in reliability soak records its Git commit, branch, dirty-tree state,
+diff hash when dirty, seed, platform, exercised retries, and final protected
+effect count:
+
+```bash
+EMITLANE_CONSUMER_SOAK_DURATION=60s \
+EMITLANE_CONSUMER_SOAK_SEED=20260907 \
+  go test -tags=integration -count=1 -timeout=10m -v \
+  ./internal/integration -run '^TestManagedConsumerReliabilitySoak$'
+```

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EmitLane Admin API
-  version: 0.4.0
+  version: 0.5.0
   description: >-
     Operational API for redacted inspection, relay control, retry, and replay.
     Replay creates a new event identity and can execute downstream business logic again.
@@ -40,6 +40,69 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/IntegrityReport" }
         "400": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+  /inbox/stats:
+    get:
+      summary: Read managed Inbox lifecycle statistics
+      parameters:
+        - { name: consumer, in: query, schema: { type: string, maxLength: 256 } }
+      responses:
+        "200":
+          description: Inbox lifecycle and blocked-partition statistics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InboxStats" }
+        default: { $ref: "#/components/responses/Error" }
+  /inbox/dead:
+    get:
+      summary: List dead Inbox records without Kafka payloads
+      parameters:
+        - { name: consumer, in: query, schema: { type: string, maxLength: 256 } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Bounded dead-record page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/InboxEvent" }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        default: { $ref: "#/components/responses/Error" }
+  /inbox/events/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/EventID" }
+    get:
+      summary: Inspect one managed Inbox lifecycle record
+      parameters:
+        - { name: consumer, in: query, required: true, schema: { type: string, maxLength: 256 } }
+      responses:
+        "200":
+          description: Redacted Inbox lifecycle record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InboxEvent" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+  /inbox/events/{id}/retry:
+    parameters:
+      - { $ref: "#/components/parameters/EventID" }
+    post:
+      summary: Explicitly retry one dead Inbox identity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InboxRetry" }
+      responses:
+        "200": { description: Dead identity moved to retry_wait with attempts preserved }
+        "409": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events:
     get:
@@ -331,6 +394,44 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    InboxStats:
+      type: object
+      required: [processed, pending, inflight, retry_wait, dead, stale_inflight, due_retries, blocked_partitions]
+      properties:
+        processed: { type: integer, format: int64, minimum: 0 }
+        pending: { type: integer, format: int64, minimum: 0 }
+        inflight: { type: integer, format: int64, minimum: 0 }
+        retry_wait: { type: integer, format: int64, minimum: 0 }
+        dead: { type: integer, format: int64, minimum: 0 }
+        stale_inflight: { type: integer, format: int64, minimum: 0 }
+        due_retries: { type: integer, format: int64, minimum: 0 }
+        blocked_partitions: { type: integer, format: int64, minimum: 0 }
+    InboxEvent:
+      type: object
+      required: [consumer, event_id, status, attempts, available_at, first_seen_at, updated_at]
+      properties:
+        consumer: { type: string }
+        event_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, inflight, retry_wait, processed, dead] }
+        attempts: { type: integer, minimum: 0 }
+        available_at: { type: string, format: date-time }
+        lease_owner: { type: string }
+        lease_until: { type: string, format: date-time }
+        last_error: { type: string }
+        first_seen_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        processed_at: { type: string, format: date-time }
+        source_topic: { type: string }
+        source_partition: { type: integer, format: int32, minimum: 0 }
+        source_offset: { type: integer, format: int64, minimum: 0 }
+        source_timestamp: { type: string, format: date-time }
+    InboxRetry:
+      type: object
+      additionalProperties: false
+      required: [consumer, reason]
+      properties:
+        consumer: { type: string, minLength: 1, maxLength: 256 }
+        reason: { type: string, minLength: 1, maxLength: 4096 }
     IntegrityReport:
       type: object
       required: [result, mode, started_at, finished_at, clean, summary, findings, findings_truncated]
@@ -348,7 +449,7 @@ components:
         findings_truncated: { type: boolean }
     IntegritySummary:
       type: object
-      required: [violations, warnings, infos, pending_events, inflight_events, dead_events, active_ordered_events, ordered_streams, ready_streams, inflight_streams, blocked_streams, gap_streams, dead_blocked_streams, retry_wait_streams, stale_event_leases, ordering_partitions, owned_partitions, handoff_partitions, stale_relays]
+      required: [violations, warnings, infos, pending_events, inflight_events, dead_events, active_ordered_events, ordered_streams, ready_streams, inflight_streams, blocked_streams, gap_streams, dead_blocked_streams, retry_wait_streams, stale_event_leases, ordering_partitions, owned_partitions, handoff_partitions, stale_relays, inbox_pending, inbox_inflight, inbox_retry_wait, inbox_processed, inbox_dead, inbox_stale_leases]
       properties:
         violations: { type: integer, format: int64, minimum: 0 }
         warnings: { type: integer, format: int64, minimum: 0 }
@@ -369,18 +470,26 @@ components:
         owned_partitions: { type: integer, format: int64, minimum: 0 }
         handoff_partitions: { type: integer, format: int64, minimum: 0 }
         stale_relays: { type: integer, format: int64, minimum: 0 }
+        inbox_pending: { type: integer, format: int64, minimum: 0 }
+        inbox_inflight: { type: integer, format: int64, minimum: 0 }
+        inbox_retry_wait: { type: integer, format: int64, minimum: 0 }
+        inbox_processed: { type: integer, format: int64, minimum: 0 }
+        inbox_dead: { type: integer, format: int64, minimum: 0 }
+        inbox_stale_leases: { type: integer, format: int64, minimum: 0 }
     IntegrityFinding:
       type: object
       required: [code, severity, message]
       properties:
         code:
           type: string
-          enum: [SCHEMA_VERSION_MISMATCH, PARTITION_COUNT_INVALID, PARTITION_ID_INVALID, PARTITION_EPOCH_INVALID, PARTITION_LEASE_SHAPE_INVALID, PARTITION_OWNER_STALE, PARTITION_HANDOFF_OVERDUE, ORDERING_FIELDS_PARTIAL, ORDERING_PARTITION_MISMATCH, STREAM_PARTITION_MISMATCH, STREAM_CURSOR_INVALID, ACTIVE_SEQUENCE_BEHIND_CURSOR, EXPECTED_SEQUENCE_DUPLICATE, STREAM_GAP, STREAM_DEAD_BLOCKED, STREAM_RETRY_WAIT, STALE_EVENT_LEASE, RUNTIME_CONTROL_INVALID, RELAY_PRESENCE_STALE]
+          enum: [SCHEMA_VERSION_MISMATCH, PARTITION_COUNT_INVALID, PARTITION_ID_INVALID, PARTITION_EPOCH_INVALID, PARTITION_LEASE_SHAPE_INVALID, PARTITION_OWNER_STALE, PARTITION_HANDOFF_OVERDUE, ORDERING_FIELDS_PARTIAL, ORDERING_PARTITION_MISMATCH, STREAM_PARTITION_MISMATCH, STREAM_CURSOR_INVALID, ACTIVE_SEQUENCE_BEHIND_CURSOR, EXPECTED_SEQUENCE_DUPLICATE, STREAM_GAP, STREAM_DEAD_BLOCKED, STREAM_RETRY_WAIT, STALE_EVENT_LEASE, RUNTIME_CONTROL_INVALID, RELAY_PRESENCE_STALE, INBOX_STATE_INVALID, INBOX_LEASE_SHAPE_INVALID, INBOX_SOURCE_METADATA_INVALID, INBOX_PROCESSED_TIMESTAMP_INVALID, INBOX_ATTEMPTS_INVALID, INBOX_STALE_LEASE, INBOX_DEAD_BLOCKED, INBOX_RETRY_WAIT]
         severity: { type: string, enum: [info, warning, violation] }
         message: { type: string }
         destination: { type: string }
+        consumer: { type: string }
         event_id: { type: string, format: uuid }
         partition_id: { type: integer }
+        source_partition: { type: integer, format: int32, minimum: 0 }
         expected: {}
         observed: {}
     Stats:

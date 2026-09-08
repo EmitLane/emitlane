@@ -37,11 +37,12 @@
                           Kafka
                             │
                             ▼
-                       Consumer App
+                 EmitLane managed consumer
+              poll → claim → handler tx → offset
                             │
-                       Inbox helper
-                            │
-                      business transaction
+                            ▼
+               business data + Inbox processed
+                    SAME POSTGRESQL TRANSACTION
 ```
 
 ## Components
@@ -81,6 +82,28 @@ Responsibilities:
 - lets a consumer record `(consumer, event_id)` in the same DB transaction as local business effects;
 - prevents repeat DB-side execution for the same consumer/event pair;
 - does not pretend to make arbitrary external calls exactly once.
+
+The v0.4 `inbox.Process` helpers remain available when applications own Kafka
+polling and offset commits.
+
+### Managed consumer
+
+Responsibilities:
+
+- owns franz-go group polling, assignment, revoke, pause/resume, and manual
+  offset commits;
+- resolves a stable event UUID and claims `(consumer, event_id)` with a unique
+  lease token;
+- supplies the business handler a caller-visible `pgx.Tx`;
+- marks Inbox `processed` in that same transaction;
+- commits the Kafka offset only after durable processing is known;
+- durably schedules retry or dead state without committing unresolved offsets;
+- keeps each Kafka partition serial while allowing configured cross-partition
+  concurrency.
+
+The managed runtime does not make HTTP, email, filesystem, or other external
+effects transactional. A downstream EmitLane Outbox row should be written in
+the handler transaction instead.
 
 ### Admin API — post-v0.1 operability feature
 
@@ -235,7 +258,12 @@ emitlane/
 │   ├── writer.go
 │   └── json.go
 ├── inbox/
-│   └── processor.go
+│   ├── processor.go
+│   └── lifecycle.go
+├── consumer/
+│   ├── message.go
+│   ├── runtime.go
+│   └── source.go
 ├── relay/
 │   ├── relay.go
 │   ├── store.go
@@ -263,7 +291,7 @@ Suggested layering:
 outbox        → small DB abstractions only
 inbox         → small DB abstractions only
 relay         → storage port + publisher port + telemetry ports
-broker/kafka  → implements publisher
+broker/kafka  → implements publisher and managed consumer source
 storage/pg    → implements storage
 cmd           → composition root
 ```
