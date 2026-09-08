@@ -32,7 +32,7 @@ WHERE ($1='' OR consumer=$1)`
 		&stats.Processed, &stats.Pending, &stats.Inflight, &stats.RetryWait,
 		&stats.Dead, &stats.StaleInflight, &stats.DueRetries, &stats.BlockedPartitions,
 	); err != nil {
-		return adminapi.InboxStats{}, fmt.Errorf("Inbox stats: %w", err)
+		return adminapi.InboxStats{}, fmt.Errorf("inbox stats: %w", err)
 	}
 	return stats, nil
 }
