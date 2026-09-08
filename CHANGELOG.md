@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/EmitLane/emitlane/compare/v0.4.0...v0.5.0) (2026-09-08)
+
+
+### Features
+
+* **inbox:** add reliable consumer processing ([#21](https://github.com/EmitLane/emitlane/issues/21)) ([0eb6517](https://github.com/EmitLane/emitlane/commit/0eb65173a8d43f7595059d9165c42f639e451333))
+
 ## [0.4.0](https://github.com/EmitLane/emitlane/compare/v0.3.2...v0.4.0) (2026-09-07)
 
 
