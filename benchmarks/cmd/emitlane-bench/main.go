@@ -969,7 +969,7 @@ func observeRecords(ctx context.Context, brokers []string, topic string, expecte
 	}
 	partitions, ok := ends[topic]
 	if !ok {
-		return observation{}, fmt.Errorf("Kafka audit topic %q has no partitions", topic)
+		return observation{}, fmt.Errorf("kafka audit topic %q has no partitions", topic)
 	}
 	starts := make(map[int32]kgo.Offset, len(partitions))
 	targets := make(map[int32]int64, len(partitions))
@@ -1045,10 +1045,10 @@ func observeRecords(ctx context.Context, brokers []string, topic string, expecte
 		}
 	}
 	if remainingPartitions != 0 {
-		return observation{}, fmt.Errorf("Kafka audit timed out with %d partitions remaining: %w", remainingPartitions, observeCtx.Err())
+		return observation{}, fmt.Errorf("kafka audit timed out with %d partitions remaining: %w", remainingPartitions, observeCtx.Err())
 	}
 	if len(seen) != len(expected) {
-		return observation{}, fmt.Errorf("Kafka audit missing event IDs: unique=%d/%d total=%d", len(seen), len(expected), total)
+		return observation{}, fmt.Errorf("kafka audit missing event IDs: unique=%d/%d total=%d", len(seen), len(expected), total)
 	}
 	return observation{
 		total: total, unique: len(seen), duplicates: total - len(seen),

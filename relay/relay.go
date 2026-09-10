@@ -278,11 +278,9 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 			if active == 0 {
 				return
 			}
-			select {
-			case <-completed:
-				active--
-				setCapacity()
-			}
+			<-completed
+			active--
+			setCapacity()
 			continue
 		}
 		for {
