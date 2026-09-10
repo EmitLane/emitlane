@@ -36,7 +36,9 @@ Three 5,000-event backlog-drain runs measured 1,511.98, 1,314.04 and 1,109.94
 events/s (mean 1,311.99). The 1/2/4 Relay scaling runs have high local variance
 (including one 30-second two-Relay outlier), so they establish a comparison
 record rather than a linear-scaling claim. All recorded runs delivered every
-committed event uniquely in the outbox and reported zero loss.
+committed event uniquely in the outbox and reported zero loss. The v0.5.0
+harness predates independent Kafka event-ID auditing, so this baseline is valid
+release provenance but does not make a retrospective broker-audit claim.
 
 ## PostgreSQL claim evidence before v0.6 changes
 
@@ -48,7 +50,7 @@ is evidence to investigate a pending-first / expired-recovery split; it is not
 evidence for an index yet. Any schema change must include before/after plans,
 write cost and migration coverage.
 
-## Candidate observations
+## Preliminary candidate observations
 
 The v0.6 implementation candidate at `c52ed1b0f4378bfc431a53ec217efd3fe3bc5dad`
 was measured after a clean PostgreSQL/Kafka reset on the same host and settings.
@@ -77,3 +79,8 @@ recorded 499,419 ns/op, 432,892 B/op and 4,201 allocs/op for 128 events on this
 machine. Allocation pprof is dominated by per-event handling/message/header
 construction and the in-memory benchmark double, not an unbounded scheduler
 queue; no unsafe micro-optimization was applied.
+
+These preliminary runs predate the hardened event-ID Kafka audit. The final
+candidate comparison is retained as a raw JSON artifact after the audit is
+available; it reports its own commit, clean/dirty state, seed, and compatible
+environment metadata alongside broker-observed correctness results.

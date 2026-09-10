@@ -46,11 +46,21 @@ unordered regression comparison, run the v0.2.0 harness against the same
 hardware, database, Kafka cluster, payload, durability settings, and competing
 load. The v0.3 harness records that requirement rather than inventing a baseline.
 
-JSON includes timestamp, Go/OS/architecture, redacted connection metadata,
-event and relay counts, duration, throughput, latency where measured, and
-scenario-specific recovery information. Record PostgreSQL/Kafka versions,
-hardware, durability settings, payload size, warm-up method, and competing load
-alongside results before comparing runs.
+Every machine-readable result includes the commit, `git_dirty`, workload seed,
+and `valid_release_evidence`. A dirty checkout is useful for development, but
+is always marked `valid_release_evidence=false`; it cannot substantiate a
+release comparison. JSON also includes timestamp, Go/OS/architecture, redacted
+connection metadata, event and relay counts, duration, throughput, latency,
+PostgreSQL/Kafka versions, durability settings, payload size, and
+scenario-specific recovery information.
+
+Delivery, mixed, and ordered scenarios stop their measured timer once the
+durable delivery condition is reached. They then independently consume the
+Kafka topic from the beginning using the committed event IDs. The audit reports
+unique deliveries, losses, duplicates, and its own duration outside measured
+throughput. For ordered messages it verifies broker-observed ordering-key and
+sequence headers; the durable PostgreSQL cursor remains useful state evidence,
+but is not the only ordering check.
 
 `mixed-ordered-unordered` splits the requested event count between unordered
 events and independent ordered streams. It reports both populations, final
@@ -68,8 +78,13 @@ go run ./benchmarks/cmd/emitlane-bench compare \
 ```
 
 The command reports run counts, mean throughput and latency, and deltas for
-matching scenario/Relay-count pairs. It does not infer statistical certainty.
-The release baseline, machine metadata, and caveats are in `PERFORMANCE.md`.
+matching scenario/Relay-count pairs. It explicitly marks a comparison
+incompatible when Go, OS, architecture, PostgreSQL/Kafka version, broker count,
+payload size, durability settings, or Relay config differs (or is missing).
+It also reports invalid release evidence rather than silently treating a dirty
+or incomplete result as a release baseline. It does not infer statistical
+certainty. The release baseline, machine metadata, and caveats are in
+`PERFORMANCE.md`.
 
 `.github/workflows/benchmark-smoke.yml` runs a small real dependency smoke test
 on relevant pull requests and by manual dispatch. It validates the harness but

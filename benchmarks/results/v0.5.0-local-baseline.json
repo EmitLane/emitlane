@@ -3,6 +3,8 @@
   "valid_release_evidence": true,
   "baseline_tag": "v0.5.0",
   "baseline_commit": "9da5040ba70290d40b15b341e87ebbfd0a221cc6",
+  "emitlane_commit": "9da5040ba70290d40b15b341e87ebbfd0a221cc6",
+  "git_dirty": false,
   "machine": {
     "os": "darwin",
     "os_version": "macOS 26.5 (25F71)",
@@ -23,7 +25,14 @@
     "required_acks": "all"
   },
   "payload_size": 1024,
-  "seed": null,
+  "seed": 0,
+  "configuration": {
+    "batch_size": 200,
+    "concurrency": 16,
+    "poll_interval": "100ms",
+    "lease_duration": "3s",
+    "publish_timeout": "2s"
+  },
   "warmup": {"scenario": "backlog-drain", "events": 500, "discarded": true},
   "runs": [
     {"scenario": "backlog-drain", "events": 5000, "relay_instances": 1, "duration_seconds": 3.306921, "events_per_second": 1511.980480, "latency_p50_ms": 4653.242, "latency_p95_ms": 5949.719, "latency_p99_ms": 6054.378, "committed_events": 5000, "delivered_unique_events": 5000, "lost_events": 0},
