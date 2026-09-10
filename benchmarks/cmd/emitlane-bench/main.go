@@ -63,8 +63,14 @@ type result struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "compare" {
+		if err := runCompare(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	var opts options
-	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, ack-crash, ordered-many-streams, ordered-hot-stream, or unordered-regression")
+	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, ack-crash, ordered-many-streams, ordered-hot-stream, unordered-regression, mixed-ordered-unordered, or large-backlog")
 	flag.IntVar(&opts.events, "events", 1000, "number of events")
 	flag.IntVar(&opts.streams, "streams", 1000, "ordered streams for ordered-many-streams")
 	flag.IntVar(&opts.relays, "relays", 2, "relay instances for horizontal scaling")
@@ -187,6 +193,18 @@ func run(opts options) error {
 			res.AdditionalResults["ordering_stream_operations_per_event"] = 0
 			res.AdditionalResults["comparison_note"] = "compare with a v0.2.0 run using identical environment metadata"
 		}
+	case "mixed-ordered-unordered":
+		res.RelayInstances = opts.relays
+		streamCount := min(opts.streams, max(1, opts.events/2))
+		res.Configuration["ordered_streams"] = streamCount
+		res.Configuration["virtual_partitions"] = 64
+		elapsed, res.AdditionalResults, err = benchmarkMixedDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, streamCount)
+	case "large-backlog":
+		res.RelayInstances = opts.relays
+		elapsed, res.AdditionalResults, err = benchmarkDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, true)
+		if err == nil {
+			res.AdditionalResults["resources"] = resourceSnapshot(pool)
+		}
 	default:
 		return fmt.Errorf("unknown scenario %q", opts.scenario)
 	}
@@ -207,6 +225,94 @@ func run(opts options) error {
 		delete(res.AdditionalResults, "latencies_ms")
 	}
 	return outputResult(res, opts.output)
+}
+
+func benchmarkMixedDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.Store, brokers []string, count int, payload []byte, relayCount, streamCount int) (time.Duration, map[string]any, error) {
+	publisher, err := newPublisher(brokers)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer publisher.Close()
+	destination := "benchmark-mixed-" + uuid.NewString()
+	unorderedCount := count / 2
+	orderedCount := count - unorderedCount
+	if _, err := enqueue(ctx, pool, destination, unorderedCount, payload); err != nil {
+		return 0, nil, err
+	}
+	if _, err := enqueueOrdered(ctx, pool, destination, orderedCount, streamCount, payload); err != nil {
+		return 0, nil, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make([]<-chan error, 0, relayCount)
+	for i := 0; i < relayCount; i++ {
+		rly, err := newOrderedRelay(store, publisher, fmt.Sprintf("benchmark-mixed-%d", i))
+		if err != nil {
+			cancel()
+			return 0, nil, err
+		}
+		done = append(done, startRelay(runCtx, rly))
+	}
+	defer stopRelays(cancel, done)
+	started := time.Now()
+	if err := waitDelivered(ctx, pool, destination, count); err != nil {
+		return 0, nil, err
+	}
+	latencies, err := deliveryLatencies(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	states, err := finalStates(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	var regressions int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.ordering_streams WHERE destination=$1 AND next_sequence <= start_sequence`, destination).Scan(&regressions); err != nil {
+		return 0, nil, err
+	}
+	return time.Since(started), map[string]any{
+		"latencies_ms": latencies, "committed_events": count, "delivered_unique_events": count,
+		"lost_events": 0, "unordered_events": unorderedCount, "ordered_events": orderedCount,
+		"ordering_regressions": regressions, "final_states": states, "resources": resourceSnapshot(pool),
+	}, nil
+}
+
+func resourceSnapshot(pool *pgxpool.Pool) map[string]any {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	stat := pool.Stat()
+	return map[string]any{
+		"heap_alloc_bytes": memory.HeapAlloc,
+		"heap_inuse_bytes": memory.HeapInuse,
+		"goroutines":       runtime.NumGoroutine(),
+		"db_pool_acquired": stat.AcquiredConns(),
+		"db_pool_total":    stat.TotalConns(),
+		"db_pool_max":      stat.MaxConns(),
+	}
+}
+
+func finalStates(ctx context.Context, pool *pgxpool.Pool, destination string) (map[string]int64, error) {
+	query := `SELECT status, COUNT(*) FROM emitlane.outbox_events`
+	args := []any(nil)
+	if destination != "" {
+		query += ` WHERE destination=$1`
+		args = append(args, destination)
+	}
+	query += ` GROUP BY status`
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[string]int64{"pending": 0, "inflight": 0, "delivered": 0, "dead": 0}
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		states[status] = count
+	}
+	return states, rows.Err()
 }
 
 func benchmarkOrderedDelivery(
@@ -368,9 +474,13 @@ func benchmarkDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.
 	if err != nil {
 		return 0, nil, err
 	}
+	states, err := finalStates(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
 	return elapsed, map[string]any{
 		"latencies_ms": latencies, "committed_events": count,
-		"delivered_unique_events": count, "lost_events": 0,
+		"delivered_unique_events": count, "lost_events": 0, "final_states": states,
 	}, nil
 }
 
