@@ -72,6 +72,14 @@ duplicates. Per-run audit duration was 28.08–29.50 ms and was excluded from
 the measured throughput duration. Each raw run records the commit, clean-tree
 state, seed `20260910`, and `valid_release_evidence=true`.
 
+The same broker-boundary audit was exercised on clean commit
+`e52f6187f7af38f1a9bbcfcc697d977ca88f3734` for 200 events across 20 ordered
+streams and for a 100 ordered / 100 unordered mixed workload using two Relays.
+Both retained raw artifacts (`v0.6-ordered-audit-e52f618.json` and
+`v0.6-mixed-audit-e52f618.json`) report every ID once, zero loss and duplicates,
+and zero broker sequence regressions. These are correctness audit smokes, not
+throughput comparison samples.
+
 One candidate run each at 1/2/4 Relays measured 1,814.36/1,535.34/1,710.82
 events/s. The v0.5 control runs were noisy, and the candidate scale matrix has
 only one run per point; it demonstrates bounded concurrent operation, not

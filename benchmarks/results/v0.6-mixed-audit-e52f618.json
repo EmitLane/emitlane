@@ -1,0 +1,72 @@
+{
+  "scenario": "mixed-ordered-unordered",
+  "started_at": "2026-09-10T14:44:50.213509Z",
+  "go_version": "go1.27.0",
+  "os": "darwin",
+  "arch": "arm64",
+  "events": 200,
+  "relay_instances": 2,
+  "duration_seconds": 0.40197475,
+  "events_per_second": 497.5436890003663,
+  "latency_p50_ms": 463.051,
+  "latency_p95_ms": 538.924,
+  "latency_p99_ms": 603.86,
+  "configuration": {
+    "batch_size": 200,
+    "concurrency": 16,
+    "database": "postgres://***@localhost:5432/emitlane?sslmode=disable",
+    "lease_duration": "3s",
+    "ordered_streams": 20,
+    "poll_interval": "100ms",
+    "publish_timeout": "2s",
+    "requested_duration": "3s",
+    "virtual_partitions": 64,
+    "warmup_duration": "0s"
+  },
+  "additional_results": {
+    "audit_duration_seconds": 0.008682833,
+    "broker_ordering_regressions": 0,
+    "committed_events": 200,
+    "delivered_unique_events": 200,
+    "duplicate_records": 0,
+    "final_states": {
+      "dead": 0,
+      "delivered": 200,
+      "inflight": 0,
+      "pending": 0
+    },
+    "lost_events": 0,
+    "ordered_events": 100,
+    "ordering_regressions": 0,
+    "resources": {
+      "db_pool_acquired": 0,
+      "db_pool_max": 10,
+      "db_pool_total": 10,
+      "goroutines": 14,
+      "heap_alloc_bytes": 2649760,
+      "heap_inuse_bytes": 5152768
+    },
+    "total_broker_records": 200,
+    "unordered_events": 100
+  },
+  "emitlane_version": "dev",
+  "emitlane_commit": "e52f6187f7af38f1a9bbcfcc697d977ca88f3734",
+  "git_dirty": false,
+  "seed": 20260910,
+  "valid_release_evidence": true,
+  "cpu_count": 10,
+  "memory_bytes": 13125896,
+  "postgresql": {
+    "fsync": "on",
+    "full_page_writes": "on",
+    "synchronous_commit": "on",
+    "version": "16.15"
+  },
+  "kafka": {
+    "broker_count": 1,
+    "required_acks": "all",
+    "version": "4.3.1"
+  },
+  "payload_size": 1024
+}
+
