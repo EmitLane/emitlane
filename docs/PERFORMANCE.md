@@ -50,14 +50,27 @@ is evidence to investigate a pending-first / expired-recovery split; it is not
 evidence for an index yet. Any schema change must include before/after plans,
 write cost and migration coverage.
 
-## Preliminary candidate observations
+## Final audited candidate comparison
 
-The v0.6 implementation candidate at `c52ed1b0f4378bfc431a53ec217efd3fe3bc5dad`
-was measured after a clean PostgreSQL/Kafka reset on the same host and settings.
-Three 5,000-event backlog-drain runs measured 1,535.99, 1,327.99 and 1,426.76
-events/s (mean 1,430.25): +9.0% over the v0.5.0 mean. p95 changed from
-6,089.99 ms to 5,994.78 ms. This misses the 20% engineering target, so this
-document does not claim it was met.
+The retained raw artifact
+`benchmarks/results/v0.6-candidate-58ca09d.json` was measured on clean commit
+`58ca09ddc7ccc74ca60b27958159d0ee6e712d84`, after a PostgreSQL/Kafka reset on
+the same host and durability settings as the v0.5.0 baseline. Its metadata is
+compatible according to `emitlane-bench compare`: Go 1.27.0, macOS arm64,
+PostgreSQL 16.15, Kafka 4.3.1, one broker, 1024-byte payloads, `acks=all`, and
+the standard Relay configuration all match.
+
+The three 5,000-event backlog-drain runs measured 1,248.48, 1,512.22, and
+1,161.27 events/s (mean 1,307.32): -0.36% from the v0.5.0 mean of 1,311.99.
+Mean p95 improved from 6,089.99 ms to 5,958.59 ms (-2.16%), and p99 from
+6,150.10 ms to 6,026.51 ms (-2.01%). This local result is effectively neutral
+for throughput and is not a performance improvement claim.
+
+All 15,000 committed IDs were independently read from Kafka up to a captured
+broker end-offset boundary: 15,000 unique records, zero loss, and zero
+duplicates. Per-run audit duration was 28.08–29.50 ms and was excluded from
+the measured throughput duration. Each raw run records the commit, clean-tree
+state, seed `20260910`, and `valid_release_evidence=true`.
 
 One candidate run each at 1/2/4 Relays measured 1,814.36/1,535.34/1,710.82
 events/s. The v0.5 control runs were noisy, and the candidate scale matrix has
@@ -80,7 +93,5 @@ machine. Allocation pprof is dominated by per-event handling/message/header
 construction and the in-memory benchmark double, not an unbounded scheduler
 queue; no unsafe micro-optimization was applied.
 
-These preliminary runs predate the hardened event-ID Kafka audit. The final
-candidate comparison is retained as a raw JSON artifact after the audit is
-available; it reports its own commit, clean/dirty state, seed, and compatible
-environment metadata alongside broker-observed correctness results.
+The earlier exploratory observations remain useful for scheduler diagnosis but
+are not used for the final release comparison above.
