@@ -47,3 +47,33 @@ temporary disk sort). The captured plan is retained with local evidence. This
 is evidence to investigate a pending-first / expired-recovery split; it is not
 evidence for an index yet. Any schema change must include before/after plans,
 write cost and migration coverage.
+
+## Candidate observations
+
+The v0.6 implementation candidate at `13bd2f1739bd7e76789e3613d28b4c2c18811d91`
+was measured after a clean PostgreSQL/Kafka reset on the same host and settings.
+Three 5,000-event backlog-drain runs measured 1,447.29, 1,584.54 and 1,447.34
+events/s (mean 1,493.06): +13.8% over the v0.5.0 mean. p95 changed from
+6,089.99 ms to 6,079.67 ms. This misses the 20% engineering target, so this
+document does not claim it was met.
+
+One candidate run each at 1/2/4 Relays measured 1,814.36/1,535.34/1,710.82
+events/s. The v0.5 control runs were noisy, and the candidate scale matrix has
+only one run per point; it demonstrates bounded concurrent operation, not
+linear scaling. A 20,000-event, four-Relay backlog drained at 1,593.43
+events/s with zero lost/pending/inflight/dead events. The end-of-run snapshot
+reported 2 goroutines, about 2.5 MiB heap allocated, and 0 acquired of 10
+pool connections. A 2,000-event mixed run (1,000 unordered plus 100 ordered
+streams) had zero ordering regressions and no non-delivered final state.
+
+The continuous scheduler initially regressed because it made one small claim
+per completion and repeatedly probed an empty ordered path. Completion signals
+are now coalesced before a refill and an empty ordered probe is capped until
+the next poll or notification. There is still no prefetched event queue: every
+claim is bounded by currently free worker slots and immediately dispatched.
+
+`go test -run '^$' -bench '^BenchmarkContinuousRefill$' -benchmem ./relay`
+recorded 499,419 ns/op, 432,892 B/op and 4,201 allocs/op for 128 events on this
+machine. Allocation pprof is dominated by per-event handling/message/header
+construction and the in-memory benchmark double, not an unbounded scheduler
+queue; no unsafe micro-optimization was applied.

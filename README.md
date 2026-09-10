@@ -251,13 +251,15 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Integrity verification](docs/INTEGRITY.md)
 - [Operations runbook](docs/OPERATIONS.md)
 - [Benchmark harness](docs/BENCHMARKING.md)
+- [Performance and capacity](docs/PERFORMANCE.md)
 - [Upgrading](docs/UPGRADING.md)
 - [Release process](docs/RELEASING.md)
 
 ## Project status
 
-`v0.4.0` is the released baseline. This branch implements the v0.5 consumer
-reliability scope and additive schema v4. Managed processing is duplicate-safe
+`v0.5.0` is the released baseline. The v0.6 development branch adds bounded
+Relay refill, saturation telemetry, and reproducible scale evidence without a
+schema migration. Managed processing is duplicate-safe
 for PostgreSQL effects committed with the Inbox transition, while Kafka and the
 relay remain at least once. As a pre-1.0 project, APIs and operational defaults
 may still change during the `v0.x` series.

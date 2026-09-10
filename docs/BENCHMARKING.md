@@ -15,7 +15,8 @@ go run ./benchmarks/cmd/emitlane-bench \
 
 Supported scenarios are `enqueue-overhead`, `steady-state`, `backlog-drain`,
 `horizontal-scaling`, `idle-overhead`, `failure-recovery`, `ack-crash`,
-`ordered-many-streams`, `ordered-hot-stream`, and `unordered-regression`.
+`ordered-many-streams`, `ordered-hot-stream`, `unordered-regression`,
+`mixed-ordered-unordered`, and `large-backlog`.
 Use `--relays` for scaling and `--duration` for idle/outage windows.
 `failure-recovery` performs two relay crash/restart cycles after claim commit,
 waits for lease expiry, then verifies every committed event ID at Kafka.
@@ -50,6 +51,25 @@ event and relay counts, duration, throughput, latency where measured, and
 scenario-specific recovery information. Record PostgreSQL/Kafka versions,
 hardware, durability settings, payload size, warm-up method, and competing load
 alongside results before comparing runs.
+
+`mixed-ordered-unordered` splits the requested event count between unordered
+events and independent ordered streams. It reports both populations, final
+durable states, ordering regressions, and an end-of-run resource snapshot.
+`large-backlog` is intentionally manual: choose a large event count for the
+environment, and do not make normal PR CI depend on a noisy throughput target.
+
+For a direct comparison, collect one JSON result per measured run and combine
+them into documents with a `runs` array, then use:
+
+```bash
+go run ./benchmarks/cmd/emitlane-bench compare \
+  --baseline benchmarks/results/v0.5.0-local-baseline.json \
+  --candidate candidate-runs.json
+```
+
+The command reports run counts, mean throughput and latency, and deltas for
+matching scenario/Relay-count pairs. It does not infer statistical certainty.
+The release baseline, machine metadata, and caveats are in `PERFORMANCE.md`.
 
 `.github/workflows/benchmark-smoke.yml` runs a small real dependency smoke test
 on relevant pull requests and by manual dispatch. It validates the harness but

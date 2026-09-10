@@ -242,3 +242,11 @@ Under **Settings → General → Pull Requests**:
 
 Because the PR title becomes the commit on `main`, verify that it follows
 Conventional Commits before squash merging.
+
+## Performance release evidence
+
+For a performance release, attach clean-commit benchmark JSON, the exact
+release baseline JSON, environment metadata, all run values, correctness final
+states, EXPLAIN/pprof evidence, and explicit not-run checks. Do not turn one
+machine's throughput into a product-wide capacity claim. Release soak remains a
+separate explicit gate.
