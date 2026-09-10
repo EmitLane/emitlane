@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/emitlane/emitlane/broker"
@@ -943,70 +944,116 @@ func orderedAuditExpectations(ids []string, streamCount int) map[string]auditExp
 	return expectations
 }
 
-// observeRecords independently consumes the Kafka topic after the measured
-// section. It waits for all expected identities and a quiet window so duplicate
-// records are counted instead of assumed away. Ordered records are checked in
-// observed Kafka order per ordering key; duplicate sequence values are allowed,
-// but a decreasing sequence is a regression.
+// observeRecords snapshots broker end offsets after the measured section and
+// directly reads every partition up to that immutable boundary. This avoids
+// consumer-group offset state and counts duplicates instead of assuming them
+// away. Ordered records are checked in Kafka partition order per ordering key;
+// duplicate sequence values are allowed, but a decreasing sequence or a key
+// spanning broker partitions is a regression.
 func observeRecords(ctx context.Context, brokers []string, topic string, expectedIDs []string, ordered map[string]auditExpectation) (observation, error) {
 	started := time.Now()
 	expected := make(map[string]struct{}, len(expectedIDs))
 	for _, id := range expectedIDs {
 		expected[id] = struct{}{}
 	}
+	observeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	metadata, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return observation{}, err
+	}
+	ends, err := kadm.NewClient(metadata).ListEndOffsets(observeCtx, topic)
+	metadata.Close()
+	if err != nil {
+		return observation{}, fmt.Errorf("read Kafka audit end offsets: %w", err)
+	}
+	partitions, ok := ends[topic]
+	if !ok {
+		return observation{}, fmt.Errorf("Kafka audit topic %q has no partitions", topic)
+	}
+	starts := make(map[int32]kgo.Offset, len(partitions))
+	targets := make(map[int32]int64, len(partitions))
+	remainingPartitions := 0
+	for partition, end := range partitions {
+		if end.Err != nil {
+			return observation{}, fmt.Errorf("read Kafka audit end offset for partition %d: %w", partition, end.Err)
+		}
+		starts[partition] = kgo.NewOffset().AtStart()
+		targets[partition] = end.Offset
+		if end.Offset > 0 {
+			remainingPartitions++
+		}
+	}
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumerGroup("emitlane-benchmark-"+uuid.NewString()),
-		kgo.ConsumeTopics(topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: starts}),
 		kgo.FetchMaxWait(250*time.Millisecond),
 	)
 	if err != nil {
 		return observation{}, err
 	}
 	defer client.Close()
-	observeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	seen := make(map[string]struct{}, len(expected))
 	lastSequence := make(map[string]int64, len(ordered))
+	orderingPartitions := make(map[string]int32, len(ordered))
+	completedPartitions := make(map[int32]bool, len(partitions))
 	total := 0
-	lastRelevant := time.Now()
-	for {
+	for remainingPartitions > 0 && observeCtx.Err() == nil {
 		fetches := client.PollFetches(observeCtx)
-		if errs := fetches.Errors(); len(errs) > 0 {
+		if errs := fetches.Errors(); len(errs) > 0 && observeCtx.Err() == nil {
 			return observation{}, fmt.Errorf("consume benchmark records: %v", errs[0])
 		}
-		for _, record := range fetches.Records() {
-			id := recordHeader(record, broker.HeaderEventID)
-			if _, ok := expected[id]; !ok {
-				continue
+		fetches.EachPartition(func(fetch kgo.FetchTopicPartition) {
+			if completedPartitions[fetch.Partition] {
+				return
 			}
-			total++
-			seen[id] = struct{}{}
-			lastRelevant = time.Now()
-			if expectation, ok := ordered[id]; ok {
-				key := recordHeader(record, broker.HeaderOrderingKey)
-				sequence, parseErr := strconv.ParseInt(recordHeader(record, broker.HeaderSequence), 10, 64)
-				if parseErr != nil || key != expectation.OrderingKey || sequence != expectation.Sequence {
-					return observation{}, fmt.Errorf("ordered broker audit mismatch for %s: key=%q sequence=%d", id, key, sequence)
+			for _, record := range fetch.Records {
+				if record.Offset >= targets[fetch.Partition] {
+					continue
 				}
-				if prior, exists := lastSequence[key]; exists && sequence < prior {
-					return observation{}, fmt.Errorf("ordered broker sequence regression for %q: %d after %d", key, sequence, prior)
+				id := recordHeader(record, broker.HeaderEventID)
+				if _, ok := expected[id]; ok {
+					total++
+					seen[id] = struct{}{}
+					if expectation, orderedRecord := ordered[id]; orderedRecord {
+						key := recordHeader(record, broker.HeaderOrderingKey)
+						sequence, parseErr := strconv.ParseInt(recordHeader(record, broker.HeaderSequence), 10, 64)
+						if parseErr != nil || key != expectation.OrderingKey || sequence != expectation.Sequence {
+							err = fmt.Errorf("ordered broker audit mismatch for %s: key=%q sequence=%d", id, key, sequence)
+							return
+						}
+						if partition, exists := orderingPartitions[key]; exists && partition != fetch.Partition {
+							err = fmt.Errorf("ordered broker audit split ordering key %q across Kafka partitions %d and %d", key, partition, fetch.Partition)
+							return
+						}
+						orderingPartitions[key] = fetch.Partition
+						if prior, exists := lastSequence[key]; exists && sequence < prior {
+							err = fmt.Errorf("ordered broker sequence regression for %q: %d after %d", key, sequence, prior)
+							return
+						}
+						lastSequence[key] = sequence
+					}
 				}
-				lastSequence[key] = sequence
+				if record.Offset+1 >= targets[fetch.Partition] {
+					completedPartitions[fetch.Partition] = true
+					remainingPartitions--
+				}
 			}
-		}
-		if len(seen) == len(expected) && time.Since(lastRelevant) >= 500*time.Millisecond {
-			return observation{
-				total: total, unique: len(seen), duplicates: total - len(seen),
-				lost: len(expected) - len(seen), duration: time.Since(started),
-			}, nil
-		}
-		if err := observeCtx.Err(); err != nil {
-			return observation{}, fmt.Errorf("observe records: unique=%d/%d total=%d: %w",
-				len(seen), len(expected), total, err)
+		})
+		if err != nil {
+			return observation{}, err
 		}
 	}
+	if remainingPartitions != 0 {
+		return observation{}, fmt.Errorf("Kafka audit timed out with %d partitions remaining: %w", remainingPartitions, observeCtx.Err())
+	}
+	if len(seen) != len(expected) {
+		return observation{}, fmt.Errorf("Kafka audit missing event IDs: unique=%d/%d total=%d", len(seen), len(expected), total)
+	}
+	return observation{
+		total: total, unique: len(seen), duplicates: total - len(seen),
+		lost: len(expected) - len(seen), duration: time.Since(started),
+	}, nil
 }
 
 func auditResults(observed observation) map[string]any {
