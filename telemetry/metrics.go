@@ -8,54 +8,58 @@ const namespace = "emitlane"
 
 // Metrics holds Prometheus instruments. A nil Metrics is safe to call.
 type Metrics struct {
-	enqueued             prometheus.Counter
-	delivered            prometheus.Counter
-	failed               *prometheus.CounterVec
-	retried              prometheus.Counter
-	dead                 prometheus.Counter
-	pending              prometheus.Gauge
-	inflight             prometheus.Gauge
-	deadGauge            prometheus.Gauge
-	deliveryDuration     prometheus.Histogram
-	publishDuration      prometheus.Histogram
-	oldestPending        prometheus.Gauge
-	relayPaused          prometheus.Gauge
-	relaysActive         prometheus.Gauge
-	relaysStale          prometheus.Gauge
-	replayBatches        prometheus.Counter
-	replayedEvents       prometheus.Counter
-	adminMutations       *prometheus.CounterVec
-	controlFailures      prometheus.Counter
-	presenceFailures     *prometheus.CounterVec
-	orderingStreams      prometheus.Gauge
-	orderingBlocked      prometheus.Gauge
-	orderingGaps         prometheus.Gauge
-	orderingDeadBlocked  prometheus.Gauge
-	orderingOwned        prometheus.Gauge
-	orderingHandoff      prometheus.Gauge
-	orderingAcquisitions prometheus.Counter
-	orderingRebalances   prometheus.Counter
-	orderingDeliveryWait prometheus.Histogram
-	orderingGapAge       prometheus.Gauge
-	orderingFenced       *prometheus.CounterVec
-	integrityChecks      *prometheus.CounterVec
-	integrityDuration    *prometheus.HistogramVec
-	consumerRecords      *prometheus.CounterVec
-	consumerDuration     *prometheus.HistogramVec
-	consumerRetries      *prometheus.CounterVec
-	consumerDuplicates   *prometheus.CounterVec
-	consumerDead         *prometheus.GaugeVec
-	consumerInflight     *prometheus.GaugeVec
-	consumerRebalances   *prometheus.CounterVec
-	consumerPaused       *prometheus.GaugeVec
-	consumerLag          *prometheus.GaugeVec
-	relayWorkersActive   prometheus.Gauge
-	relayWorkersCapacity prometheus.Gauge
-	relaySaturation      prometheus.Gauge
-	relayClaimSize       prometheus.Histogram
-	relayClaimDuration   prometheus.Histogram
-	relayBackpressure    *prometheus.CounterVec
-	relayWakeups         *prometheus.CounterVec
+	enqueued               prometheus.Counter
+	delivered              prometheus.Counter
+	failed                 *prometheus.CounterVec
+	retried                prometheus.Counter
+	dead                   prometheus.Counter
+	pending                prometheus.Gauge
+	inflight               prometheus.Gauge
+	deadGauge              prometheus.Gauge
+	deliveryDuration       prometheus.Histogram
+	publishDuration        prometheus.Histogram
+	oldestPending          prometheus.Gauge
+	relayPaused            prometheus.Gauge
+	relaysActive           prometheus.Gauge
+	relaysStale            prometheus.Gauge
+	replayBatches          prometheus.Counter
+	replayedEvents         prometheus.Counter
+	adminMutations         *prometheus.CounterVec
+	controlFailures        prometheus.Counter
+	presenceFailures       *prometheus.CounterVec
+	orderingStreams        prometheus.Gauge
+	orderingBlocked        prometheus.Gauge
+	orderingGaps           prometheus.Gauge
+	orderingDeadBlocked    prometheus.Gauge
+	orderingOwned          prometheus.Gauge
+	orderingHandoff        prometheus.Gauge
+	orderingAcquisitions   prometheus.Counter
+	orderingRebalances     prometheus.Counter
+	orderingDeliveryWait   prometheus.Histogram
+	orderingGapAge         prometheus.Gauge
+	orderingFenced         *prometheus.CounterVec
+	integrityChecks        *prometheus.CounterVec
+	integrityDuration      *prometheus.HistogramVec
+	consumerRecords        *prometheus.CounterVec
+	consumerDuration       *prometheus.HistogramVec
+	consumerRetries        *prometheus.CounterVec
+	consumerDuplicates     *prometheus.CounterVec
+	consumerDead           *prometheus.GaugeVec
+	consumerInflight       *prometheus.GaugeVec
+	consumerRebalances     *prometheus.CounterVec
+	consumerPaused         *prometheus.GaugeVec
+	consumerLag            *prometheus.GaugeVec
+	consumerWorkersActive  *prometheus.GaugeVec
+	consumerWorkerCapacity *prometheus.GaugeVec
+	consumerBackpressure   *prometheus.CounterVec
+	consumerPollBatchSize  *prometheus.HistogramVec
+	relayWorkersActive     prometheus.Gauge
+	relayWorkersCapacity   prometheus.Gauge
+	relaySaturation        prometheus.Gauge
+	relayClaimSize         prometheus.Histogram
+	relayClaimDuration     prometheus.Histogram
+	relayBackpressure      *prometheus.CounterVec
+	relayWakeups           *prometheus.CounterVec
 }
 
 // NewMetrics registers instruments with reg. Labels are bounded enums or
@@ -218,6 +222,18 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "consumer_lag_records", Help: "Managed consumer lag by configured consumer and topic.",
 		}, []string{"consumer", "topic"}),
+		consumerWorkersActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_active_workers", Help: "Managed consumer group workers currently running.",
+		}, []string{"consumer"}),
+		consumerWorkerCapacity: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "consumer_worker_capacity", Help: "Configured managed consumer worker capacity.",
+		}, []string{"consumer"}),
+		consumerBackpressure: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "consumer_backpressure_total", Help: "Managed consumer entries into bounded blocked states.",
+		}, []string{"consumer", "reason"}),
+		consumerPollBatchSize: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace, Name: "consumer_poll_batch_size", Help: "Records returned per managed consumer poll.", Buckets: []float64{0, 1, 2, 4, 8, 16, 32, 64, 128},
+		}, []string{"consumer"}),
 		relayWorkersActive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "relay_active_workers", Help: "Relay publishes currently executing.",
 		}),
@@ -309,6 +325,10 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.consumerRebalances,
 		m.consumerPaused,
 		m.consumerLag,
+		m.consumerWorkersActive,
+		m.consumerWorkerCapacity,
+		m.consumerBackpressure,
+		m.consumerPollBatchSize,
 		m.relayWorkersActive,
 		m.relayWorkersCapacity,
 		m.relaySaturation,
@@ -413,6 +433,32 @@ func (m *Metrics) AddConsumerPaused(consumer, reason string, delta float64) {
 func (m *Metrics) SetConsumerLag(consumer, topic string, records float64) {
 	if m != nil && consumer != "" && topic != "" {
 		m.consumerLag.WithLabelValues(consumer, topic).Set(max(0, records))
+	}
+}
+
+func (m *Metrics) SetConsumerCapacity(consumer string, active, capacity int) {
+	if m == nil || consumer == "" {
+		return
+	}
+	m.consumerWorkersActive.WithLabelValues(consumer).Set(float64(max(0, active)))
+	m.consumerWorkerCapacity.WithLabelValues(consumer).Set(float64(max(0, capacity)))
+}
+
+func (m *Metrics) AddConsumerWorker(consumer string, delta float64) {
+	if m != nil && consumer != "" {
+		m.consumerWorkersActive.WithLabelValues(consumer).Add(delta)
+	}
+}
+
+func (m *Metrics) RecordConsumerBackpressure(consumer, reason string) {
+	if m != nil && consumer != "" && oneOf(reason, "workers_saturated", "retry_wait", "dead", "database_slow", "rebalance", "shutdown") {
+		m.consumerBackpressure.WithLabelValues(consumer, reason).Inc()
+	}
+}
+
+func (m *Metrics) ObserveConsumerPollBatch(consumer string, size int) {
+	if m != nil && consumer != "" {
+		m.consumerPollBatchSize.WithLabelValues(consumer).Observe(float64(max(0, size)))
 	}
 }
 

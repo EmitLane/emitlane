@@ -47,6 +47,11 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 	metrics.AddConsumerPaused("billing-v1", "retry", 1)
 	metrics.AddConsumerPaused("billing-v1", "unbounded-value-must-be-ignored", 1)
 	metrics.SetConsumerLag("billing-v1", "orders", 12)
+	metrics.SetConsumerCapacity("billing-v1", 3, 4)
+	metrics.AddConsumerWorker("billing-v1", -1)
+	metrics.RecordConsumerBackpressure("billing-v1", "retry_wait")
+	metrics.RecordConsumerBackpressure("billing-v1", "unbounded-value-must-be-ignored")
+	metrics.ObserveConsumerPollBatch("billing-v1", 1)
 	metrics.SetRelayCapacity(3, 4)
 	metrics.ObserveRelayClaim(3, 0.01)
 	metrics.RecordRelayBackpressure("workers_saturated")
@@ -104,6 +109,10 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 		"emitlane_consumer_rebalances_total",
 		"emitlane_consumer_paused_partitions",
 		"emitlane_consumer_lag_records",
+		"emitlane_consumer_active_workers",
+		"emitlane_consumer_worker_capacity",
+		"emitlane_consumer_backpressure_total",
+		"emitlane_consumer_poll_batch_size",
 		"emitlane_relay_active_workers",
 		"emitlane_relay_worker_capacity",
 		"emitlane_relay_worker_saturation_ratio",
@@ -159,6 +168,10 @@ func TestNilMetricsIsNoOp(t *testing.T) {
 	metrics.IncConsumerRebalance("billing-v1")
 	metrics.AddConsumerPaused("billing-v1", "retry", 1)
 	metrics.SetConsumerLag("billing-v1", "orders", 1)
+	metrics.SetConsumerCapacity("billing-v1", 1, 1)
+	metrics.AddConsumerWorker("billing-v1", -1)
+	metrics.RecordConsumerBackpressure("billing-v1", "retry_wait")
+	metrics.ObserveConsumerPollBatch("billing-v1", 1)
 	metrics.SetRelayCapacity(1, 1)
 	metrics.ObserveRelayClaim(1, 1)
 	metrics.RecordRelayBackpressure("workers_saturated")
