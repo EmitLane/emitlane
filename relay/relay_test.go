@@ -245,7 +245,7 @@ func TestNewBackfillsV02ConfigFieldsForV01Callers(t *testing.T) {
 	}
 }
 
-func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
+func TestRunClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 	store := &memoryStore{}
 	for range 5 {
 		store.events = append(store.events, Event{
@@ -261,7 +261,25 @@ func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 		cfg.BatchSize = 100
 		cfg.Concurrency = 2
 	})
-	if err := rly.tick(context.Background(), context.Background()); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rly.Run(ctx) }()
+	deadline := time.After(time.Second)
+	for {
+		store.mu.Lock()
+		delivered := len(store.delivered)
+		store.mu.Unlock()
+		if delivered == 5 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("relay did not drain backlog")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,8 +291,8 @@ func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 		t.Fatalf("delivered %d events, want 5", delivered)
 	}
 	for _, limit := range limits {
-		if limit != 2 {
-			t.Fatalf("claim limit %d, want worker capacity 2", limit)
+		if limit < 1 || limit > 2 {
+			t.Fatalf("claim limit %d, want bounded free capacity up to 2", limit)
 		}
 	}
 	pub.mu.Lock()
@@ -289,6 +307,102 @@ func TestTickClaimsOnlyWorkerCapacityAndDrainsBacklog(t *testing.T) {
 		if msg.Headers[broker.HeaderAttempt] != "1" {
 			t.Fatalf("attempt header %q, want 1", msg.Headers[broker.HeaderAttempt])
 		}
+	}
+}
+
+type slowKeyPublisher struct {
+	mu            sync.Mutex
+	active        int
+	maxActive     int
+	slowStarted   chan struct{}
+	refillStarted chan struct{}
+	releaseSlow   <-chan struct{}
+}
+
+func (p *slowKeyPublisher) Publish(ctx context.Context, msg broker.Message) error {
+	p.mu.Lock()
+	p.active++
+	if p.active > p.maxActive {
+		p.maxActive = p.active
+	}
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.active--
+		p.mu.Unlock()
+	}()
+
+	switch string(msg.Key) {
+	case "slow":
+		select {
+		case p.slowStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-p.releaseSlow:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case "refill":
+		select {
+		case p.refillStarted <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (*slowKeyPublisher) Close() error { return nil }
+
+func TestRunRefillsFreeSlotsWithoutWaitingForSlowPublish(t *testing.T) {
+	releaseSlow := make(chan struct{})
+	store := &memoryStore{}
+	for _, key := range []string{"slow", "fast-1", "fast-2", "fast-3", "refill"} {
+		store.events = append(store.events, Event{
+			ID: uuid.Must(uuid.NewV7()), Destination: "orders.events", Type: "order.created",
+			Key: []byte(key), SchemaVersion: 1, CreatedAt: time.Now(),
+		})
+	}
+	pub := &slowKeyPublisher{
+		slowStarted: make(chan struct{}, 1), refillStarted: make(chan struct{}, 1), releaseSlow: releaseSlow,
+	}
+	rly := testRelay(t, store, pub, func(cfg *Config) {
+		cfg.BatchSize = 100
+		cfg.Concurrency = 4
+		cfg.PollInterval = time.Hour
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rly.Run(ctx) }()
+
+	select {
+	case <-pub.slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow publish did not start")
+	}
+	select {
+	case <-pub.refillStarted:
+		// A fast completion opened capacity while the slow publish was still active.
+	case <-time.After(time.Second):
+		t.Fatal("free worker slot was not refilled before slow publish completed")
+	}
+	pub.mu.Lock()
+	maxActive := pub.maxActive
+	pub.mu.Unlock()
+	if maxActive > 4 {
+		t.Fatalf("publisher concurrency %d exceeds configured 4", maxActive)
+	}
+
+	close(releaseSlow)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay did not stop after slow publish completed")
 	}
 }
 

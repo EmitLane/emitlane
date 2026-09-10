@@ -214,13 +214,6 @@ func (r *Relay) Run(ctx context.Context) error {
 		go r.cleanupLoop(runCtx)
 	}
 
-	tickInterval := r.cfg.PollInterval
-	if _, ok := r.store.(PauseState); ok {
-		tickInterval = min(tickInterval, r.cfg.ControlInterval)
-	}
-	timer := time.NewTimer(tickInterval)
-	defer timer.Stop()
-
 	r.log.Info("relay started",
 		"relay_instance", r.cfg.InstanceID,
 		"batch_size", r.cfg.BatchSize,
@@ -229,27 +222,9 @@ func (r *Relay) Run(ctx context.Context) error {
 		"lease_duration", r.cfg.LeaseDuration,
 	)
 
-	for {
-		if err := r.tick(runCtx, workCtx); err != nil && runCtx.Err() == nil {
-			r.log.Error("relay tick failed", "error", err, "relay_instance", r.cfg.InstanceID)
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(tickInterval)
-
-		select {
-		case <-runCtx.Done():
-			r.log.Info("relay stopped", "relay_instance", r.cfg.InstanceID)
-			return nil
-		case <-r.wake:
-			drain(r.wake)
-		case <-timer.C:
-		}
-	}
+	r.runScheduler(runCtx, workCtx)
+	r.log.Info("relay stopped", "relay_instance", r.cfg.InstanceID)
+	return nil
 }
 
 func drain(ch <-chan struct{}) {
@@ -262,57 +237,137 @@ func drain(ch <-chan struct{}) {
 	}
 }
 
-func (r *Relay) tick(claimCtx, workCtx context.Context) error {
-	claimLimit := min(r.cfg.BatchSize, r.cfg.Concurrency)
-	for claimCtx.Err() == nil {
-		if pauseState, ok := r.store.(PauseState); ok {
-			paused, err := pauseState.RelayPaused(claimCtx)
-			if err != nil {
-				r.metrics.IncControlFailure()
-				return fmt.Errorf("read relay pause state: %w", err)
+// runScheduler keeps at most Concurrency publishes active. It does not retain
+// a prefetch queue: every claimed event is dispatched immediately, and a
+// completed publish triggers one bounded refill attempt. This keeps claims,
+// goroutines, and memory bounded by the configured working set.
+func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
+	completed := make(chan struct{}, r.cfg.Concurrency)
+	active := 0
+	preferOrdered := true
+	paused := false
+
+	interval := r.cfg.PollInterval
+	if _, ok := r.store.(PauseState); ok {
+		interval = min(interval, r.cfg.ControlInterval)
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		if claimCtx.Err() != nil {
+			if active == 0 {
+				return
 			}
-			r.metrics.SetRelayPaused(paused)
-			if paused {
-				return nil
+			select {
+			case <-completed:
+				active--
+			case <-workCtx.Done():
+				// Every worker observes workCtx cancellation. Continue waiting for
+				// their completion so Run never leaves a publish goroutine behind.
 			}
-		}
-		var events []Event
-		if orderedStore, ok := r.store.(OrderedDeliveryStore); ok {
-			ordered, err := orderedStore.ClaimOrdered(
-				claimCtx,
-				r.cfg.InstanceID,
-				claimLimit,
-				r.cfg.LeaseDuration,
-				r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin,
-			)
-			if err != nil {
-				return err
-			}
-			events = append(events, ordered...)
-		}
-		if len(events) < claimLimit {
-			unordered, err := r.store.Claim(claimCtx, r.cfg.InstanceID, claimLimit-len(events), r.cfg.LeaseDuration)
-			if err != nil {
-				return err
-			}
-			events = append(events, unordered...)
-		}
-		if len(events) == 0 {
-			return nil
+			continue
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(len(events))
-		for _, ev := range events {
-			ev := ev
-			go func() {
-				defer wg.Done()
-				r.handle(workCtx, ev)
-			}()
+		if active < r.cfg.Concurrency {
+			limit := min(r.cfg.BatchSize, r.cfg.Concurrency-active)
+			events, isPaused, err := r.claimAvailable(claimCtx, limit, preferOrdered)
+			preferOrdered = !preferOrdered
+			paused = isPaused
+			if err != nil {
+				r.log.Error("relay claim failed", "error", err, "relay_instance", r.cfg.InstanceID)
+			}
+			if len(events) > 0 {
+				active += r.dispatch(workCtx, events, completed)
+				continue
+			}
 		}
-		wg.Wait()
+
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		wait := interval
+		if paused {
+			wait = min(wait, r.cfg.ControlInterval)
+		}
+		timer.Reset(wait)
+
+		select {
+		case <-claimCtx.Done():
+		case <-completed:
+			active--
+		case <-r.wake:
+			drain(r.wake)
+		case <-timer.C:
+		}
 	}
-	return nil
+}
+
+// claimAvailable claims no more than free worker capacity. Alternating which
+// class is considered first prevents an always-ready class from permanently
+// consuming every newly-free slot while keeping ordered delivery fences in the
+// storage layer unchanged.
+func (r *Relay) claimAvailable(ctx context.Context, limit int, preferOrdered bool) ([]Event, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	if pauseState, ok := r.store.(PauseState); ok {
+		paused, err := pauseState.RelayPaused(ctx)
+		if err != nil {
+			r.metrics.IncControlFailure()
+			return nil, false, fmt.Errorf("read relay pause state: %w", err)
+		}
+		r.metrics.SetRelayPaused(paused)
+		if paused {
+			return nil, true, nil
+		}
+	}
+
+	claimOrdered := func(remaining int) ([]Event, error) {
+		store, ok := r.store.(OrderedDeliveryStore)
+		if !ok || remaining == 0 {
+			return nil, nil
+		}
+		return store.ClaimOrdered(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration,
+			r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin)
+	}
+	claimUnordered := func(remaining int) ([]Event, error) {
+		if remaining == 0 {
+			return nil, nil
+		}
+		return r.store.Claim(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration)
+	}
+
+	first, second := claimOrdered, claimUnordered
+	if !preferOrdered {
+		first, second = claimUnordered, claimOrdered
+	}
+	events, err := first(limit)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) == limit {
+		return events, false, nil
+	}
+	more, err := second(limit - len(events))
+	if err != nil {
+		return events, false, err
+	}
+	return append(events, more...), false, nil
+}
+
+func (r *Relay) dispatch(ctx context.Context, events []Event, completed chan<- struct{}) int {
+	for _, event := range events {
+		event := event
+		go func() {
+			r.handle(ctx, event)
+			completed <- struct{}{}
+		}()
+	}
+	return len(events)
 }
 
 func (r *Relay) handle(ctx context.Context, ev Event) {
