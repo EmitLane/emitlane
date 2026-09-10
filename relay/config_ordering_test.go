@@ -15,3 +15,12 @@ func TestConfigValidateOrderingTiming(t *testing.T) {
 		t.Fatal("expected ordering rebalance timing error")
 	}
 }
+
+func TestConfigValidateIdleBackoff(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.IdleBackoffMax = cfg.PollInterval - 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected idle backoff validation error")
+	}
+}

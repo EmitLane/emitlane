@@ -49,6 +49,13 @@ type Metrics struct {
 	consumerRebalances   *prometheus.CounterVec
 	consumerPaused       *prometheus.GaugeVec
 	consumerLag          *prometheus.GaugeVec
+	relayWorkersActive   prometheus.Gauge
+	relayWorkersCapacity prometheus.Gauge
+	relaySaturation      prometheus.Gauge
+	relayClaimSize       prometheus.Histogram
+	relayClaimDuration   prometheus.Histogram
+	relayBackpressure    *prometheus.CounterVec
+	relayWakeups         *prometheus.CounterVec
 }
 
 // NewMetrics registers instruments with reg. Labels are bounded enums or
@@ -211,6 +218,27 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "consumer_lag_records", Help: "Managed consumer lag by configured consumer and topic.",
 		}, []string{"consumer", "topic"}),
+		relayWorkersActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "relay_active_workers", Help: "Relay publishes currently executing.",
+		}),
+		relayWorkersCapacity: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "relay_worker_capacity", Help: "Configured maximum concurrent Relay publishes.",
+		}),
+		relaySaturation: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "relay_worker_saturation_ratio", Help: "Active Relay publishes divided by configured capacity.",
+		}),
+		relayClaimSize: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace, Name: "relay_claim_size", Help: "Events returned by one bounded Relay claim.", Buckets: []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256},
+		}),
+		relayClaimDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: namespace, Name: "relay_claim_duration_seconds", Help: "Duration of one bounded Relay claim operation.", Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}),
+		relayBackpressure: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "relay_backpressure_total", Help: "Relay entries into bounded backpressure states.",
+		}, []string{"reason"}),
+		relayWakeups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "relay_wakeups_total", Help: "Coalesced Relay wake-ups by bounded source.",
+		}, []string{"source"}),
 	}
 	// CounterVec collectors are otherwise absent from exposition until their
 	// first observation. Initialize the complete, bounded label set so operators
@@ -223,6 +251,12 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	}
 	for _, operation := range []string{"register", "heartbeat", "stop"} {
 		m.presenceFailures.WithLabelValues(operation)
+	}
+	for _, reason := range []string{"workers_saturated", "database_slow", "broker_slow", "paused", "ordered_ownership", "shutdown"} {
+		m.relayBackpressure.WithLabelValues(reason)
+	}
+	for _, source := range []string{"notification", "poll"} {
+		m.relayWakeups.WithLabelValues(source)
 	}
 	for _, operation := range []string{"begin_attempt", "retry", "dead", "delivered"} {
 		m.orderingFenced.WithLabelValues(operation)
@@ -275,6 +309,13 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		m.consumerRebalances,
 		m.consumerPaused,
 		m.consumerLag,
+		m.relayWorkersActive,
+		m.relayWorkersCapacity,
+		m.relaySaturation,
+		m.relayClaimSize,
+		m.relayClaimDuration,
+		m.relayBackpressure,
+		m.relayWakeups,
 	}
 	registered := make([]prometheus.Collector, 0, len(collectors))
 	for _, c := range collectors {
@@ -287,6 +328,41 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		registered = append(registered, c)
 	}
 	return m, nil
+}
+
+func (m *Metrics) SetRelayCapacity(active, capacity int) {
+	if m == nil {
+		return
+	}
+	active = max(0, active)
+	capacity = max(0, capacity)
+	m.relayWorkersActive.Set(float64(active))
+	m.relayWorkersCapacity.Set(float64(capacity))
+	if capacity == 0 {
+		m.relaySaturation.Set(0)
+		return
+	}
+	m.relaySaturation.Set(float64(active) / float64(capacity))
+}
+
+func (m *Metrics) ObserveRelayClaim(size int, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.relayClaimSize.Observe(float64(max(0, size)))
+	m.relayClaimDuration.Observe(max(0, seconds))
+}
+
+func (m *Metrics) RecordRelayBackpressure(reason string) {
+	if m != nil && oneOf(reason, "workers_saturated", "database_slow", "broker_slow", "paused", "ordered_ownership", "shutdown") {
+		m.relayBackpressure.WithLabelValues(reason).Inc()
+	}
+}
+
+func (m *Metrics) IncRelayWakeup(source string) {
+	if m != nil && oneOf(source, "notification", "poll") {
+		m.relayWakeups.WithLabelValues(source).Inc()
+	}
 }
 
 func (m *Metrics) ObserveConsumerRecord(consumer, result string, seconds float64) {

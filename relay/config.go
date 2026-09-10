@@ -8,10 +8,11 @@ import (
 
 // Config controls claim, concurrency, polling, leases and retry.
 type Config struct {
-	BatchSize     int
-	Concurrency   int
-	PollInterval  time.Duration
-	LeaseDuration time.Duration
+	BatchSize      int
+	Concurrency    int
+	PollInterval   time.Duration
+	IdleBackoffMax time.Duration
+	LeaseDuration  time.Duration
 
 	MaxAttempts int
 	BaseDelay   time.Duration
@@ -40,6 +41,7 @@ func DefaultConfig() Config {
 		BatchSize:                 100,
 		Concurrency:               4,
 		PollInterval:              5 * time.Second,
+		IdleBackoffMax:            5 * time.Second,
 		LeaseDuration:             30 * time.Second,
 		MaxAttempts:               10,
 		BaseDelay:                 time.Second,
@@ -69,6 +71,12 @@ func (c Config) Validate() error {
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("relay: poll interval must be > 0")
+	}
+	if c.IdleBackoffMax <= 0 {
+		return fmt.Errorf("relay: idle backoff max must be > 0")
+	}
+	if c.IdleBackoffMax < c.PollInterval {
+		return fmt.Errorf("relay: idle backoff max must be >= poll interval")
 	}
 	if c.LeaseDuration <= 0 {
 		return fmt.Errorf("relay: lease duration must be > 0")

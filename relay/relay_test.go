@@ -371,6 +371,7 @@ func TestRunRefillsFreeSlotsWithoutWaitingForSlowPublish(t *testing.T) {
 		cfg.BatchSize = 100
 		cfg.Concurrency = 4
 		cfg.PollInterval = time.Hour
+		cfg.IdleBackoffMax = time.Hour
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

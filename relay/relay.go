@@ -95,6 +95,9 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 	if cfg.ControlInterval == 0 {
 		cfg.ControlInterval = defaults.ControlInterval
 	}
+	if cfg.IdleBackoffMax == 0 {
+		cfg.IdleBackoffMax = defaults.IdleBackoffMax
+	}
 	if cfg.HeartbeatInterval == 0 {
 		cfg.HeartbeatInterval = defaults.HeartbeatInterval
 	}
@@ -246,6 +249,20 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 	active := 0
 	preferOrdered := true
 	paused := false
+	idleWait := r.cfg.PollInterval
+	backpressure := ""
+	setCapacity := func() {
+		r.metrics.SetRelayCapacity(active, r.cfg.Concurrency)
+	}
+	setBackpressure := func(reason string) {
+		if reason != backpressure {
+			if reason != "" {
+				r.metrics.RecordRelayBackpressure(reason)
+			}
+			backpressure = reason
+		}
+	}
+	setCapacity()
 
 	interval := r.cfg.PollInterval
 	if _, ok := r.store.(PauseState); ok {
@@ -256,31 +273,48 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 
 	for {
 		if claimCtx.Err() != nil {
+			setBackpressure("shutdown")
 			if active == 0 {
 				return
 			}
 			select {
 			case <-completed:
 				active--
-			case <-workCtx.Done():
-				// Every worker observes workCtx cancellation. Continue waiting for
-				// their completion so Run never leaves a publish goroutine behind.
+				setCapacity()
 			}
 			continue
 		}
 
 		if active < r.cfg.Concurrency {
 			limit := min(r.cfg.BatchSize, r.cfg.Concurrency-active)
+			claimStarted := r.clock.Now()
 			events, isPaused, err := r.claimAvailable(claimCtx, limit, preferOrdered)
+			r.metrics.ObserveRelayClaim(len(events), nonNegativeSeconds(r.clock.Now().Sub(claimStarted)))
 			preferOrdered = !preferOrdered
 			paused = isPaused
 			if err != nil {
 				r.log.Error("relay claim failed", "error", err, "relay_instance", r.cfg.InstanceID)
+				setBackpressure("database_slow")
 			}
 			if len(events) > 0 {
 				active += r.dispatch(workCtx, events, completed)
+				idleWait = r.cfg.PollInterval
+				setBackpressure("")
+				setCapacity()
 				continue
 			}
+			if paused {
+				setBackpressure("paused")
+			} else if active >= r.cfg.Concurrency {
+				setBackpressure("workers_saturated")
+			} else if err == nil {
+				setBackpressure("")
+				if active == 0 {
+					idleWait = minDuration(r.cfg.IdleBackoffMax, idleWait*2)
+				}
+			}
+		} else {
+			setBackpressure("workers_saturated")
 		}
 
 		if !timer.Stop() {
@@ -290,6 +324,9 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 			}
 		}
 		wait := interval
+		if active == 0 && !paused {
+			wait = idleWait
+		}
 		if paused {
 			wait = min(wait, r.cfg.ControlInterval)
 		}
@@ -299,11 +336,23 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 		case <-claimCtx.Done():
 		case <-completed:
 			active--
+			idleWait = r.cfg.PollInterval
+			setCapacity()
 		case <-r.wake:
 			drain(r.wake)
+			idleWait = r.cfg.PollInterval
+			r.metrics.IncRelayWakeup("notification")
 		case <-timer.C:
+			r.metrics.IncRelayWakeup("poll")
 		}
 	}
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 // claimAvailable claims no more than free worker capacity. Alternating which
