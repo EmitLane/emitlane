@@ -250,6 +250,7 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 	preferOrdered := true
 	paused := false
 	idleWait := r.cfg.PollInterval
+	orderedProbeAt := time.Time{}
 	backpressure := ""
 	setCapacity := func() {
 		r.metrics.SetRelayCapacity(active, r.cfg.Concurrency)
@@ -284,13 +285,26 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 			}
 			continue
 		}
+		for {
+			select {
+			case <-completed:
+				active--
+				setCapacity()
+			default:
+				goto completionsDrained
+			}
+		}
+	completionsDrained:
 
 		if active < r.cfg.Concurrency {
 			limit := min(r.cfg.BatchSize, r.cfg.Concurrency-active)
 			claimStarted := r.clock.Now()
-			events, isPaused, err := r.claimAvailable(claimCtx, limit, preferOrdered)
+			events, isPaused, orderedEmpty, err := r.claimAvailable(claimCtx, limit, preferOrdered, !r.clock.Now().Before(orderedProbeAt))
 			r.metrics.ObserveRelayClaim(len(events), nonNegativeSeconds(r.clock.Now().Sub(claimStarted)))
 			preferOrdered = !preferOrdered
+			if orderedEmpty {
+				orderedProbeAt = r.clock.Now().Add(r.cfg.PollInterval)
+			}
 			paused = isPaused
 			if err != nil {
 				r.log.Error("relay claim failed", "error", err, "relay_instance", r.cfg.InstanceID)
@@ -341,6 +355,7 @@ func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
 		case <-r.wake:
 			drain(r.wake)
 			idleWait = r.cfg.PollInterval
+			orderedProbeAt = time.Time{}
 			r.metrics.IncRelayWakeup("notification")
 		case <-timer.C:
 			r.metrics.IncRelayWakeup("poll")
@@ -359,29 +374,34 @@ func minDuration(left, right time.Duration) time.Duration {
 // class is considered first prevents an always-ready class from permanently
 // consuming every newly-free slot while keeping ordered delivery fences in the
 // storage layer unchanged.
-func (r *Relay) claimAvailable(ctx context.Context, limit int, preferOrdered bool) ([]Event, bool, error) {
+func (r *Relay) claimAvailable(ctx context.Context, limit int, preferOrdered, probeOrdered bool) ([]Event, bool, bool, error) {
 	if limit <= 0 {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if pauseState, ok := r.store.(PauseState); ok {
 		paused, err := pauseState.RelayPaused(ctx)
 		if err != nil {
 			r.metrics.IncControlFailure()
-			return nil, false, fmt.Errorf("read relay pause state: %w", err)
+			return nil, false, false, fmt.Errorf("read relay pause state: %w", err)
 		}
 		r.metrics.SetRelayPaused(paused)
 		if paused {
-			return nil, true, nil
+			return nil, true, false, nil
 		}
 	}
 
+	orderedProbed := false
+	orderedEvents := 0
 	claimOrdered := func(remaining int) ([]Event, error) {
 		store, ok := r.store.(OrderedDeliveryStore)
-		if !ok || remaining == 0 {
+		if !ok || remaining == 0 || !probeOrdered {
 			return nil, nil
 		}
-		return store.ClaimOrdered(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration,
+		orderedProbed = true
+		events, err := store.ClaimOrdered(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration,
 			r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin)
+		orderedEvents += len(events)
+		return events, err
 	}
 	claimUnordered := func(remaining int) ([]Event, error) {
 		if remaining == 0 {
@@ -391,21 +411,21 @@ func (r *Relay) claimAvailable(ctx context.Context, limit int, preferOrdered boo
 	}
 
 	first, second := claimOrdered, claimUnordered
-	if !preferOrdered {
+	if !preferOrdered || !probeOrdered {
 		first, second = claimUnordered, claimOrdered
 	}
 	events, err := first(limit)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if len(events) == limit {
-		return events, false, nil
+		return events, false, orderedProbed && orderedEvents == 0, nil
 	}
 	more, err := second(limit - len(events))
 	if err != nil {
-		return events, false, err
+		return events, false, orderedProbed && orderedEvents == 0, err
 	}
-	return append(events, more...), false, nil
+	return append(events, more...), false, orderedProbed && orderedEvents == 0, nil
 }
 
 func (r *Relay) dispatch(ctx context.Context, events []Event, completed chan<- struct{}) int {
