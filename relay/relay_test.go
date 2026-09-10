@@ -195,7 +195,7 @@ func (p *trackingPublisher) finish() {
 
 func (p *trackingPublisher) Close() error { return nil }
 
-func testRelay(t *testing.T, store Store, pub broker.Publisher, mutate func(*Config), opts ...Option) *Relay {
+func testRelay(t testing.TB, store Store, pub broker.Publisher, mutate func(*Config), opts ...Option) *Relay {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.InstanceID = "relay-test"
