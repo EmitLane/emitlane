@@ -50,11 +50,11 @@ write cost and migration coverage.
 
 ## Candidate observations
 
-The v0.6 implementation candidate at `13bd2f1739bd7e76789e3613d28b4c2c18811d91`
+The v0.6 implementation candidate at `c52ed1b0f4378bfc431a53ec217efd3fe3bc5dad`
 was measured after a clean PostgreSQL/Kafka reset on the same host and settings.
-Three 5,000-event backlog-drain runs measured 1,447.29, 1,584.54 and 1,447.34
-events/s (mean 1,493.06): +13.8% over the v0.5.0 mean. p95 changed from
-6,089.99 ms to 6,079.67 ms. This misses the 20% engineering target, so this
+Three 5,000-event backlog-drain runs measured 1,535.99, 1,327.99 and 1,426.76
+events/s (mean 1,430.25): +9.0% over the v0.5.0 mean. p95 changed from
+6,089.99 ms to 5,994.78 ms. This misses the 20% engineering target, so this
 document does not claim it was met.
 
 One candidate run each at 1/2/4 Relays measured 1,814.36/1,535.34/1,710.82
