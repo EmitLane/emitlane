@@ -215,3 +215,10 @@ Consumer spans extract W3C `traceparent` and `tracestate`, then propagate the
 resulting context through the handler transaction and any Outbox enqueue.
 Malformed trace context never changes processing correctness. Payloads,
 credentials, and lease tokens are not logged.
+
+v0.6 additionally exposes configured and active worker capacity, one-record
+poll sizes, and bounded consumer-backpressure reasons. This is observability
+only: Runtime, Source, SourceFactory, Handler, Inbox fencing, same-partition
+serial processing, and commit-after-durable-processing semantics are unchanged.
+The v0.5 baseline profile did not isolate a material group-member coordination
+bottleneck, so v0.6 deliberately does not alter group membership architecture.

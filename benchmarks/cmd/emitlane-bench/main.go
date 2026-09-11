@@ -9,15 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/emitlane/emitlane/broker"
@@ -35,42 +38,53 @@ type options struct {
 	duration    time.Duration
 	output      string
 	payloadSize int
+	seed        uint64
 }
 
 type result struct {
-	Scenario          string         `json:"scenario"`
-	StartedAt         time.Time      `json:"started_at"`
-	GoVersion         string         `json:"go_version"`
-	OS                string         `json:"os"`
-	Arch              string         `json:"arch"`
-	Events            int            `json:"events"`
-	RelayInstances    int            `json:"relay_instances"`
-	DurationSeconds   float64        `json:"duration_seconds"`
-	EventsPerSecond   float64        `json:"events_per_second,omitempty"`
-	LatencyP50Millis  float64        `json:"latency_p50_ms,omitempty"`
-	LatencyP95Millis  float64        `json:"latency_p95_ms,omitempty"`
-	LatencyP99Millis  float64        `json:"latency_p99_ms,omitempty"`
-	LatencyP999Millis float64        `json:"latency_p999_ms,omitempty"`
-	Configuration     map[string]any `json:"configuration"`
-	AdditionalResults map[string]any `json:"additional_results,omitempty"`
-	EmitLaneVersion   string         `json:"emitlane_version"`
-	EmitLaneCommit    string         `json:"emitlane_commit"`
-	CPUCount          int            `json:"cpu_count"`
-	MemoryBytes       uint64         `json:"memory_bytes"`
-	PostgreSQL        map[string]any `json:"postgresql"`
-	Kafka             map[string]any `json:"kafka"`
-	PayloadSize       int            `json:"payload_size"`
+	Scenario             string         `json:"scenario"`
+	StartedAt            time.Time      `json:"started_at"`
+	GoVersion            string         `json:"go_version"`
+	OS                   string         `json:"os"`
+	Arch                 string         `json:"arch"`
+	Events               int            `json:"events"`
+	RelayInstances       int            `json:"relay_instances"`
+	DurationSeconds      float64        `json:"duration_seconds"`
+	EventsPerSecond      float64        `json:"events_per_second,omitempty"`
+	LatencyP50Millis     float64        `json:"latency_p50_ms,omitempty"`
+	LatencyP95Millis     float64        `json:"latency_p95_ms,omitempty"`
+	LatencyP99Millis     float64        `json:"latency_p99_ms,omitempty"`
+	LatencyP999Millis    float64        `json:"latency_p999_ms,omitempty"`
+	Configuration        map[string]any `json:"configuration"`
+	AdditionalResults    map[string]any `json:"additional_results,omitempty"`
+	EmitLaneVersion      string         `json:"emitlane_version"`
+	EmitLaneCommit       string         `json:"emitlane_commit"`
+	GitDirty             bool           `json:"git_dirty"`
+	Seed                 uint64         `json:"seed"`
+	ValidReleaseEvidence bool           `json:"valid_release_evidence"`
+	CPUCount             int            `json:"cpu_count"`
+	MemoryBytes          uint64         `json:"memory_bytes"`
+	PostgreSQL           map[string]any `json:"postgresql"`
+	Kafka                map[string]any `json:"kafka"`
+	PayloadSize          int            `json:"payload_size"`
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "compare" {
+		if err := runCompare(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	var opts options
-	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, ack-crash, ordered-many-streams, ordered-hot-stream, or unordered-regression")
+	flag.StringVar(&opts.scenario, "scenario", "steady-state", "enqueue-overhead, steady-state, backlog-drain, horizontal-scaling, idle-overhead, failure-recovery, ack-crash, ordered-many-streams, ordered-hot-stream, unordered-regression, mixed-ordered-unordered, or large-backlog")
 	flag.IntVar(&opts.events, "events", 1000, "number of events")
 	flag.IntVar(&opts.streams, "streams", 1000, "ordered streams for ordered-many-streams")
 	flag.IntVar(&opts.relays, "relays", 2, "relay instances for horizontal scaling")
 	flag.DurationVar(&opts.duration, "duration", 3*time.Second, "idle or failure duration")
 	flag.StringVar(&opts.output, "output", "", "optional JSON output file")
 	flag.IntVar(&opts.payloadSize, "payload-size", 1024, "payload size in bytes")
+	flag.Uint64Var(&opts.seed, "seed", 1, "recorded benchmark workload seed")
 	flag.Parse()
 	if opts.events < 1 || opts.streams < 1 || opts.relays < 1 || opts.duration <= 0 || opts.payloadSize < 1 {
 		fatal(errors.New("events, streams, relays, duration and payload-size must be positive"))
@@ -119,6 +133,11 @@ func run(opts options) error {
 
 	started := time.Now().UTC()
 	buildVersion, buildCommit := buildIdentity()
+	resDirty := true
+	if commit, dirty := gitProvenance(); commit != "none" {
+		buildCommit = commit
+		resDirty = dirty
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	pgMetadata, err := postgresMetadata(ctx, pool)
@@ -130,13 +149,16 @@ func run(opts options) error {
 		Events: opts.events, RelayInstances: 1,
 		Configuration: map[string]any{
 			"database": redactDatabase(databaseURL), "requested_duration": opts.duration.String(),
-			"batch_size": 200, "concurrency": 16, "poll_interval": "100ms", "lease_duration": "3s", "warmup_duration": "0s",
+			"batch_size": 200, "concurrency": 16, "poll_interval": "100ms", "lease_duration": "3s", "publish_timeout": "2s", "warmup_duration": "0s",
 		},
-		EmitLaneVersion: buildVersion,
-		EmitLaneCommit:  buildCommit,
-		CPUCount:        runtime.NumCPU(),
-		MemoryBytes:     memory.Sys,
-		PostgreSQL:      pgMetadata,
+		EmitLaneVersion:      buildVersion,
+		EmitLaneCommit:       buildCommit,
+		GitDirty:             resDirty,
+		Seed:                 opts.seed,
+		ValidReleaseEvidence: buildCommit != "none" && !resDirty,
+		CPUCount:             runtime.NumCPU(),
+		MemoryBytes:          memory.Sys,
+		PostgreSQL:           pgMetadata,
 		Kafka: map[string]any{
 			"version":      envOr("EMITLANE_BENCH_KAFKA_VERSION", "unknown"),
 			"broker_count": len(brokers), "required_acks": "all",
@@ -187,6 +209,18 @@ func run(opts options) error {
 			res.AdditionalResults["ordering_stream_operations_per_event"] = 0
 			res.AdditionalResults["comparison_note"] = "compare with a v0.2.0 run using identical environment metadata"
 		}
+	case "mixed-ordered-unordered":
+		res.RelayInstances = opts.relays
+		streamCount := min(opts.streams, max(1, opts.events/2))
+		res.Configuration["ordered_streams"] = streamCount
+		res.Configuration["virtual_partitions"] = 64
+		elapsed, res.AdditionalResults, err = benchmarkMixedDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, streamCount)
+	case "large-backlog":
+		res.RelayInstances = opts.relays
+		elapsed, res.AdditionalResults, err = benchmarkDelivery(ctx, pool, store, brokers, opts.events, payload, opts.relays, true)
+		if err == nil {
+			res.AdditionalResults["resources"] = resourceSnapshot(pool)
+		}
 	default:
 		return fmt.Errorf("unknown scenario %q", opts.scenario)
 	}
@@ -209,6 +243,102 @@ func run(opts options) error {
 	return outputResult(res, opts.output)
 }
 
+func benchmarkMixedDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.Store, brokers []string, count int, payload []byte, relayCount, streamCount int) (time.Duration, map[string]any, error) {
+	publisher, err := newPublisher(brokers)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer publisher.Close()
+	destination := "benchmark-mixed-" + uuid.NewString()
+	unorderedCount := count / 2
+	orderedCount := count - unorderedCount
+	unorderedIDs, err := enqueue(ctx, pool, destination, unorderedCount, payload)
+	if err != nil {
+		return 0, nil, err
+	}
+	orderedIDs, err := enqueueOrdered(ctx, pool, destination, orderedCount, streamCount, payload)
+	if err != nil {
+		return 0, nil, err
+	}
+	committedIDs := append(unorderedIDs, orderedIDs...)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make([]<-chan error, 0, relayCount)
+	for i := 0; i < relayCount; i++ {
+		rly, err := newOrderedRelay(store, publisher, fmt.Sprintf("benchmark-mixed-%d", i))
+		if err != nil {
+			cancel()
+			return 0, nil, err
+		}
+		done = append(done, startRelay(runCtx, rly))
+	}
+	defer stopRelays(cancel, done)
+	started := time.Now()
+	if err := waitDelivered(ctx, pool, destination, count); err != nil {
+		return 0, nil, err
+	}
+	elapsed := time.Since(started)
+	audited, err := observeRecords(ctx, brokers, destination, committedIDs, orderedAuditExpectations(orderedIDs, streamCount))
+	if err != nil {
+		return 0, nil, err
+	}
+	latencies, err := deliveryLatencies(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	states, err := finalStates(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	var regressions int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.ordering_streams WHERE destination=$1 AND next_sequence <= start_sequence`, destination).Scan(&regressions); err != nil {
+		return 0, nil, err
+	}
+	return elapsed, mergeResults(map[string]any{
+		"latencies_ms": latencies, "committed_events": count,
+		"unordered_events": unorderedCount, "ordered_events": orderedCount,
+		"ordering_regressions": regressions, "final_states": states, "resources": resourceSnapshot(pool),
+	}, auditResults(audited)), nil
+}
+
+func resourceSnapshot(pool *pgxpool.Pool) map[string]any {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	stat := pool.Stat()
+	return map[string]any{
+		"heap_alloc_bytes": memory.HeapAlloc,
+		"heap_inuse_bytes": memory.HeapInuse,
+		"goroutines":       runtime.NumGoroutine(),
+		"db_pool_acquired": stat.AcquiredConns(),
+		"db_pool_total":    stat.TotalConns(),
+		"db_pool_max":      stat.MaxConns(),
+	}
+}
+
+func finalStates(ctx context.Context, pool *pgxpool.Pool, destination string) (map[string]int64, error) {
+	query := `SELECT status, COUNT(*) FROM emitlane.outbox_events`
+	args := []any(nil)
+	if destination != "" {
+		query += ` WHERE destination=$1`
+		args = append(args, destination)
+	}
+	query += ` GROUP BY status`
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[string]int64{"pending": 0, "inflight": 0, "delivered": 0, "dead": 0}
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		states[status] = count
+	}
+	return states, rows.Err()
+}
+
 func benchmarkOrderedDelivery(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -229,7 +359,8 @@ func benchmarkOrderedDelivery(
 	if err != nil {
 		return 0, nil, err
 	}
-	if _, err := enqueueOrdered(ctx, pool, destination, count, streamCount, payload); err != nil {
+	committedIDs, err := enqueueOrdered(ctx, pool, destination, count, streamCount, payload)
+	if err != nil {
 		return 0, nil, err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -248,6 +379,10 @@ func benchmarkOrderedDelivery(
 		return 0, nil, err
 	}
 	elapsed := time.Since(start)
+	audited, err := observeRecords(ctx, brokers, destination, committedIDs, orderedAuditExpectations(committedIDs, streamCount))
+	if err != nil {
+		return 0, nil, err
+	}
 	latencies, err := deliveryLatencies(ctx, pool, destination)
 	if err != nil {
 		return 0, nil, err
@@ -260,12 +395,11 @@ func benchmarkOrderedDelivery(
 	if err != nil {
 		return 0, nil, err
 	}
-	return elapsed, map[string]any{
+	return elapsed, mergeResults(map[string]any{
 		"latencies_ms": latencies, "committed_events": count,
-		"delivered_unique_events": count, "lost_events": 0,
 		"ordered_streams": streamCount, "partition_distribution": distribution,
 		"database_transactions": max(int64(0), afterTransactions-beforeTransactions-1),
-	}, nil
+	}, auditResults(audited)), nil
 }
 
 func benchmarkEnqueue(ctx context.Context, pool *pgxpool.Pool, count int, payload []byte) (time.Duration, map[string]any, error) {
@@ -338,8 +472,10 @@ func benchmarkDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.
 	}
 	defer publisher.Close()
 	destination := "benchmark-delivery-" + uuid.NewString()
+	var committedIDs []string
 	if backlog {
-		if _, err := enqueue(ctx, pool, destination, count, payload); err != nil {
+		committedIDs, err = enqueue(ctx, pool, destination, count, payload)
+		if err != nil {
 			return 0, nil, err
 		}
 	}
@@ -356,7 +492,8 @@ func benchmarkDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.
 	defer stopRelays(cancel, done)
 	start := time.Now()
 	if !backlog {
-		if _, err := enqueue(ctx, pool, destination, count, payload); err != nil {
+		committedIDs, err = enqueue(ctx, pool, destination, count, payload)
+		if err != nil {
 			return 0, nil, err
 		}
 	}
@@ -364,14 +501,22 @@ func benchmarkDelivery(ctx context.Context, pool *pgxpool.Pool, store *postgres.
 		return 0, nil, err
 	}
 	elapsed := time.Since(start)
+	audited, err := observeRecords(ctx, brokers, destination, committedIDs, nil)
+	if err != nil {
+		return 0, nil, err
+	}
 	latencies, err := deliveryLatencies(ctx, pool, destination)
 	if err != nil {
 		return 0, nil, err
 	}
-	return elapsed, map[string]any{
+	states, err := finalStates(ctx, pool, destination)
+	if err != nil {
+		return 0, nil, err
+	}
+	return elapsed, mergeResults(map[string]any{
 		"latencies_ms": latencies, "committed_events": count,
-		"delivered_unique_events": count, "lost_events": 0,
-	}, nil
+		"final_states": states,
+	}, auditResults(audited)), nil
 }
 
 func benchmarkIdle(ctx context.Context, pool *pgxpool.Pool, store *postgres.Store, duration time.Duration) (time.Duration, map[string]any, error) {
@@ -465,18 +610,16 @@ func benchmarkFailureRecovery(ctx context.Context, pool *pgxpool.Pool, store *po
 	if err := waitDelivered(ctx, pool, destination, count); err != nil {
 		return 0, nil, err
 	}
-	observed, err := observeRecords(ctx, brokers, destination, committedIDs, count)
+	recoveryElapsed := time.Since(start)
+	observed, err := observeRecords(ctx, brokers, destination, committedIDs, nil)
 	if err != nil {
 		return 0, nil, err
 	}
-	recoveryElapsed := time.Since(start)
-	return recoveryElapsed, map[string]any{
+	return recoveryElapsed, mergeResults(map[string]any{
 		"crash_cycles": crashCycles, "restart_delay_seconds": restartDelay.Seconds(),
 		"failure_phase_seconds": failurePhase.Seconds(), "recovery_time_ms": float64(recoveryElapsed.Microseconds()) / 1000,
-		"committed_events": count, "delivered_unique_events": observed.unique,
-		"total_broker_records": observed.total, "duplicate_records": observed.total - observed.unique,
-		"lost_events": count - observed.unique,
-	}, nil
+		"committed_events": count,
+	}, auditResults(observed)), nil
 }
 
 func benchmarkAckCrash(ctx context.Context, pool *pgxpool.Pool, store *postgres.Store, brokers []string, count int, payload []byte) (time.Duration, map[string]any, error) {
@@ -508,16 +651,15 @@ func benchmarkAckCrash(ctx context.Context, pool *pgxpool.Pool, store *postgres.
 	if err := waitDelivered(ctx, pool, destination, count); err != nil {
 		return 0, nil, err
 	}
-	observed, err := observeRecords(ctx, brokers, destination, committedIDs, count*2)
+	elapsed := time.Since(start)
+	observed, err := observeRecords(ctx, brokers, destination, committedIDs, nil)
 	if err != nil {
 		return 0, nil, err
 	}
-	return time.Since(start), map[string]any{
+	return elapsed, mergeResults(map[string]any{
 		"ack_crash_windows_injected": min(int(injected.Load()), count), "duplicates_expected": true,
-		"committed_events": count, "delivered_unique_events": observed.unique,
-		"total_broker_records": observed.total, "duplicate_records": observed.total - observed.unique,
-		"lost_events": count - observed.unique,
-	}, nil
+		"committed_events": count,
+	}, auditResults(observed)), nil
 }
 
 func newPublisher(brokers []string) (*kafka.Publisher, error) {
@@ -777,52 +919,159 @@ WHERE datname = current_database()`).Scan(&transactions)
 	return transactions, err
 }
 
-type observation struct {
-	total  int
-	unique int
+type auditExpectation struct {
+	OrderingKey string
+	Sequence    int64
 }
 
-func observeRecords(ctx context.Context, brokers []string, topic string, expectedIDs []string, minimumRecords int) (observation, error) {
+type observation struct {
+	total               int
+	unique              int
+	duplicates          int
+	lost                int
+	orderingRegressions int
+	duration            time.Duration
+}
+
+func orderedAuditExpectations(ids []string, streamCount int) map[string]auditExpectation {
+	expectations := make(map[string]auditExpectation, len(ids))
+	for index, id := range ids {
+		expectations[id] = auditExpectation{
+			OrderingKey: fmt.Sprintf("benchmark-stream-%d", index%streamCount),
+			Sequence:    int64(index/streamCount + 1),
+		}
+	}
+	return expectations
+}
+
+// observeRecords snapshots broker end offsets after the measured section and
+// directly reads every partition up to that immutable boundary. This avoids
+// consumer-group offset state and counts duplicates instead of assuming them
+// away. Ordered records are checked in Kafka partition order per ordering key;
+// duplicate sequence values are allowed, but a decreasing sequence or a key
+// spanning broker partitions is a regression.
+func observeRecords(ctx context.Context, brokers []string, topic string, expectedIDs []string, ordered map[string]auditExpectation) (observation, error) {
+	started := time.Now()
 	expected := make(map[string]struct{}, len(expectedIDs))
 	for _, id := range expectedIDs {
 		expected[id] = struct{}{}
 	}
+	observeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	metadata, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return observation{}, err
+	}
+	ends, err := kadm.NewClient(metadata).ListEndOffsets(observeCtx, topic)
+	metadata.Close()
+	if err != nil {
+		return observation{}, fmt.Errorf("read Kafka audit end offsets: %w", err)
+	}
+	partitions, ok := ends[topic]
+	if !ok {
+		return observation{}, fmt.Errorf("kafka audit topic %q has no partitions", topic)
+	}
+	starts := make(map[int32]kgo.Offset, len(partitions))
+	targets := make(map[int32]int64, len(partitions))
+	remainingPartitions := 0
+	for partition, end := range partitions {
+		if end.Err != nil {
+			return observation{}, fmt.Errorf("read Kafka audit end offset for partition %d: %w", partition, end.Err)
+		}
+		starts[partition] = kgo.NewOffset().AtStart()
+		targets[partition] = end.Offset
+		if end.Offset > 0 {
+			remainingPartitions++
+		}
+	}
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.ConsumerGroup("emitlane-benchmark-"+uuid.NewString()),
-		kgo.ConsumeTopics(topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: starts}),
 		kgo.FetchMaxWait(250*time.Millisecond),
 	)
 	if err != nil {
 		return observation{}, err
 	}
 	defer client.Close()
-	observeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	seen := make(map[string]struct{}, len(expected))
+	lastSequence := make(map[string]int64, len(ordered))
+	orderingPartitions := make(map[string]int32, len(ordered))
+	completedPartitions := make(map[int32]bool, len(partitions))
 	total := 0
-	for {
+	for remainingPartitions > 0 && observeCtx.Err() == nil {
 		fetches := client.PollFetches(observeCtx)
-		if errs := fetches.Errors(); len(errs) > 0 {
+		if errs := fetches.Errors(); len(errs) > 0 && observeCtx.Err() == nil {
 			return observation{}, fmt.Errorf("consume benchmark records: %v", errs[0])
 		}
-		for _, record := range fetches.Records() {
-			id := recordHeader(record, broker.HeaderEventID)
-			if _, ok := expected[id]; !ok {
-				continue
+		fetches.EachPartition(func(fetch kgo.FetchTopicPartition) {
+			if completedPartitions[fetch.Partition] {
+				return
 			}
-			total++
-			seen[id] = struct{}{}
-		}
-		if len(seen) == len(expected) && total >= minimumRecords {
-			return observation{total: total, unique: len(seen)}, nil
-		}
-		if err := observeCtx.Err(); err != nil {
-			return observation{}, fmt.Errorf("observe records: unique=%d/%d total=%d/%d: %w",
-				len(seen), len(expected), total, minimumRecords, err)
+			for _, record := range fetch.Records {
+				if record.Offset >= targets[fetch.Partition] {
+					continue
+				}
+				id := recordHeader(record, broker.HeaderEventID)
+				if _, ok := expected[id]; ok {
+					total++
+					seen[id] = struct{}{}
+					if expectation, orderedRecord := ordered[id]; orderedRecord {
+						key := recordHeader(record, broker.HeaderOrderingKey)
+						sequence, parseErr := strconv.ParseInt(recordHeader(record, broker.HeaderSequence), 10, 64)
+						if parseErr != nil || key != expectation.OrderingKey || sequence != expectation.Sequence {
+							err = fmt.Errorf("ordered broker audit mismatch for %s: key=%q sequence=%d", id, key, sequence)
+							return
+						}
+						if partition, exists := orderingPartitions[key]; exists && partition != fetch.Partition {
+							err = fmt.Errorf("ordered broker audit split ordering key %q across Kafka partitions %d and %d", key, partition, fetch.Partition)
+							return
+						}
+						orderingPartitions[key] = fetch.Partition
+						if prior, exists := lastSequence[key]; exists && sequence < prior {
+							err = fmt.Errorf("ordered broker sequence regression for %q: %d after %d", key, sequence, prior)
+							return
+						}
+						lastSequence[key] = sequence
+					}
+				}
+				if record.Offset+1 >= targets[fetch.Partition] {
+					completedPartitions[fetch.Partition] = true
+					remainingPartitions--
+				}
+			}
+		})
+		if err != nil {
+			return observation{}, err
 		}
 	}
+	if remainingPartitions != 0 {
+		return observation{}, fmt.Errorf("kafka audit timed out with %d partitions remaining: %w", remainingPartitions, observeCtx.Err())
+	}
+	if len(seen) != len(expected) {
+		return observation{}, fmt.Errorf("kafka audit missing event IDs: unique=%d/%d total=%d", len(seen), len(expected), total)
+	}
+	return observation{
+		total: total, unique: len(seen), duplicates: total - len(seen),
+		lost: len(expected) - len(seen), duration: time.Since(started),
+	}, nil
+}
+
+func auditResults(observed observation) map[string]any {
+	return map[string]any{
+		"delivered_unique_events":     observed.unique,
+		"total_broker_records":        observed.total,
+		"duplicate_records":           observed.duplicates,
+		"lost_events":                 observed.lost,
+		"broker_ordering_regressions": observed.orderingRegressions,
+		"audit_duration_seconds":      observed.duration.Seconds(),
+	}
+}
+
+func mergeResults(results map[string]any, additions map[string]any) map[string]any {
+	for key, value := range additions {
+		results[key] = value
+	}
+	return results
 }
 
 func recordHeader(record *kgo.Record, name string) string {
@@ -908,6 +1157,21 @@ func buildIdentity() (string, string) {
 		}
 	}
 	return version, commit
+}
+
+// gitProvenance intentionally prefers the checkout state over build settings:
+// a locally compiled benchmark must say when it is dirty rather than borrowing
+// a revision embedded by a previous build.
+func gitProvenance() (string, bool) {
+	commit, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "none", true
+	}
+	status, err := exec.Command("git", "status", "--porcelain", "--untracked-files=normal").Output()
+	if err != nil {
+		return strings.TrimSpace(string(commit)), true
+	}
+	return strings.TrimSpace(string(commit)), len(strings.TrimSpace(string(status))) > 0
 }
 
 func postgresMetadata(ctx context.Context, pool *pgxpool.Pool) (map[string]any, error) {

@@ -198,6 +198,17 @@ Do **not** market arbitrary throughput numbers until a reproducible benchmark ex
 
 ## LISTEN/NOTIFY benchmark question
 
+## v0.6 scale checks
+
+The scale harness preserves correctness gates alongside speed: committed and
+unique delivered counts, loss, final Outbox states, ordered regressions, and a
+working-set resource snapshot. `large-backlog` and `mixed-ordered-unordered`
+are manual/opt-in scenarios; they must not become mandatory PR throughput
+thresholds. Relay unit coverage includes continuous slot refill with one slow
+publisher, bounded active concurrency, shutdown drain, and allocation profiling.
+
+## LISTEN/NOTIFY benchmark question
+
 Measure idle systems with:
 
 1. pure polling;

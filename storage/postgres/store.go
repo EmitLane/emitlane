@@ -214,22 +214,49 @@ func (s *Store) Claim(ctx context.Context, owner string, limit int, lease time.D
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Keep pending and expired-lease scans separate. A single OR makes PostgreSQL
+	// bitmap both partial indexes and sort the whole eligible backlog before it can
+	// apply LIMIT. Each branch is already ordered by its partial index; taking up
+	// Up to limit candidates from each is sufficient to select the globally earliest
+	// rows after the small merge. Both branches retain SKIP LOCKED and the durable
+	// pause gate, so recovery and concurrent-claimer behavior are unchanged.
 	const sql = `
-WITH picked AS (
-    SELECT id
+WITH pending AS (
+    SELECT id, available_at, created_at
     FROM emitlane.outbox_events
     WHERE available_at <= NOW()
-	  AND ordering_key IS NULL
-	  AND EXISTS (
-	      SELECT 1 FROM emitlane.runtime_control
-	      WHERE singleton = TRUE AND paused = FALSE
-	  )
-      AND (
-            status = 'pending'
-         OR (status = 'inflight' AND lease_until IS NOT NULL AND lease_until <= NOW())
+      AND ordering_key IS NULL
+      AND status = 'pending'
+      AND EXISTS (
+          SELECT 1 FROM emitlane.runtime_control
+          WHERE singleton = TRUE AND paused = FALSE
       )
     ORDER BY available_at, created_at, id
     FOR UPDATE SKIP LOCKED
+    LIMIT $1
+), expired AS (
+    SELECT id, available_at, created_at
+    FROM emitlane.outbox_events
+    WHERE available_at <= NOW()
+      AND ordering_key IS NULL
+      AND status = 'inflight'
+      AND lease_until IS NOT NULL
+      AND lease_until <= NOW()
+      AND EXISTS (
+          SELECT 1 FROM emitlane.runtime_control
+          WHERE singleton = TRUE AND paused = FALSE
+      )
+    ORDER BY available_at, created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+), picked AS (
+    SELECT id
+    FROM (
+        SELECT id, available_at, created_at FROM pending
+        UNION ALL
+        SELECT id, available_at, created_at FROM expired
+    ) AS candidates
+    ORDER BY available_at, created_at, id
     LIMIT $1
 )
 UPDATE emitlane.outbox_events AS e

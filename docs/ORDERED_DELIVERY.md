@@ -269,3 +269,12 @@ external producers, ordering after an unbounded Kafka client violation, strict
 latency for a hot stream, or automatic deletion of stream state. Domain sequence
 validity and eventual resolution of missing/dead sequences remain application
 and operator responsibilities.
+
+## Capacity note
+
+Continuous Relay refill alternates ordered and unordered claim priority when
+both are available, while the authoritative ordered claim and final transition
+remain epoch-fenced in PostgreSQL. A single hot ordered stream is still serial
+by design; adding Relays cannot make its N+1 publish before durable N cursor
+advance. Empty ordered probes are coalesced until a bounded poll or notification
+so unordered backlogs do not create repeated empty claim work.

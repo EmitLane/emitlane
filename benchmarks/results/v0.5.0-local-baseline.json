@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "valid_release_evidence": true,
+  "baseline_tag": "v0.5.0",
+  "baseline_commit": "9da5040ba70290d40b15b341e87ebbfd0a221cc6",
+  "emitlane_commit": "9da5040ba70290d40b15b341e87ebbfd0a221cc6",
+  "git_dirty": false,
+  "machine": {
+    "os": "darwin",
+    "os_version": "macOS 26.5 (25F71)",
+    "arch": "arm64",
+    "go_version": "go1.27.0",
+    "cpu_count": 10,
+    "memory_bytes": 25769803776
+  },
+  "postgresql": {
+    "version": "16.15",
+    "fsync": "on",
+    "full_page_writes": "on",
+    "synchronous_commit": "on"
+  },
+  "kafka": {
+    "version": "4.3.1",
+    "broker_count": 1,
+    "required_acks": "all"
+  },
+  "payload_size": 1024,
+  "seed": 0,
+  "configuration": {
+    "batch_size": 200,
+    "concurrency": 16,
+    "poll_interval": "100ms",
+    "lease_duration": "3s",
+    "publish_timeout": "2s"
+  },
+  "warmup": {"scenario": "backlog-drain", "events": 500, "discarded": true},
+  "runs": [
+    {"scenario": "backlog-drain", "events": 5000, "relay_instances": 1, "duration_seconds": 3.306921, "events_per_second": 1511.980480, "latency_p50_ms": 4653.242, "latency_p95_ms": 5949.719, "latency_p99_ms": 6054.378, "committed_events": 5000, "delivered_unique_events": 5000, "lost_events": 0},
+    {"scenario": "backlog-drain", "events": 5000, "relay_instances": 1, "duration_seconds": 3.805063, "events_per_second": 1314.038820, "latency_p50_ms": 4923.198, "latency_p95_ms": 6115.140, "latency_p99_ms": 6172.359, "committed_events": 5000, "delivered_unique_events": 5000, "lost_events": 0},
+    {"scenario": "backlog-drain", "events": 5000, "relay_instances": 1, "duration_seconds": 4.504729, "events_per_second": 1109.944693, "latency_p50_ms": 5420.378, "latency_p95_ms": 6205.103, "latency_p99_ms": 6223.565, "committed_events": 5000, "delivered_unique_events": 5000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 1, "duration_seconds": 8.454782, "events_per_second": 354.828782, "latency_p50_ms": 11807.260, "latency_p95_ms": 14596.770, "latency_p99_ms": 14862.749, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 1, "duration_seconds": 2.753011, "events_per_second": 1089.715918, "latency_p50_ms": 3179.486, "latency_p95_ms": 4225.698, "latency_p99_ms": 4400.676, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 1, "duration_seconds": 3.303391, "events_per_second": 908.157605, "latency_p50_ms": 3604.656, "latency_p95_ms": 3923.437, "latency_p99_ms": 3933.010, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 2, "duration_seconds": 4.153398, "events_per_second": 722.300201, "latency_p50_ms": 4217.645, "latency_p95_ms": 4305.062, "latency_p99_ms": 4361.924, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 2, "duration_seconds": 2.706662, "events_per_second": 1108.376312, "latency_p50_ms": 2806.195, "latency_p95_ms": 4031.939, "latency_p99_ms": 4112.555, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 2, "duration_seconds": 30.162184, "events_per_second": 99.462295, "latency_p50_ms": 9089.579, "latency_p95_ms": 29849.824, "latency_p99_ms": 29975.297, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 4, "duration_seconds": 5.104477, "events_per_second": 587.719421, "latency_p50_ms": 4217.235, "latency_p95_ms": 4310.947, "latency_p99_ms": 8137.038, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 4, "duration_seconds": 1.954178, "events_per_second": 1535.172203, "latency_p50_ms": 2796.573, "latency_p95_ms": 3733.688, "latency_p99_ms": 3800.873, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0},
+    {"scenario": "horizontal-scaling", "events": 3000, "relay_instances": 4, "duration_seconds": 3.056064, "events_per_second": 981.654727, "latency_p50_ms": 2899.697, "latency_p95_ms": 3712.954, "latency_p99_ms": 3778.443, "committed_events": 3000, "delivered_unique_events": 3000, "lost_events": 0}
+  ]
+}

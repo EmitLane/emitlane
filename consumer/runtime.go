@@ -76,6 +76,8 @@ func New(config Config, pool *pgxpool.Pool, store inbox.Store, factory SourceFac
 func (r *Runtime) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	r.metrics.SetConsumerCapacity(r.config.Consumer, 0, r.config.Concurrency)
+	defer r.metrics.SetConsumerCapacity(r.config.Consumer, 0, r.config.Concurrency)
 	errCh := make(chan error, r.config.Concurrency)
 	var wg sync.WaitGroup
 	for index := range r.config.Concurrency {
@@ -92,6 +94,8 @@ func (r *Runtime) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			defer source.Close()
+			r.metrics.AddConsumerWorker(r.config.Consumer, 1)
+			defer r.metrics.AddConsumerWorker(r.config.Consumer, -1)
 			if err := worker.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				select {
 				case errCh <- err:
@@ -175,6 +179,7 @@ func (w *worker) run(ctx context.Context) error {
 			}
 			continue
 		}
+		w.runtime.metrics.ObserveConsumerPollBatch(w.runtime.config.Consumer, 1)
 
 		resolved, retryAt, permanent, reason := w.process(ctx, record)
 		if !resolved {
@@ -449,8 +454,22 @@ func (w *worker) block(partition TopicPartition, blocked blockedPartition) {
 	}
 	w.blocked[partition] = blocked
 	w.runtime.metrics.AddConsumerPaused(w.runtime.config.Consumer, blocked.reason, 1)
+	w.runtime.metrics.RecordConsumerBackpressure(w.runtime.config.Consumer, consumerBackpressureReason(blocked.reason))
 	if blocked.reason == "dead" {
 		w.runtime.metrics.AddConsumerDead(w.runtime.config.Consumer, 1)
+	}
+}
+
+func consumerBackpressureReason(reason string) string {
+	switch reason {
+	case "retry":
+		return "retry_wait"
+	case "dead", "protocol":
+		return "dead"
+	case "database", "offset_commit":
+		return "database_slow"
+	default:
+		return "workers_saturated"
 	}
 }
 

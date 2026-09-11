@@ -95,6 +95,9 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 	if cfg.ControlInterval == 0 {
 		cfg.ControlInterval = defaults.ControlInterval
 	}
+	if cfg.IdleBackoffMax == 0 {
+		cfg.IdleBackoffMax = defaults.IdleBackoffMax
+	}
 	if cfg.HeartbeatInterval == 0 {
 		cfg.HeartbeatInterval = defaults.HeartbeatInterval
 	}
@@ -214,13 +217,6 @@ func (r *Relay) Run(ctx context.Context) error {
 		go r.cleanupLoop(runCtx)
 	}
 
-	tickInterval := r.cfg.PollInterval
-	if _, ok := r.store.(PauseState); ok {
-		tickInterval = min(tickInterval, r.cfg.ControlInterval)
-	}
-	timer := time.NewTimer(tickInterval)
-	defer timer.Stop()
-
 	r.log.Info("relay started",
 		"relay_instance", r.cfg.InstanceID,
 		"batch_size", r.cfg.BatchSize,
@@ -229,27 +225,9 @@ func (r *Relay) Run(ctx context.Context) error {
 		"lease_duration", r.cfg.LeaseDuration,
 	)
 
-	for {
-		if err := r.tick(runCtx, workCtx); err != nil && runCtx.Err() == nil {
-			r.log.Error("relay tick failed", "error", err, "relay_instance", r.cfg.InstanceID)
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(tickInterval)
-
-		select {
-		case <-runCtx.Done():
-			r.log.Info("relay stopped", "relay_instance", r.cfg.InstanceID)
-			return nil
-		case <-r.wake:
-			drain(r.wake)
-		case <-timer.C:
-		}
-	}
+	r.runScheduler(runCtx, workCtx)
+	r.log.Info("relay stopped", "relay_instance", r.cfg.InstanceID)
+	return nil
 }
 
 func drain(ch <-chan struct{}) {
@@ -262,57 +240,201 @@ func drain(ch <-chan struct{}) {
 	}
 }
 
-func (r *Relay) tick(claimCtx, workCtx context.Context) error {
-	claimLimit := min(r.cfg.BatchSize, r.cfg.Concurrency)
-	for claimCtx.Err() == nil {
-		if pauseState, ok := r.store.(PauseState); ok {
-			paused, err := pauseState.RelayPaused(claimCtx)
-			if err != nil {
-				r.metrics.IncControlFailure()
-				return fmt.Errorf("read relay pause state: %w", err)
+// runScheduler keeps at most Concurrency publishes active. It does not retain
+// a prefetch queue: every claimed event is dispatched immediately, and a
+// completed publish triggers one bounded refill attempt. This keeps claims,
+// goroutines, and memory bounded by the configured working set.
+func (r *Relay) runScheduler(claimCtx, workCtx context.Context) {
+	completed := make(chan struct{}, r.cfg.Concurrency)
+	active := 0
+	preferOrdered := true
+	paused := false
+	idleWait := r.cfg.PollInterval
+	orderedProbeAt := time.Time{}
+	backpressure := ""
+	setCapacity := func() {
+		r.metrics.SetRelayCapacity(active, r.cfg.Concurrency)
+	}
+	setBackpressure := func(reason string) {
+		if reason != backpressure {
+			if reason != "" {
+				r.metrics.RecordRelayBackpressure(reason)
 			}
-			r.metrics.SetRelayPaused(paused)
+			backpressure = reason
+		}
+	}
+	setCapacity()
+
+	interval := r.cfg.PollInterval
+	if _, ok := r.store.(PauseState); ok {
+		interval = min(interval, r.cfg.ControlInterval)
+	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		if claimCtx.Err() != nil {
+			setBackpressure("shutdown")
+			if active == 0 {
+				return
+			}
+			<-completed
+			active--
+			setCapacity()
+			continue
+		}
+		for {
+			select {
+			case <-completed:
+				active--
+				setCapacity()
+			default:
+				goto completionsDrained
+			}
+		}
+	completionsDrained:
+
+		if active < r.cfg.Concurrency {
+			limit := min(r.cfg.BatchSize, r.cfg.Concurrency-active)
+			claimStarted := r.clock.Now()
+			events, isPaused, orderedEmpty, err := r.claimAvailable(claimCtx, limit, preferOrdered, !r.clock.Now().Before(orderedProbeAt))
+			r.metrics.ObserveRelayClaim(len(events), nonNegativeSeconds(r.clock.Now().Sub(claimStarted)))
+			preferOrdered = !preferOrdered
+			if orderedEmpty {
+				orderedProbeAt = r.clock.Now().Add(r.cfg.PollInterval)
+			}
+			paused = isPaused
+			if err != nil {
+				r.log.Error("relay claim failed", "error", err, "relay_instance", r.cfg.InstanceID)
+				setBackpressure("database_slow")
+			}
+			if len(events) > 0 {
+				active += r.dispatch(workCtx, events, completed)
+				idleWait = r.cfg.PollInterval
+				setBackpressure("")
+				setCapacity()
+				continue
+			}
 			if paused {
-				return nil
+				setBackpressure("paused")
+			} else if active >= r.cfg.Concurrency {
+				setBackpressure("workers_saturated")
+			} else if err == nil {
+				setBackpressure("")
+				if active == 0 {
+					idleWait = minDuration(r.cfg.IdleBackoffMax, idleWait*2)
+				}
 			}
-		}
-		var events []Event
-		if orderedStore, ok := r.store.(OrderedDeliveryStore); ok {
-			ordered, err := orderedStore.ClaimOrdered(
-				claimCtx,
-				r.cfg.InstanceID,
-				claimLimit,
-				r.cfg.LeaseDuration,
-				r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin,
-			)
-			if err != nil {
-				return err
-			}
-			events = append(events, ordered...)
-		}
-		if len(events) < claimLimit {
-			unordered, err := r.store.Claim(claimCtx, r.cfg.InstanceID, claimLimit-len(events), r.cfg.LeaseDuration)
-			if err != nil {
-				return err
-			}
-			events = append(events, unordered...)
-		}
-		if len(events) == 0 {
-			return nil
+		} else {
+			setBackpressure("workers_saturated")
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(len(events))
-		for _, ev := range events {
-			ev := ev
-			go func() {
-				defer wg.Done()
-				r.handle(workCtx, ev)
-			}()
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
 		}
-		wg.Wait()
+		wait := interval
+		if active == 0 && !paused {
+			wait = idleWait
+		}
+		if paused {
+			wait = min(wait, r.cfg.ControlInterval)
+		}
+		timer.Reset(wait)
+
+		select {
+		case <-claimCtx.Done():
+		case <-completed:
+			active--
+			idleWait = r.cfg.PollInterval
+			setCapacity()
+		case <-r.wake:
+			drain(r.wake)
+			idleWait = r.cfg.PollInterval
+			orderedProbeAt = time.Time{}
+			r.metrics.IncRelayWakeup("notification")
+		case <-timer.C:
+			r.metrics.IncRelayWakeup("poll")
+		}
 	}
-	return nil
+}
+
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+// claimAvailable claims no more than free worker capacity. Alternating which
+// class is considered first prevents an always-ready class from permanently
+// consuming every newly-free slot while keeping ordered delivery fences in the
+// storage layer unchanged.
+func (r *Relay) claimAvailable(ctx context.Context, limit int, preferOrdered, probeOrdered bool) ([]Event, bool, bool, error) {
+	if limit <= 0 {
+		return nil, false, false, nil
+	}
+	if pauseState, ok := r.store.(PauseState); ok {
+		paused, err := pauseState.RelayPaused(ctx)
+		if err != nil {
+			r.metrics.IncControlFailure()
+			return nil, false, false, fmt.Errorf("read relay pause state: %w", err)
+		}
+		r.metrics.SetRelayPaused(paused)
+		if paused {
+			return nil, true, false, nil
+		}
+	}
+
+	orderedProbed := false
+	orderedEvents := 0
+	claimOrdered := func(remaining int) ([]Event, error) {
+		store, ok := r.store.(OrderedDeliveryStore)
+		if !ok || remaining == 0 || !probeOrdered {
+			return nil, nil
+		}
+		orderedProbed = true
+		events, err := store.ClaimOrdered(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration,
+			r.cfg.PublishTimeout+r.cfg.OrderingSafetyMargin)
+		orderedEvents += len(events)
+		return events, err
+	}
+	claimUnordered := func(remaining int) ([]Event, error) {
+		if remaining == 0 {
+			return nil, nil
+		}
+		return r.store.Claim(ctx, r.cfg.InstanceID, remaining, r.cfg.LeaseDuration)
+	}
+
+	first, second := claimOrdered, claimUnordered
+	if !preferOrdered || !probeOrdered {
+		first, second = claimUnordered, claimOrdered
+	}
+	events, err := first(limit)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if len(events) == limit {
+		return events, false, orderedProbed && orderedEvents == 0, nil
+	}
+	more, err := second(limit - len(events))
+	if err != nil {
+		return events, false, orderedProbed && orderedEvents == 0, err
+	}
+	return append(events, more...), false, orderedProbed && orderedEvents == 0, nil
+}
+
+func (r *Relay) dispatch(ctx context.Context, events []Event, completed chan<- struct{}) int {
+	for _, event := range events {
+		event := event
+		go func() {
+			r.handle(ctx, event)
+			completed <- struct{}{}
+		}()
+	}
+	return len(events)
 }
 
 func (r *Relay) handle(ctx context.Context, ev Event) {

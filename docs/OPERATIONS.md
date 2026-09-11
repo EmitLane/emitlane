@@ -138,5 +138,22 @@ request ID, time, and safe counts—never payload or credentials.
 - Offset commit failure: do not remove the Inbox row. Redelivery is expected and
   safely commits the already-processed record.
 
+## Capacity and backpressure
+
+Relay capacity is the configured `Concurrency`: it bounds active broker
+publishes and every claim is bounded by free slots, never durable backlog size.
+Use `emitlane_relay_active_workers`, `emitlane_relay_worker_capacity`,
+`emitlane_relay_worker_saturation_ratio`, claim size/duration, wakeups, and
+`emitlane_relay_backpressure_total{reason=...}` to distinguish bounded worker
+saturation, paused delivery, database trouble, and shutdown. Labels are fixed
+enums; do not add event IDs, ordering keys, offsets, owners, or error text.
+
+Managed consumers expose configured/active worker capacity, single-record poll
+size, and bounded backpressure reasons. Current v0.5-compatible consumers keep
+one Kafka group member per configured worker; monitor rebalances and partition
+utilization before changing concurrency. PostgreSQL pool sizing must cover Relay
+claim/transition traffic plus managed handlers and admin/integrity work; raising
+worker counts without available database connections is not a throughput fix.
+
 `GET /v1/integrity` is an authenticated, bounded summary check. It is not a
 liveness or readiness endpoint and intentionally does not accept full mode.
