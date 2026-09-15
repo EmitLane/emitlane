@@ -194,8 +194,8 @@ func TestSecurityRedactionPreservesErrorIdentity(t *testing.T) {
 	if strings.Contains(safe.Error(), config.Username) || strings.Contains(fmt.Sprintf("%#v", safe), config.Password) {
 		t.Fatal("adapter error disclosed credentials")
 	}
-	auth := fmt.Errorf("%w: server echoed %s", kerr.SASLAuthenticationFailed, config.Password)
-	if got := security.safeError(auth); got != kerr.SASLAuthenticationFailed {
+	auth := fmt.Errorf("%w: server echoed %s", kerr.SaslAuthenticationFailed, config.Password)
+	if got := security.safeError(auth); got != kerr.SaslAuthenticationFailed {
 		t.Fatal("SASL error details were not suppressed")
 	}
 	if security.safeError(nil) != nil {

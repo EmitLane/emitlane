@@ -198,11 +198,11 @@ func TestKafkaSecurityIntegration(t *testing.T) {
 			pub := securityTestPublisher(t, ports["SASL"], security)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := pub.Ping(ctx); !errors.Is(err, kerr.SASLAuthenticationFailed) || strings.Contains(err.Error(), "wrong-secret") {
+			if err := pub.Ping(ctx); !errors.Is(err, kerr.SaslAuthenticationFailed) || strings.Contains(err.Error(), "wrong-secret") {
 				t.Fatalf("expected sanitized SASL rejection: %v", err)
 			}
 			source := securityTestSource(t, ports["SASL"], "security-tls", security)
-			if _, err := source.Poll(ctx); !errors.Is(err, kerr.SASLAuthenticationFailed) {
+			if _, err := source.Poll(ctx); !errors.Is(err, kerr.SaslAuthenticationFailed) {
 				t.Fatalf("expected consumer SASL rejection: %v", err)
 			}
 		})
@@ -254,7 +254,7 @@ func TestKafkaSecurityIntegration(t *testing.T) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := old.Ping(ctx); !errors.Is(err, kerr.SASLAuthenticationFailed) {
+		if err := old.Ping(ctx); !errors.Is(err, kerr.SaslAuthenticationFailed) {
 			t.Fatalf("existing client unexpectedly reread password: %v", err)
 		}
 		fresh := securityTestPublisher(t, ports["SASL"], security)
