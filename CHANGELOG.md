@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/EmitLane/emitlane/compare/v0.5.0...v0.6.0) (2026-09-11)
+
+
+### Features
+
+* **performance:** add adaptive scaling and backpressure ([#23](https://github.com/EmitLane/emitlane/issues/23)) ([07b2b63](https://github.com/EmitLane/emitlane/commit/07b2b635cf90a696d2e79b47dfd3486e599570f5))
+
 ## [0.5.0](https://github.com/EmitLane/emitlane/compare/v0.4.0...v0.5.0) (2026-09-08)
 
 
