@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	kafkaadapter "github.com/emitlane/emitlane/broker/kafka"
+	"github.com/emitlane/emitlane/config"
 	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/emitlane/emitlane/outbox"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
@@ -35,6 +36,11 @@ func main() {
 	brokers := envOr("KAFKA_BROKERS", "localhost:19092")
 	httpAddr := envOr("HTTP_ADDR", ":8081")
 	topic := envOr("ORDERS_TOPIC", "orders.events")
+	security, err := config.LoadKafkaSecurity()
+	if err != nil {
+		log.Error("Kafka security configuration", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -191,7 +197,7 @@ RETURNING amount, version`, orderID).Scan(&amount, &version)
 			log.Error("http", "error", err)
 		}
 	}()
-	go consumePayments(ctx, log, pool, brokers, topic)
+	go consumePayments(ctx, log, pool, brokers, topic, security)
 
 	<-ctx.Done()
 	shctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -212,7 +218,7 @@ func rollbackTx(ctx context.Context, log *slog.Logger, tx pgx.Tx) {
 	}
 }
 
-func consumePayments(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, brokers, topic string) {
+func consumePayments(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, brokers, topic string, security kafkaadapter.SecurityConfig) {
 	const consumerName = "ecommerce-payments"
 	store, err := pgstore.NewInboxStore(pool)
 	if err != nil {
@@ -221,6 +227,7 @@ func consumePayments(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, 
 	}
 	factory, err := kafkaadapter.NewConsumerFactory(kafkaadapter.ConsumerConfig{
 		Brokers: splitCSV(brokers), Group: consumerName, Topics: []string{topic},
+		Security:       security,
 		SessionTimeout: 10 * time.Second, RebalanceTimeout: 30 * time.Second,
 		FetchMaxWait: 250 * time.Millisecond,
 	})

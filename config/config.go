@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emitlane/emitlane/broker/kafka"
 	"github.com/emitlane/emitlane/relay"
 )
 
@@ -17,6 +18,7 @@ type Config struct {
 	DatabaseURL       string
 	KafkaBrokers      []string
 	KafkaClientID     string
+	KafkaSecurity     kafka.SecurityConfig
 	AutoCreateTopics  bool
 	HTTPAddr          string
 	LogLevel          string
@@ -50,6 +52,9 @@ func Load() (Config, error) {
 		Admin:             AdminConfig{Addr: "127.0.0.1:8081"},
 	}
 	cfg.KafkaBrokers = splitCSV(os.Getenv("EMITLANE_KAFKA_BROKERS"))
+	if cfg.KafkaSecurity, err = LoadKafkaSecurity(); err != nil {
+		return Config{}, err
+	}
 	if cfg.AutoCreateTopics, err = envBool("EMITLANE_KAFKA_AUTO_CREATE_TOPICS", cfg.AutoCreateTopics); err != nil {
 		return Config{}, err
 	}
@@ -170,6 +175,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("EMITLANE_DB_MAX_CONN_LIFETIME must be > 0")
 	}
 	if err := ValidateAdmin(c.Admin); err != nil {
+		return err
+	}
+	if err := c.KafkaSecurity.Validate(); err != nil {
 		return err
 	}
 	return c.Relay.Validate()

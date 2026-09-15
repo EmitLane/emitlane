@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -222,12 +221,12 @@ func doctorCmd(args []string) error {
 		controlCancel()
 	}
 
-	brokers := strings.TrimSpace(os.Getenv("EMITLANE_KAFKA_BROKERS"))
-	if brokers == "" {
-		check("Kafka broker connectivity", fmt.Errorf("EMITLANE_KAFKA_BROKERS is required"), "")
+	if configErr != nil {
+		check("Kafka broker connectivity", fmt.Errorf("skipped: fix configuration before probing Kafka"), "")
 	} else {
 		pub, err := kafka.NewPublisher(kafka.Config{
-			Brokers:          splitCSV(brokers),
+			Brokers:          loadedConfig.KafkaBrokers,
+			Security:         loadedConfig.KafkaSecurity,
 			ClientID:         "emitlane-doctor",
 			PublishTimeout:   5 * time.Second,
 			AutoCreateTopics: false,
@@ -239,7 +238,7 @@ func doctorCmd(args []string) error {
 			err = pub.Ping(pctx)
 			pcancel()
 			_ = pub.Close()
-			check("Kafka broker connectivity", err, brokers)
+			check("Kafka broker connectivity", err, strings.Join(loadedConfig.KafkaBrokers, ", "))
 		}
 	}
 
@@ -250,16 +249,4 @@ func doctorCmd(args []string) error {
 	}
 	fmt.Println("All checks passed.")
 	return nil
-}
-
-func splitCSV(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
