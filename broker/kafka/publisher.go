@@ -19,6 +19,7 @@ type Config struct {
 	ClientID         string
 	PublishTimeout   time.Duration
 	AutoCreateTopics bool
+	Security         SecurityConfig
 }
 
 // Validate reports configuration errors.
@@ -34,7 +35,7 @@ func (c Config) Validate() error {
 	if c.PublishTimeout <= 0 {
 		return errors.New("kafka: publish timeout must be > 0")
 	}
-	return nil
+	return c.Security.Validate()
 }
 
 // Publisher publishes records with franz-go and waits for produce results.
@@ -47,12 +48,17 @@ func (c Config) Validate() error {
 // durable retry may create a duplicate. This is the documented at-least-once
 // outcome and avoids retaining ambiguous producer-sequence state across tries.
 type Publisher struct {
-	client *kgo.Client
+	client   *kgo.Client
+	security clientSecurity
 }
 
 // NewPublisher constructs a Kafka publisher.
 func NewPublisher(cfg Config) (*Publisher, error) {
 	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	security, err := newClientSecurity(cfg.Security)
+	if err != nil {
 		return nil, err
 	}
 	brokers := make([]string, len(cfg.Brokers))
@@ -82,11 +88,12 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 			kgo.UnknownTopicRetries(4),
 		)
 	}
+	opts = append(opts, security.options...)
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: create client: %w", err)
 	}
-	return &Publisher{client: client}, nil
+	return &Publisher{client: client, security: security}, nil
 }
 
 // Publish waits for the broker to acknowledge the record before returning.
@@ -106,7 +113,7 @@ func (p *Publisher) Publish(ctx context.Context, message broker.Message) error {
 	}
 	results := p.client.ProduceSync(ctx, record)
 	if err := results.FirstErr(); err != nil {
-		return classify(err)
+		return classify(p.security.safeError(err))
 	}
 	return nil
 }
@@ -116,7 +123,7 @@ func (p *Publisher) Ping(ctx context.Context) error {
 	if p == nil || p.client == nil {
 		return errors.New("kafka: publisher is closed")
 	}
-	return p.client.Ping(ctx)
+	return p.security.safeError(p.client.Ping(ctx))
 }
 
 // Close flushes and closes the client.
