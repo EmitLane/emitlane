@@ -128,6 +128,12 @@ the stable event ID.
 
 ## Broker port and Kafka adapter
 
+The v0.7 development adapter accepts a shared `kafka.SecurityConfig` through
+`kafka.Config.Security` and `kafka.ConsumerConfig.Security`. It supports verified
+TLS/mTLS and SASL PLAIN/SCRAM over TLS. Constructors snapshot secret files; recreate
+clients/factories to rotate them. See [Kafka connection security](KAFKA_SECURITY.md)
+for SDK examples, environment settings, failure behavior and qualification status.
+
 ```go
 type Publisher interface {
     Publish(ctx context.Context, message broker.Message) error

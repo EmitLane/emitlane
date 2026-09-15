@@ -1,5 +1,22 @@
 # Upgrading EmitLane
 
+## v0.6 to v0.7 development: Kafka security
+
+The Kafka TLS/SASL change adds no database migration. Existing applications
+with zero-value Kafka security retain their plaintext connections. To enable
+security, provision broker listeners, trust and ACLs first, then configure
+both Relay publishers and application consumers using
+[Kafka connection security](KAFKA_SECURITY.md).
+
+SASL requires TLS. Client construction rejects invalid settings and unreadable
+secret files before connecting. Credentials and certificates are snapshots;
+recreate publishers/factories during rotation. Restart standalone Relays one
+at a time and monitor retries, dead events and backlog during rollout.
+
+This section describes development code, not a qualified v0.7 release. Rolling
+back to v0.6 removes these Kafka security settings; a TLS/SASL-only broker cannot
+be reached by the old adapter.
+
 ## v0.1.0 to v0.2.0
 
 Back up PostgreSQL and test the upgrade with production-like row counts. Apply
