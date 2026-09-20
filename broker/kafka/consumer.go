@@ -104,9 +104,24 @@ func (f *ConsumerFactory) NewSource(workerID string, listener consumer.Rebalance
 type consumerSource struct {
 	client   *kgo.Client
 	security clientSecurity
+	// Accessed only by the worker's serial Poll calls. Failed/canceled checks
+	// are retried; a successful check adds no requests to subsequent polls.
+	connected bool
 }
 
 func (s *consumerSource) Poll(ctx context.Context) (consumer.SourceRecord, error) {
+	if !s.connected {
+		if err := ctx.Err(); err != nil {
+			return consumer.SourceRecord{}, err
+		}
+		// Initial metadata authentication failures can be retried in the
+		// client's background loop without reaching PollRecords. Probe with
+		// the caller's context so startup reports the underlying error.
+		if err := s.client.Ping(ctx); err != nil {
+			return consumer.SourceRecord{}, s.security.safeError(err)
+		}
+		s.connected = true
+	}
 	for {
 		fetches := s.client.PollRecords(ctx, 1)
 		if errs := fetches.Errors(); len(errs) > 0 {

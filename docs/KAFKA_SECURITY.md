@@ -115,6 +115,14 @@ Unreadable files, invalid PEM, mismatched client keys or invalid configuration
 fail construction. An unavailable broker, failed certificate handshake, rejected
 credentials or missing ACLs never trigger a plaintext fallback.
 
+Before its first read, each consumer worker probes Kafka using the `Poll`
+caller's context. This exposes startup authentication errors that the client's
+background metadata retries would otherwise mask as a poll timeout. A failed
+or canceled probe is retried on the next `Poll`; after success, polling adds no
+further probes. This startup check does not prove topic/group ACLs or continuous
+credential validity: later failures still follow the Kafka client's normal
+fetch, group and commit error paths.
+
 Network-time failures follow the existing publisher retry/dead policy. Security
 does not change attempt accounting, leases, stream fencing, producer ACK policy,
 producer retry settings, offset commits or the broker-ACK/SQL-ACK duplicate window.

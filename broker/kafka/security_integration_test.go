@@ -201,8 +201,11 @@ func TestKafkaSecurityIntegration(t *testing.T) {
 			if err := pub.Ping(ctx); !errors.Is(err, kerr.SaslAuthenticationFailed) || strings.Contains(err.Error(), "wrong-secret") {
 				t.Fatalf("expected sanitized SASL rejection: %v", err)
 			}
+			// Give consumer authentication its own budget, independent of Ping.
+			consumerCtx, consumerCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer consumerCancel()
 			source := securityTestSource(t, ports["SASL"], "security-tls", security)
-			if _, err := source.Poll(ctx); !errors.Is(err, kerr.SaslAuthenticationFailed) {
+			if _, err := source.Poll(consumerCtx); !errors.Is(err, kerr.SaslAuthenticationFailed) || strings.Contains(err.Error(), "wrong-secret") {
 				t.Fatalf("expected consumer SASL rejection: %v", err)
 			}
 		})

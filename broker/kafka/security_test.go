@@ -322,6 +322,39 @@ func TestTLSVerificationAndMutualTLS(t *testing.T) {
 
 type securityListener struct{}
 
+func TestConsumerPollReportsInitialConnectionFailure(t *testing.T) {
+	t.Parallel()
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers("unused.test:9093"),
+		kgo.ConsumerGroup("test"), kgo.ConsumeTopics("events"),
+		kgo.Dialer(func(context.Context, string, string) (net.Conn, error) {
+			return nil, fmt.Errorf("%w: echoed secret", kerr.SaslAuthenticationFailed)
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &consumerSource{client: client}
+	defer source.Close()
+	// A canceled first call must not mark the source as connected.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := source.Poll(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled initial poll: %v", err)
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := source.Poll(ctx)
+		cancel()
+		if !errors.Is(err, kerr.SaslAuthenticationFailed) || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("initial connection error was masked or disclosed details: %v", err)
+		}
+		if source.connected {
+			t.Fatal("failed connection was marked successful")
+		}
+	}
+}
+
 func (securityListener) Assigned(map[string][]int32) {}
 func (securityListener) Revoked(map[string][]int32)  {}
 func (securityListener) Lost(map[string][]int32)     {}
