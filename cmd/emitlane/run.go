@@ -57,6 +57,7 @@ func runCmd(args []string) error {
 	pub, err := kafka.NewPublisher(kafka.Config{
 		Brokers:          cfg.KafkaBrokers,
 		ClientID:         cfg.KafkaClientID,
+		Security:         cfg.KafkaSecurity,
 		PublishTimeout:   cfg.Relay.PublishTimeout,
 		AutoCreateTopics: cfg.AutoCreateTopics,
 	})

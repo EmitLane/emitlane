@@ -20,6 +20,7 @@ type ConsumerConfig struct {
 	SessionTimeout   time.Duration
 	RebalanceTimeout time.Duration
 	FetchMaxWait     time.Duration
+	Security         SecurityConfig
 }
 
 func (c ConsumerConfig) Validate() error {
@@ -37,20 +38,29 @@ func (c ConsumerConfig) Validate() error {
 	if c.SessionTimeout <= 0 || c.RebalanceTimeout <= 0 || c.FetchMaxWait <= 0 {
 		return errors.New("kafka consumer: session, rebalance, and fetch timeouts must be positive")
 	}
-	return nil
+	return c.Security.Validate()
 }
 
 // ConsumerFactory creates franz-go group members without exposing franz-go
 // records to business handlers.
 type ConsumerFactory struct {
-	config ConsumerConfig
+	config   ConsumerConfig
+	security clientSecurity
 }
 
 func NewConsumerFactory(config ConsumerConfig) (*ConsumerFactory, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &ConsumerFactory{config: config}, nil
+	security, err := newClientSecurity(config.Security)
+	if err != nil {
+		return nil, err
+	}
+	config.Brokers = append([]string(nil), config.Brokers...)
+	config.Topics = append([]string(nil), config.Topics...)
+	// Keep only the compiled snapshot, not another copy of raw credentials.
+	config.Security = SecurityConfig{}
+	return &ConsumerFactory{config: config, security: security}, nil
 }
 
 func (f *ConsumerFactory) NewSource(workerID string, listener consumer.RebalanceListener) (consumer.Source, error) {
@@ -58,9 +68,9 @@ func (f *ConsumerFactory) NewSource(workerID string, listener consumer.Rebalance
 	if clientID == "" {
 		clientID = "emitlane-consumer"
 	}
-	client, err := kgo.NewClient(
+	opts := []kgo.Opt{
 		kgo.SeedBrokers(f.config.Brokers...),
-		kgo.ClientID(clientID+"-"+workerID),
+		kgo.ClientID(clientID + "-" + workerID),
 		kgo.ConsumerGroup(f.config.Group),
 		kgo.ConsumeTopics(f.config.Topics...),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
@@ -82,22 +92,40 @@ func (f *ConsumerFactory) NewSource(workerID string, listener consumer.Rebalance
 		kgo.OnPartitionsCallbackBlocked(func(_ context.Context, _ *kgo.Client) {
 			listener.RebalanceBlocked()
 		}),
-	)
+	}
+	opts = append(opts, f.security.options...)
+	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka consumer: create client: %w", err)
 	}
-	return &consumerSource{client: client}, nil
+	return &consumerSource{client: client, security: f.security}, nil
 }
 
 type consumerSource struct {
-	client *kgo.Client
+	client   *kgo.Client
+	security clientSecurity
+	// Accessed only by the worker's serial Poll calls. Failed/canceled checks
+	// are retried; a successful check adds no requests to subsequent polls.
+	connected bool
 }
 
 func (s *consumerSource) Poll(ctx context.Context) (consumer.SourceRecord, error) {
+	if !s.connected {
+		if err := ctx.Err(); err != nil {
+			return consumer.SourceRecord{}, err
+		}
+		// Initial metadata authentication failures can be retried in the
+		// client's background loop without reaching PollRecords. Probe with
+		// the caller's context so startup reports the underlying error.
+		if err := s.client.Ping(ctx); err != nil {
+			return consumer.SourceRecord{}, s.security.safeError(err)
+		}
+		s.connected = true
+	}
 	for {
 		fetches := s.client.PollRecords(ctx, 1)
 		if errs := fetches.Errors(); len(errs) > 0 {
-			return consumer.SourceRecord{}, errs[0].Err
+			return consumer.SourceRecord{}, s.security.safeError(errs[0].Err)
 		}
 		records := fetches.Records()
 		if len(records) == 0 {
@@ -124,7 +152,7 @@ func (s *consumerSource) Commit(ctx context.Context, record consumer.SourceRecor
 	if !ok || native == nil {
 		return errors.New("kafka consumer: invalid commit token")
 	}
-	return s.client.CommitRecords(ctx, native)
+	return s.security.safeError(s.client.CommitRecords(ctx, native))
 }
 
 func (s *consumerSource) Rewind(record consumer.SourceRecord) {
