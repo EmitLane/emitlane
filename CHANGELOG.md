@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/EmitLane/emitlane/compare/v0.6.0...v0.7.0) (2026-09-20)
+
+### Features
+
+* **kafka:** add verified TLS, mutual TLS, and SASL PLAIN/SCRAM authentication for publishers and managed consumers ([#26](https://github.com/EmitLane/emitlane/pull/26)).
+* **cli:** share Kafka security settings across `run`, `doctor`, and the ecommerce consumer, with mounted password files and startup validation.
+
+### Bug Fixes
+
+* **kafka:** report consumer startup authentication errors instead of masking them as poll timeouts.
+* **security:** redact SASL credentials and broker-supplied authentication details from adapter errors.
+
+### Documentation
+
+* Document secure Kafka configuration, credential rotation through client recreation, and upgrade behavior. Delivery remains at least once; no database migration is required.
+
 ## [0.6.0](https://github.com/EmitLane/emitlane/compare/v0.5.0...v0.6.0) (2026-09-11)
 
 
