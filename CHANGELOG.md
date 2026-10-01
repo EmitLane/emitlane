@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/EmitLane/emitlane/compare/v0.7.0...v0.8.0) (2026-10-01)
+
+
+### Features
+
+* **compatibility:** harden schema upgrades and event metadata for v0.8 ([#31](https://github.com/EmitLane/emitlane/issues/31)) ([79e408b](https://github.com/EmitLane/emitlane/commit/79e408bd8a33d153af32c1126a138d69afaf76a0))
+
 ## [0.7.0](https://github.com/EmitLane/emitlane/compare/v0.6.0...v0.7.0) (2026-09-20)
 
 ### Features
