@@ -1,8 +1,10 @@
 # Security policy
 
-EmitLane is currently unreleased. No production version is supported yet. This
-policy will be updated with supported-version details before the first widely
-announced release.
+EmitLane has published pre-1.0 releases; v0.7.0 is the current released baseline.
+When reporting a vulnerability, identify the affected tag and whether it also
+affects the latest release. A long-term support window and backport policy have
+not yet been established; do not assume older minor versions receive fixes.
+Development branches are not released or qualified versions.
 
 ## Reporting a vulnerability
 
@@ -34,4 +36,4 @@ private advisory.
 - no superuser requirement;
 - non-root container where practical;
 - secrets provided via environment/secret manager, not committed config;
-- operator mutations audit logged when Admin API ships.
+- Admin API operator mutations are audit logged.
