@@ -253,13 +253,15 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Benchmark harness](docs/BENCHMARKING.md)
 - [Performance and capacity](docs/PERFORMANCE.md)
 - [Upgrading](docs/UPGRADING.md)
+- [Compatibility contracts](docs/COMPATIBILITY.md)
 - [Release process](docs/RELEASING.md)
 
 ## Project status
 
-`v0.5.0` is the released baseline. The v0.6 development branch adds bounded
-Relay refill, saturation telemetry, and reproducible scale evidence without a
-schema migration. Managed processing is duplicate-safe
+[v0.7.0](https://github.com/EmitLane/emitlane/releases/tag/v0.7.0) is the released
+baseline, including Kafka TLS/SASL. [v0.8 development](docs/V0_8.md) focuses on
+compatibility contracts, migration safety, and unambiguous event metadata,
+without a new schema migration. Managed processing is duplicate-safe
 for PostgreSQL effects committed with the Inbox transition, while Kafka and the
 relay remain at least once. As a pre-1.0 project, APIs and operational defaults
 may still change during the `v0.x` series.

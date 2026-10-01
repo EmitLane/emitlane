@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -791,19 +792,18 @@ func (r *Relay) cleanupLoop(ctx context.Context) {
 func toMessage(ev Event) broker.Message {
 	headers := make(map[string]string, len(ev.Headers)+8)
 	for k, v := range ev.Headers {
+		// Match the managed consumer's case/whitespace normalization. Durable
+		// metadata is authoritative even when the optional value is absent.
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case broker.HeaderEventID, broker.HeaderEventType, broker.HeaderSchemaVersion,
+			broker.HeaderAttempt, broker.HeaderOriginalEvent, broker.HeaderReplayBatch,
+			broker.HeaderOrderingKey, broker.HeaderSequence, broker.HeaderPartition,
+			broker.HeaderTraceparent, broker.HeaderTracestate,
+			"emitlane-correlation-id", "emitlane-causation-id":
+			continue
+		}
 		headers[k] = v
 	}
-	delete(headers, broker.HeaderEventID)
-	delete(headers, broker.HeaderEventType)
-	delete(headers, broker.HeaderSchemaVersion)
-	delete(headers, broker.HeaderAttempt)
-	delete(headers, broker.HeaderOriginalEvent)
-	delete(headers, broker.HeaderReplayBatch)
-	delete(headers, broker.HeaderOrderingKey)
-	delete(headers, broker.HeaderSequence)
-	delete(headers, broker.HeaderPartition)
-	delete(headers, broker.HeaderTraceparent)
-	delete(headers, broker.HeaderTracestate)
 	headers[broker.HeaderEventID] = ev.ID.String()
 	headers[broker.HeaderEventType] = ev.Type
 	headers[broker.HeaderSchemaVersion] = strconv.Itoa(ev.SchemaVersion)

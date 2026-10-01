@@ -1,6 +1,78 @@
 # Upgrading EmitLane
 
-## v0.6 to v0.7 development: Kafka security
+## v0.7 to v0.8 development: compatibility guards
+
+v0.8 retains schema 4 and existing public function signatures. Deploying this
+binary does not require a new migration. Apply ordinary readiness checks and
+roll out Relays one at a time. Kafka transport security requirements remain the
+same. The candidate must pass qualification before release; see [v0.8 scope](V0_8.md).
+
+Migration history must be exactly a contiguous prefix `1..N` where `N <= 4`.
+`MigrateUp`, `MigrateDown` and `SchemaVersion` now return an error wrapping
+`postgres.ErrSchemaIncompatible` for gaps, non-positive records or unknown
+versions. `SchemaVersion` still accepts a valid older prefix for inspection;
+standalone Relay startup requires the current schema. An SDK application can
+call `SchemaVersion` and compare it with `CurrentSchemaVersion` before starting
+work. Constructors do not silently migrate or validate the database.
+
+On an error, stop the rollout, inspect history against your backup and use the
+binary matching the database. Do not delete migration records to make the check
+pass. These checks validate recorded history; they do not prove that an operator
+has not manually changed table definitions. Use `doctor` for structural checks.
+
+Reserved broker headers are derived only from durable event fields. Case or
+whitespace variants of reserved names are now removed, just like canonical
+names. In particular, set `CorrelationID` and `CausationID` on the event instead
+of injecting their reserved headers. Ordinary application headers retain their
+original keys and values. See [compatibility contracts](COMPATIBILITY.md).
+
+### Binary rollback versus schema rollback
+
+Rolling back from v0.8 to v0.7 needs no down migration: both use schema 4.
+Keep schema 4 and roll back only binaries if needed. Older binaries lack the new
+history checks and header normalization; they do not make a malformed database
+safe. Do not run different binaries' migration commands concurrently.
+
+For an intentional schema downgrade, stop all writers, Relays and consumers,
+back up PostgreSQL, and validate the downgrade on a restored copy first. The
+runner now locks the relevant tables before the published v3/v4 safety checks;
+concurrent transactions can delay a downgrade and context cancellation aborts
+it. Refusal leaves data and history unchanged. CLI migration commands have a
+two-minute deadline. This is not an online downgrade service.
+
+The v4 guard refuses unfinished managed Inbox work. The v3 guard refuses ordered
+rows or stream cursors. Older down migrations are still destructive: v2 removes
+operational/audit metadata and v1 drops Outbox and Inbox tables. Never run a
+sequence of down migrations as a routine binary rollback.
+
+### Retention and restore boundaries
+
+Keep Inbox deduplication markers for at least the entire period over which an
+event can be redelivered or replayed with the same identity. No automatic Inbox
+pruning is enabled. Kafka must retain the original records for unresolved managed
+Inbox work; Inbox stores coordinates, not a backup of the payload. Outbox cleanup
+of delivered rows is not a replacement for backups or Kafka retention.
+
+Restoring PostgreSQL and Kafka independently can invalidate recovery assumptions:
+
+- A database restore may remove committed business effects and Inbox markers,
+  while Kafka's group offsets already point past those records. Stop consumers,
+  identify a replay point retained by Kafka, and deliberately reset offsets or
+  rebuild from another durable source before resuming.
+- If a restored Outbox contains records already published, Relay may publish them
+  again. Preserve/reconcile downstream idempotency state. Restoring Inbox and
+  business tables from different snapshots cannot preserve atomic deduplication.
+- If Kafka has lost records marked delivered in PostgreSQL, normal Relay polling
+  will not recreate them. Reconcile using retained Outbox data or application
+  backups and use explicit replay where appropriate; replay creates new IDs and
+  can repeat business effects.
+
+These are operator recovery procedures, not an automatic cross-system restore
+or an end-to-end exactly-once guarantee. Test the chosen restore procedure on
+isolated data before production use; a full restore drill remains a release
+qualification task.
+
+## v0.6 to v0.7: Kafka security
 
 The Kafka TLS/SASL change adds no database migration. Existing applications
 with zero-value Kafka security retain their plaintext connections. To enable
@@ -13,9 +85,8 @@ secret files before connecting. Credentials and certificates are snapshots;
 recreate publishers/factories during rotation. Restart standalone Relays one
 at a time and monitor retries, dead events and backlog during rollout.
 
-This section describes development code, not a qualified v0.7 release. Rolling
-back to v0.6 removes these Kafka security settings; a TLS/SASL-only broker cannot
-be reached by the old adapter.
+Rolling back to v0.6 removes these Kafka security settings; a TLS/SASL-only
+broker cannot be reached by the old adapter.
 
 ## v0.1.0 to v0.2.0
 

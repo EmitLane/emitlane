@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"strconv"
@@ -14,6 +15,10 @@ import (
 )
 
 const currentSchemaVersion = 4
+
+// ErrSchemaIncompatible identifies an unknown or inconsistent migration history.
+// Do not repair migration records automatically in response to this error.
+var ErrSchemaIncompatible = errors.New("incompatible EmitLane schema history")
 
 const migrationLockID int64 = 0x454d49544c414e45 // "EMITLANE"
 
@@ -44,6 +49,9 @@ func MigrateUp(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	applied, err := appliedVersions(ctx, tx)
 	if err != nil {
+		return err
+	}
+	if _, err := validateVersions(applied); err != nil {
 		return err
 	}
 	entries, err := migrationFiles(".up.sql")
@@ -88,28 +96,43 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := tx.Exec(ctx, ensureMigrations); err != nil {
 		return fmt.Errorf("migrate: ensure schema: %w", err)
 	}
-	var version *int
-	err = tx.QueryRow(ctx, `SELECT MAX(version) FROM emitlane.schema_migrations`).Scan(&version)
+	applied, err := appliedVersions(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("migrate: current version: %w", err)
+		return err
 	}
-	if version == nil {
+	version, err := validateVersions(applied)
+	if err != nil {
+		return err
+	}
+	if version == 0 {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("migrate: commit down: %w", err)
 		}
 		return nil
 	}
-	name, err := downMigrationName(*version)
+	// The published SQL contains safety checks before destructive DDL. Lock
+	// before those checks so a writer cannot introduce protected state between
+	// the check and the DDL. Locks last until this transaction ends.
+	switch version {
+	case 4:
+		_, err = tx.Exec(ctx, `LOCK TABLE emitlane.inbox_events IN ACCESS EXCLUSIVE MODE`)
+	case 3:
+		_, err = tx.Exec(ctx, `LOCK TABLE emitlane.ordering_partitions, emitlane.ordering_streams, emitlane.outbox_events IN ACCESS EXCLUSIVE MODE`)
+	}
+	if err != nil {
+		return fmt.Errorf("migrate: lock downgrade state: %w", err)
+	}
+	name, err := downMigrationName(version)
 	if err != nil {
 		return err
 	}
 	body, err := fs.ReadFile(migrations.SQL, name)
 	if err != nil {
-		return fmt.Errorf("migrate: read down for version %d: %w", *version, err)
+		return fmt.Errorf("migrate: read down for version %d: %w", version, err)
 	}
 	if strings.TrimSpace(string(body)) != "" {
 		if _, err := tx.Exec(ctx, string(body)); err != nil {
-			return fmt.Errorf("migrate: apply version %d: %w", *version, err)
+			return fmt.Errorf("migrate: apply version %d: %w", version, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -118,7 +141,10 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// SchemaVersion returns the current applied migration version, or 0 if none.
+// SchemaVersion returns the highest applied migration version, or 0 if none.
+// Unknown, non-positive or missing migration versions return
+// ErrSchemaIncompatible (wrapped). The returned version is diagnostic only
+// when an error is returned. A valid older prefix is not itself an error.
 func SchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	var exists bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (
@@ -130,18 +156,40 @@ func SchemaVersion(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	if !exists {
 		return 0, nil
 	}
-	var version *int
-	if err := pool.QueryRow(ctx, `SELECT MAX(version) FROM emitlane.schema_migrations`).Scan(&version); err != nil {
+	versions, err := appliedVersions(ctx, pool)
+	if err != nil {
 		return 0, err
 	}
-	if version == nil {
-		return 0, nil
+	return validateVersions(versions)
+}
+
+func validateVersions(applied map[int]bool) (int, error) {
+	latest := 0
+	for version := range applied {
+		if version > latest {
+			latest = version
+		}
 	}
-	return *version, nil
+	if latest > currentSchemaVersion {
+		return latest, fmt.Errorf("%w: database version %d exceeds binary schema %d; use a compatible binary", ErrSchemaIncompatible, latest, currentSchemaVersion)
+	}
+	for version := range applied {
+		if version <= 0 {
+			return latest, fmt.Errorf("%w: invalid recorded version %d; inspect migration history", ErrSchemaIncompatible, version)
+		}
+	}
+	for version := 1; version <= latest; version++ {
+		if !applied[version] {
+			return latest, fmt.Errorf("%w: missing migration %d before version %d; inspect migration history", ErrSchemaIncompatible, version, latest)
+		}
+	}
+	return latest, nil
 }
 
 func beginMigration(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
-	tx, err := pool.Begin(ctx)
+	// Each safety query must see commits made while waiting for a migration or
+	// table lock, even if the connection defaults to repeatable read.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("migrate: begin: %w", err)
 	}
@@ -152,7 +200,11 @@ func beginMigration(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
 	return tx, nil
 }
 
-func appliedVersions(ctx context.Context, tx pgx.Tx) (map[int]bool, error) {
+type migrationQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func appliedVersions(ctx context.Context, tx migrationQuerier) (map[int]bool, error) {
 	rows, err := tx.Query(ctx, `SELECT version FROM emitlane.schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("migrate: list versions: %w", err)
