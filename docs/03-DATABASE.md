@@ -111,7 +111,12 @@ the PostgreSQL clock.
 
 Migration SQL is embedded in the binary and tracked in
 `emitlane.schema_migrations`. `emitlane migrate up` is idempotent and protected
-by a PostgreSQL advisory transaction lock.
+by a PostgreSQL advisory transaction lock. Published SQL files are immutable;
+new schema changes require a new numbered migration. Starting in v0.8, the
+runner rejects unknown, non-positive or non-contiguous recorded versions before
+applying SQL. Down migrations v3/v4 lock protected tables before checking state
+so concurrent inserts cannot invalidate a safety check. See
+[upgrade and rollback procedures](UPGRADING.md).
 
 The down migration explicitly drops only the tables and helper function created
 by version 1. It never uses `DROP SCHEMA ... CASCADE`. If application-owned

@@ -79,7 +79,9 @@ func doctorCmd(args []string) error {
 			} else {
 				check("EmitLane schema", nil, fmt.Sprintf("version %d (binary expects %d)", v, postgres.CurrentSchemaVersion()))
 			}
-			if v != postgres.CurrentSchemaVersion() {
+			if verr != nil {
+				check("migrations", verr, "")
+			} else if v != postgres.CurrentSchemaVersion() {
 				failed++
 				fmt.Printf("✗ migrations\n  applied version %d, expected %d\n", v, postgres.CurrentSchemaVersion())
 			} else {
