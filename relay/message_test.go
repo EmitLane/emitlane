@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"github.com/emitlane/emitlane/consumer"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,5 +78,43 @@ func BenchmarkToMessage(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = toMessage(ev)
+	}
+}
+
+// A valid stored event must remain consumable even when application headers
+// contain aliases of reserved metadata. The consumer normalizes those aliases.
+func TestToMessageReservedHeaderAliases(t *testing.T) {
+	reserved := []string{
+		broker.HeaderEventID, broker.HeaderEventType, broker.HeaderSchemaVersion,
+		broker.HeaderAttempt, broker.HeaderOriginalEvent, broker.HeaderReplayBatch,
+		broker.HeaderOrderingKey, broker.HeaderSequence, broker.HeaderPartition,
+		broker.HeaderTraceparent, broker.HeaderTracestate,
+		"emitlane-correlation-id", "emitlane-causation-id",
+	}
+	for _, name := range reserved {
+		for _, alias := range []string{name, strings.ToUpper(name), " " + strings.ToUpper(name) + "\t"} {
+			t.Run(alias, func(t *testing.T) {
+				ev := Event{ID: uuid.New(), Type: "created", SchemaVersion: 1, Attempts: 1,
+					Headers: map[string]string{alias: "spoofed", "emitlane-custom": "app", " X-App ": "unchanged"}}
+				msg := toMessage(ev)
+				var headers []consumer.Header
+				for key, value := range msg.Headers {
+					if value == "spoofed" {
+						t.Fatalf("reserved alias survived: %q", key)
+					}
+					headers = append(headers, consumer.Header{Key: key, Value: []byte(value)})
+				}
+				got, err := consumer.ResolveEventID(consumer.Message{Headers: headers})
+				if err != nil || got != ev.ID {
+					t.Fatalf("identity=%s err=%v; want %s", got, err, ev.ID)
+				}
+				if msg.Headers["emitlane-custom"] != "app" || msg.Headers[" X-App "] != "unchanged" {
+					t.Fatal("application header modified")
+				}
+				if ev.Headers[alias] != "spoofed" {
+					t.Fatal("stored headers mutated")
+				}
+			})
+		}
 	}
 }
