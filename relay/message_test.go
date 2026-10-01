@@ -118,3 +118,24 @@ func TestToMessageReservedHeaderAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestToMessagePreservesUnorderedReplayProvenance(t *testing.T) {
+	sourceID, batchID := uuid.New(), uuid.New()
+	msg := toMessage(Event{
+		ID: uuid.New(), ReplayedFromEventID: &sourceID, ReplayBatchID: &batchID,
+		Headers: map[string]string{
+			broker.HeaderOriginalOrderingKey: "order-123",
+			broker.HeaderOriginalSequence:    "17",
+			broker.HeaderOrderingKey:         "stale-current-order",
+		},
+	})
+	if msg.Headers[broker.HeaderOriginalOrderingKey] != "order-123" || msg.Headers[broker.HeaderOriginalSequence] != "17" {
+		t.Fatal("unordered replay lost its persisted ordering provenance")
+	}
+	if _, exists := msg.Headers[broker.HeaderOrderingKey]; exists {
+		t.Fatal("unordered replay regained active ordering metadata")
+	}
+	if msg.Headers[broker.HeaderOriginalEvent] != sourceID.String() || msg.Headers[broker.HeaderReplayBatch] != batchID.String() {
+		t.Fatal("unordered replay lost its durable identity provenance")
+	}
+}

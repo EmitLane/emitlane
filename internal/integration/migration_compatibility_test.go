@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/emitlane/emitlane/migrations"
+	"github.com/emitlane/emitlane/outbox"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
 )
 
@@ -171,6 +172,9 @@ consumer, event_id, processed_at, status, source_topic, source_partition, source
 	config := pool.Config()
 	applicationName := "migration-downgrade-" + uuid.NewString()
 	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	// A caller's stronger default must not leave the downgrade guard reading
+	// a snapshot taken before the concurrent writer committed.
+	config.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
 	migrator, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
@@ -178,31 +182,7 @@ consumer, event_id, processed_at, status, source_topic, source_partition, source
 	t.Cleanup(migrator.Close)
 	done := make(chan error, 1)
 	go func() { done <- pgstore.MigrateDown(ctx, migrator) }()
-
-	// Observe the actual database lock wait before committing, so scheduling
-	// speed cannot accidentally turn this into a sequential downgrade test.
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		var waiting bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS (
-SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING (pid)
-WHERE a.application_name = $1 AND l.relation = 'emitlane.inbox_events'::regclass
-AND l.mode = 'AccessExclusiveLock' AND NOT l.granted
-)`, applicationName).Scan(&waiting); err != nil {
-			t.Fatal(err)
-		}
-		if waiting {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("downgrade completed before waiting for concurrent Inbox writer: %v", err)
-		case <-ctx.Done():
-			t.Fatalf("downgrade never waited for Inbox writer: %v", ctx.Err())
-		case <-ticker.C:
-		}
-	}
+	migrationCompatibilityWaitForLock(t, ctx, pool, applicationName, "emitlane.inbox_events", done)
 	if err := writer.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +207,98 @@ FROM emitlane.inbox_events WHERE consumer = 'concurrent-consumer' AND event_id =
 	}
 	if !preserved {
 		t.Fatal("downgrade changed concurrently committed managed Inbox state")
+	}
+}
+
+func TestMigrationDowngradeWaitsForConcurrentOrderedWrite(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool := migrationCompatibilityDatabase(t, ctx, e)
+	migrationCompatibilityPrefix(t, ctx, pool, 3)
+	migrationCompatibilitySeed(t, ctx, pool)
+
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(context.Background()) }()
+	payload := []byte{0, 255, 128, 42}
+	eventID, err := outbox.NewWriter().Enqueue(ctx, writer, outbox.Event{
+		Destination: "orders", Type: "order.created", Payload: payload,
+		OrderingKey: "customer-42", Sequence: 1, OrderingStartSequence: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := pool.Config()
+	applicationName := "migration-ordered-" + uuid.NewString()
+	config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	config.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+	migrator, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(migrator.Close)
+	done := make(chan error, 1)
+	go func() { done <- pgstore.MigrateDown(ctx, migrator) }()
+	migrationCompatibilityWaitForLock(t, ctx, pool, applicationName, "emitlane.ordering_streams", done)
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
+			t.Fatalf("downgrade must observe newly committed ordered state, got %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("downgrade did not finish after ordered writer commit: %v", ctx.Err())
+	}
+	version, err := pgstore.SchemaVersion(ctx, pool)
+	if err != nil || version != 3 {
+		t.Fatalf("schema version after concurrent downgrade = %d, %v; want 3", version, err)
+	}
+	var preserved bool
+	if err := pool.QueryRow(ctx, `SELECT o.status = 'pending' AND o.payload = $2
+AND o.ordering_key = 'customer-42' AND o.ordering_sequence = 1
+AND s.partition_id = o.ordering_partition AND s.start_sequence = 1 AND s.next_sequence = 1
+FROM emitlane.outbox_events o
+JOIN emitlane.ordering_streams s USING (destination, ordering_key)
+WHERE o.id = $1`, eventID, payload).Scan(&preserved); err != nil {
+		t.Fatal(err)
+	}
+	if !preserved {
+		t.Fatal("downgrade changed concurrently committed ordered payload or stream metadata")
+	}
+}
+
+func migrationCompatibilityWaitForLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, applicationName, relation string, done <-chan error) {
+	t.Helper()
+	// Observe the actual database lock wait before committing, so scheduling
+	// speed cannot accidentally turn this into a sequential downgrade test.
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+WHERE a.application_name = $1 AND l.relation = $2::regclass
+AND l.mode = 'AccessExclusiveLock' AND NOT l.granted
+)`, applicationName, relation).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("downgrade completed before waiting for concurrent writer on %s: %v", relation, err)
+		case <-ctx.Done():
+			t.Fatalf("downgrade never waited for writer on %s: %v", relation, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 

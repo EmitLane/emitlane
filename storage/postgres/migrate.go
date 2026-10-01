@@ -187,7 +187,9 @@ func validateVersions(applied map[int]bool) (int, error) {
 }
 
 func beginMigration(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
-	tx, err := pool.Begin(ctx)
+	// Each safety query must see commits made while waiting for a migration or
+	// table lock, even if the connection defaults to repeatable read.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("migrate: begin: %w", err)
 	}
