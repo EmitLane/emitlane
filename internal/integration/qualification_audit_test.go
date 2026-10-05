@@ -60,6 +60,37 @@ func headerValueNoTest(r *kgo.Record, key string) string {
 	return ""
 }
 
+func qualificationKafkaSnapshot(ctx context.Context, brokers []string, topic, group string) (map[string]any, error) {
+	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	admin := kadm.NewClient(client)
+	ends, err := admin.ListEndOffsets(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	offsets, err := admin.FetchOffsets(ctx, group)
+	if err != nil {
+		return nil, err
+	}
+	var produced, committed int64
+	for partition, end := range ends[topic] {
+		if end.Err != nil {
+			return nil, end.Err
+		}
+		produced += end.Offset
+		if offset, ok := offsets.Lookup(topic, partition); ok {
+			if offset.Err != nil {
+				return nil, offset.Err
+			}
+			committed += max(offset.At, 0)
+		}
+	}
+	return map[string]any{"end_offsets": produced, "committed_offsets": committed, "lag": produced - committed}, nil
+}
+
 // Stream Kafka in bounded batches. Expected/seen IDs live in PostgreSQL, not
 // an ever-growing Go map or slice. Audit all snapshot offsets, including any
 // unexpected trailing records, rather than stopping at matching counts.

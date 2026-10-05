@@ -45,7 +45,7 @@ Every completed cycle includes:
 - SIGKILL of a Relay after durable claim and before publishing;
 - SIGKILL of a Relay after Kafka ACK and before database acknowledgement;
 - consumer membership join/leave while traffic continues;
-- actual stop/start of Kafka, then PostgreSQL;
+- actual stop/start of Kafka and PostgreSQL;
 - audited pause/resume, including a newly committed row that must stay pending;
 - poison handler retry exhaustion, operator repair and audited Inbox retry;
 - bounded delivered-row retention with durable proof of prior delivered state.
@@ -77,6 +77,7 @@ end-to-end exactly-once delivery or protection of external side effects.
 `events.jsonl` contains provenance/configuration, fault start/end, operator
 actions, and per-cycle snapshots of heap/goroutines, pool/database connections,
 database size, estimated dead tuples, autovacuum count and queue depth/age.
+Kafka end/committed offsets and lag are sampled at the same healthy checkpoints.
 Helper logs are stored beside it. A final `PASS` record contains full coverage,
 ID counts, duplicates, retention/retry totals and the integrity report.
 

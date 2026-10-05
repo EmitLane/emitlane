@@ -225,7 +225,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		}
 		factory.armed.Store(true)
 		cycles++
-		write(qualificationSnapshot(t, e, name, cycles, producerFailures.Load()))
+		write(qualificationSnapshot(t, e, topic, group, name, cycles, producerFailures.Load()))
 		if wait := c.interval - time.Since(cycleStart); wait > 0 {
 			waitHealthy(cycleStart.Add(c.interval))
 		}
@@ -284,7 +284,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	if endCommit != commit || endDirty {
 		t.Fatal("source changed during qualification")
 	}
-	write(qualificationSnapshot(t, e, name, cycles, producerFailures.Load()))
+	write(qualificationSnapshot(t, e, topic, group, name, cycles, producerFailures.Load()))
 	write(map[string]any{"kind": "PASS", "time": time.Now().UTC(), "commit": commit,
 		"cycles": cycles, "coverage": coverage, "committed": total, "kafka_records": kafkaRecords, "kafka_duplicates": duplicates,
 		"retried_dead": retriedDead, "pruned": pruned, "offset_failures": factory.injected.Load(), "integrity": report})
@@ -530,7 +530,7 @@ func (s *qualificationCommitSource) Commit(ctx context.Context, record managed.S
 	return s.Source.Commit(ctx, record)
 }
 
-func qualificationSnapshot(t *testing.T, e *env, name string, cycles int, failures int64) map[string]any {
+func qualificationSnapshot(t *testing.T, e *env, topic, group, name string, cycles int, failures int64) map[string]any {
 	t.Helper()
 	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
@@ -548,9 +548,13 @@ func qualificationSnapshot(t *testing.T, e *env, name string, cycles int, failur
 	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
+	kafka, err := qualificationKafkaSnapshot(ctx, e.brokers, topic, group)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return map[string]any{"kind": "snapshot", "time": time.Now().UTC(), "cycles": cycles, "producer_failures": failures,
 		"inbox_pending": pending, "inbox_inflight": inflight, "inbox_retry": retry, "inbox_dead": dead, "processed": processed,
 		"go_heap_bytes": memory.HeapAlloc, "goroutines": runtime.NumGoroutine(), "pool_acquired": e.pool.Stat().AcquiredConns(), "pool_total": e.pool.Stat().TotalConns(),
 		"database_bytes": dbBytes, "database_connections": connections, "dead_tuples_estimate": deadTuples, "autovacuum_count": autovacuums,
-		"outbox_pending": outboxPending, "outbox_inflight": outboxInflight, "outbox_dead": outboxDead, "oldest_pending_seconds": oldest}
+		"outbox_pending": outboxPending, "outbox_inflight": outboxInflight, "outbox_dead": outboxDead, "oldest_pending_seconds": oldest, "kafka": kafka}
 }
