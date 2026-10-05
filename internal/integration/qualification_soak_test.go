@@ -129,6 +129,21 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	rng := rand.New(rand.NewSource(c.seed))
 	cycles, retriedDead, pruned := 0, int64(0), int64(0)
 	deadline := time.Now().Add(c.duration)
+	// Keep operator repairs active between fault cycles. Otherwise a five-minute
+	// idle interval accumulates poison-blocked partitions faster than a short
+	// fault cycle can drain them, making a long run a growing-backlog test.
+	waitHealthy := func(until time.Time) {
+		for loadCtx.Err() == nil && time.Now().Before(until) {
+			if n := retryQualificationDead(t, e, name); n > 0 {
+				retriedDead += n
+				write(map[string]any{"kind": "operator_retry", "time": time.Now().UTC(), "cycle": cycles, "events": n})
+			}
+			select {
+			case <-loadCtx.Done():
+			case <-time.After(min(time.Second, time.Until(until))):
+			}
+		}
+	}
 	faults := []string{"consumer_crash", "relay_claim_crash", "relay_ack_crash", "rebalance", "kafka_restart", "postgres_restart", "pause_resume", "dead_retry_retention"}
 	coverage := make(map[string]int)
 	for time.Until(deadline) >= 30*time.Second {
@@ -212,12 +227,10 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		cycles++
 		write(qualificationSnapshot(t, e, name, cycles, producerFailures.Load()))
 		if wait := c.interval - time.Since(cycleStart); wait > 0 {
-			select {
-			case <-loadCtx.Done():
-			case <-time.After(wait):
-			}
+			waitHealthy(cycleStart.Add(c.interval))
 		}
 	}
+	waitHealthy(deadline)
 	<-loadCtx.Done()
 	<-producerDone
 	select {
