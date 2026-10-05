@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -118,5 +120,44 @@ func TestManagedSoakAuditRejectsEqualCountsWithWrongIdentity(t *testing.T) {
 	record := makeRecord(id, 42)
 	if duplicates, err := auditManagedSoakRecords([]*kgo.Record{record, record}, expected, "test"); err != nil || duplicates != 1 {
 		t.Fatalf("expected at-least-once duplicate to be reported: duplicates=%d err=%v", duplicates, err)
+	}
+}
+
+func TestManagedSoakDatabaseAuditRejectsSubstitutedEffects(t *testing.T) {
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	id := uuid.NewString()
+	if _, err := e.pool.Exec(ctx, `
+INSERT INTO public.business_orders (id, amount) VALUES ('soak-' || $1, 42);
+`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO emitlane.outbox_events
+(id, destination, event_type, payload, status, delivered_at)
+VALUES ($1, 'audit-test', 'audit.input', ''::bytea, 'delivered', NOW())`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO emitlane.inbox_events
+(consumer, event_id, processed_at) VALUES ('audit-test', $1, NOW())`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO public.business_payments VALUES ($1, 42)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if expected, err := auditManagedSoakDatabase(ctx, e.pool, "audit-test", "audit-test"); err != nil || expected[id] != 42 {
+		t.Fatalf("valid committed state rejected: expected=%v err=%v", expected, err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE public.business_payments SET amount=43 WHERE order_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auditManagedSoakDatabase(ctx, e.pool, "audit-test", "audit-test"); err == nil {
+		t.Fatal("equal row counts concealed the wrong business effect")
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE public.business_payments SET amount=42, order_id=$2 WHERE order_id=$1`, id, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auditManagedSoakDatabase(ctx, e.pool, "audit-test", "audit-test"); err == nil {
+		t.Fatal("equal row counts concealed a substituted business identity")
 	}
 }
