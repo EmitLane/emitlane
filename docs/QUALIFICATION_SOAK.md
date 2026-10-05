@@ -50,7 +50,8 @@ Every completed cycle includes:
 - poison handler retry exhaustion, operator repair and audited Inbox retry;
 - bounded delivered-row retention with durable proof of prior delivered state.
 
-Offset commit failure is re-armed every cycle. Transient handler failures are
+Consumer joins require an observed partition assignment. Recovery must also
+drain group offset lag to zero. Offset commit failure is re-armed every cycle. Transient handler failures are
 injected throughout the load. At least two full cycles, two observed offset
 commit failures, poison repair and actual deletion are required for PASS.
 

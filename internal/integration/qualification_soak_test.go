@@ -171,9 +171,17 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 			case "rebalance":
 				other := consumerConfig
 				other.InstanceID = "qualification-peer"
-				peer := launchManaged(t, e, other, store, newManagedFactory(t, e, topic, group), qualificationHandler)
-				// Allow group join/assignment, then revoke membership during load.
-				time.Sleep(3 * time.Second)
+				peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
+				peer := launchManaged(t, e, other, store, peerFactory, qualificationHandler)
+				// Observe actual assignment, rather than equating elapsed time with
+				// a successful group join. Cleanup also covers a failed assertion.
+				assignedDeadline := time.Now().Add(12 * time.Second)
+				for peerFactory.assignments.Load() == 0 && time.Now().Before(assignedDeadline) {
+					time.Sleep(50 * time.Millisecond)
+				}
+				if peerFactory.assignments.Load() == 0 {
+					t.Fatal("peer consumer never received a partition assignment")
+				}
 				peer.stop(t)
 			case "kafka_restart":
 				e.stopKafka(t)
@@ -253,7 +261,13 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 			t.Fatal(err)
 		}
 		if remaining == 0 {
-			break
+			kafka, err := qualificationKafkaSnapshot(ctx, e.brokers, topic, group)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kafka["lag"].(int64) == 0 {
+				break
+			}
 		}
 		if time.Now().After(recoveryEnd) {
 			t.Fatalf("drain exceeded two minutes; %d unprocessed events", remaining)
@@ -504,17 +518,30 @@ func (r *runningQualificationRelay) stop(t *testing.T) {
 }
 
 type qualificationCommitFactory struct {
-	inner    managed.SourceFactory
-	armed    atomic.Bool
-	injected atomic.Int64
+	inner       managed.SourceFactory
+	armed       atomic.Bool
+	injected    atomic.Int64
+	assignments atomic.Int64
 }
 
 func (f *qualificationCommitFactory) NewSource(id string, listener managed.RebalanceListener) (managed.Source, error) {
-	s, err := f.inner.NewSource(id, listener)
+	s, err := f.inner.NewSource(id, &qualificationAssignmentListener{RebalanceListener: listener, factory: f})
 	if err != nil {
 		return nil, err
 	}
 	return &qualificationCommitSource{Source: s, factory: f}, nil
+}
+
+type qualificationAssignmentListener struct {
+	managed.RebalanceListener
+	factory *qualificationCommitFactory
+}
+
+func (l *qualificationAssignmentListener) Assigned(partitions map[string][]int32) {
+	for _, p := range partitions {
+		l.factory.assignments.Add(int64(len(p)))
+	}
+	l.RebalanceListener.Assigned(partitions)
 }
 
 type qualificationCommitSource struct {
