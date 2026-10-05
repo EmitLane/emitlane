@@ -1,0 +1,78 @@
+name: Release container smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release-smoke.yml
+      - .goreleaser.yaml
+      - Dockerfile.release
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  container:
+    name: release container (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build release CLI
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "/tmp/emitlane-release-smoke/linux/$GOARCH"
+          go build -trimpath -ldflags="-s -w -X main.version=smoke -X main.commit=$(git rev-parse HEAD)" \
+            -o "/tmp/emitlane-release-smoke/linux/$GOARCH/emitlane" ./cmd/emitlane
+          cp Dockerfile.release /tmp/emitlane-release-smoke/Dockerfile
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build candidate container
+        env:
+          SMOKE_ARCH: ${{ matrix.arch }}
+        run: |
+          docker buildx build --load --platform "linux/$SMOKE_ARCH" \
+            --tag emitlane-release-smoke:local /tmp/emitlane-release-smoke
+
+      - name: Run release CLI inside container
+        env:
+          SMOKE_ARCH: ${{ matrix.arch }}
+        run: |
+          actual="$(docker run --rm --network=none --platform "linux/$SMOKE_ARCH" \
+            emitlane-release-smoke:local version)"
+          printf '%s\n' "$actual"
+          [[ "$actual" == *"smoke"* ]]
+          [[ "$actual" == *"$(git rev-parse HEAD)"* ]]
+          docker run --rm --network=none --platform "linux/$SMOKE_ARCH" \
+            emitlane-release-smoke:local help
