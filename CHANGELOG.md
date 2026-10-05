@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/EmitLane/emitlane/compare/v0.9.0...v0.9.1) (2026-10-05)
+
+
+### Dependencies
+
+* **deps:** bump the go-minor-and-patch group across 1 directory with 6 updates ([#30](https://github.com/EmitLane/emitlane/issues/30)) ([3ab8780](https://github.com/EmitLane/emitlane/commit/3ab87800bddc4e9fc0d9679aa96550cbeeaa06b6))
+* **release:** update QEMU and verify amd64/arm64 containers ([#18](https://github.com/EmitLane/emitlane/issues/18)) ([e1c12ca](https://github.com/EmitLane/emitlane/commit/e1c12ca3f9faa3f98221c396255aadb8412ed6b4))
+
 ## [0.9.0](https://github.com/EmitLane/emitlane/compare/v0.8.0...v0.9.0) (2026-10-05)
 
 
