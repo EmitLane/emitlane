@@ -233,7 +233,7 @@ FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mis
 		t.Fatalf("operator audit: poisons=%d repairs=%d audit rows=%d", poisons, repairs, audits)
 	}
 	var streamMismatch int64
-	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.soak_stream_progress s JOIN public.soak_effect_progress e USING(stream) WHERE s.sequence<>e.sequence`).Scan(&streamMismatch); err != nil {
+	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.soak_stream_progress s JOIN public.soak_effect_progress e USING(stream) WHERE s.sequence<>e.sequence OR s.sequence=0`).Scan(&streamMismatch); err != nil {
 		t.Fatal(err)
 	}
 	if streamMismatch != 0 {

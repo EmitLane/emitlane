@@ -120,7 +120,11 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	loadCtx, stopLoad := context.WithTimeout(ctx, c.duration)
 	producerDone := make(chan struct{})
 	var producerFailures atomic.Int64
-	go func() { defer close(producerDone); produceQualification(loadCtx, e, topic, c, &producerFailures) }()
+	producerError := make(chan error, 1)
+	go func() {
+		defer close(producerDone)
+		producerError <- produceQualification(loadCtx, e, topic, c, &producerFailures)
+	}()
 	defer func() { stopLoad(); <-producerDone }()
 	rng := rand.New(rand.NewSource(c.seed))
 	cycles, retriedDead, pruned := 0, int64(0), int64(0)
@@ -132,6 +136,13 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		// Shuffle reproducibly, while preserving every fault in every full cycle.
 		rng.Shuffle(len(faults), func(i, j int) { faults[i], faults[j] = faults[j], faults[i] })
 		for _, fault := range faults {
+			select {
+			case err := <-producerError:
+				if err != nil {
+					t.Fatal(err)
+				}
+			default:
+			}
 			write(map[string]any{"kind": "fault_begin", "time": time.Now().UTC(), "cycle": cycles + 1, "fault": fault})
 			switch fault {
 			case "consumer_crash":
@@ -209,6 +220,13 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	}
 	<-loadCtx.Done()
 	<-producerDone
+	select {
+	case err := <-producerError:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+	}
 	stopLoad()
 	if cycles < 2 {
 		t.Fatalf("only %d full fault cycles completed; increase duration", cycles)
@@ -326,13 +344,13 @@ func qualificationHandler(ctx context.Context, tx pgx.Tx, message managed.Messag
 	return err
 }
 
-func produceQualification(ctx context.Context, e *env, topic string, c qualificationConfig, failures *atomic.Int64) {
+func produceQualification(ctx context.Context, e *env, topic string, c qualificationConfig, failures *atomic.Int64) error {
 	ticker := time.NewTicker(time.Second / time.Duration(c.rate))
 	defer ticker.Stop()
 	for seq := int64(1); ; seq++ {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 		}
 		// Sequence allocation is transactional, so an ambiguous DB commit does
@@ -342,6 +360,9 @@ func produceQualification(ctx context.Context, e *env, topic string, c qualifica
 			p.Stream = fmt.Sprintf("stream-%d", (seq/2)%8)
 		}
 		err := enqueueQualification(ctx, e, topic, uuid.NewString(), p)
+		if errors.Is(err, outbox.ErrInvalidEvent) || errors.Is(err, outbox.ErrDuplicateSequence) || errors.Is(err, outbox.ErrOrderingConflict) || errors.Is(err, outbox.ErrSequenceAlreadyPassed) {
+			return fmt.Errorf("qualification producer: %w", err)
+		}
 		if err != nil && ctx.Err() == nil {
 			failures.Add(1)
 		}
@@ -369,7 +390,11 @@ func enqueueQualification(ctx context.Context, e *env, topic, id string, p quali
 	if err != nil {
 		return err
 	}
-	_, err = e.writer.Enqueue(ctx, tx, outbox.Event{ID: id, Destination: topic, Type: "qualification.input", Key: []byte(id), Payload: payload, OrderingKey: p.Stream, Sequence: p.StreamSequence})
+	key := id
+	if p.Stream != "" {
+		key = p.Stream
+	}
+	_, err = e.writer.Enqueue(ctx, tx, outbox.Event{ID: id, Destination: topic, Type: "qualification.input", Key: []byte(key), Payload: payload, OrderingKey: p.Stream, Sequence: p.StreamSequence})
 	if err != nil {
 		return err
 	}
@@ -396,7 +421,7 @@ func retryQualificationDead(t *testing.T, e *env, name string) int64 {
 	t.Helper()
 	ctx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 	defer stop()
-	rows, err := e.pool.Query(ctx, `SELECT i.event_id,x.poison FROM emitlane.inbox_events i LEFT JOIN public.soak_expected x ON x.event_id=i.event_id WHERE i.consumer=$1 AND i.status='dead' LIMIT 100`, name)
+	rows, err := e.pool.Query(ctx, `SELECT i.event_id,x.poison,i.attempts FROM emitlane.inbox_events i LEFT JOIN public.soak_expected x ON x.event_id=i.event_id WHERE i.consumer=$1 AND i.status='dead' LIMIT 100`, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +429,8 @@ func retryQualificationDead(t *testing.T, e *env, name string) int64 {
 	for rows.Next() {
 		var id uuid.UUID
 		var poison *bool
-		if err := rows.Scan(&id, &poison); err != nil {
+		var attempts int
+		if err := rows.Scan(&id, &poison, &attempts); err != nil {
 			rows.Close()
 			t.Fatal(err)
 		}
@@ -413,6 +439,10 @@ func retryQualificationDead(t *testing.T, e *env, name string) int64 {
 			t.Fatalf("unexpected dead event %s", id)
 		}
 		ids = append(ids, id)
+		if attempts < qualificationConsumerConfig(name, "").MaxAttempts {
+			rows.Close()
+			t.Fatalf("poison %s became dead before retry exhaustion: %d attempts", id, attempts)
+		}
 	}
 	err = rows.Err()
 	rows.Close()
