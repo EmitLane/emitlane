@@ -1,5 +1,8 @@
 # Operations runbook
 
+Starter [alerts and Grafana dashboard](MONITORING.md) and
+[backup/restore procedures](BACKUP_RESTORE.md) complement this command runbook.
+
 ## Observe
 
 Run `emitlane stats`, `emitlane relay status`, and `emitlane doctor` first.

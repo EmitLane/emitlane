@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	mobyclient "github.com/moby/moby/client"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/emitlane/emitlane/broker"
@@ -313,6 +315,32 @@ func TestOrderedStalePublisherReturnsBeforeTakeoverBoundary(t *testing.T) {
 		safetyMargin   = 250 * time.Millisecond
 	)
 
+	oldPublisher, err := kafkapub.NewPublisher(kafkapub.Config{Brokers: e.brokers, ClientID: oldOwner, PublishTimeout: publishTimeout})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oldPublisher.Close() })
+	warmTopic := topicName(t, e)
+	// CreateTopics can return before the broker serves the new partition,
+	// especially immediately after restart. Warm only outside the measured
+	// lease/handoff window, retrying this specific setup race under a bound.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	for {
+		err := oldPublisher.Publish(warmCtx, broker.Message{Destination: warmTopic, Payload: []byte("warm")})
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, kerr.UnknownTopicOrPartition) {
+			t.Fatalf("warm old publisher: %v", err)
+		}
+		select {
+		case <-warmCtx.Done():
+			t.Fatalf("warm old publisher topic did not become ready: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
 	registerOrderingRelay(t, e, oldOwner)
 	if _, err := e.store.ReconcileOrderingPartitions(context.Background(), oldOwner, 3*time.Second, publishTimeout, 5*time.Second, safetyMargin); err != nil {
 		t.Fatal(err)
@@ -329,15 +357,6 @@ func TestOrderedStalePublisherReturnsBeforeTakeoverBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldPublisher, err := kafkapub.NewPublisher(kafkapub.Config{Brokers: e.brokers, ClientID: oldOwner, PublishTimeout: publishTimeout})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = oldPublisher.Close() })
-	warmTopic := topicName(t, e)
-	if err := oldPublisher.Publish(context.Background(), broker.Message{Destination: warmTopic, Payload: []byte("warm")}); err != nil {
-		t.Fatalf("warm old publisher: %v", err)
-	}
 	e.setKafkaPaused(t, true)
 
 	oldStarted := time.Now()

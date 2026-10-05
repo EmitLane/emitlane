@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -68,6 +69,9 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 		got[family.GetName()] = true
 	}
 	for _, name := range []string{
+		"emitlane_stats_interval_seconds",
+		"emitlane_stats_last_success_timestamp_seconds",
+		"emitlane_stats_snapshot_failures_total",
 		"emitlane_events_enqueued_total",
 		"emitlane_events_delivered_total",
 		"emitlane_events_failed_total",
@@ -139,6 +143,8 @@ func TestMetricsExposeRequiredFamilies(t *testing.T) {
 func TestNilMetricsIsNoOp(t *testing.T) {
 	t.Parallel()
 	var metrics *Metrics
+	metrics.SetStatsInterval(0)
+	metrics.RecordStatsSnapshot(false, time.Time{})
 	metrics.IncEnqueued()
 	metrics.IncDelivered()
 	metrics.RecordPublishFailure(false)

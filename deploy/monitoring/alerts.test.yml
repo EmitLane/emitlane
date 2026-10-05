@@ -1,0 +1,447 @@
+rule_files:
+- alerts.yml
+evaluation_interval: 30s
+tests:
+- name: persistent faults fire after their hold period
+  interval: 1m
+  input_series:
+  - series: up{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_stats_interval_seconds{job="emitlane",instance="relay-a"}
+    values: 5x30
+  - series: emitlane_stats_last_success_timestamp_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_pending_events{job="emitlane",instance="relay-a"}
+    values: 10x30
+  - series: emitlane_oldest_pending_seconds{job="emitlane",instance="relay-a"}
+    values: 400x30
+  - series: emitlane_relay_paused{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_dead_events{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_ordering_gap_age_seconds{job="emitlane",instance="relay-a"}
+    values: 90x30
+  - series: emitlane_ordering_streams_gap{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_ordering_streams_dead_blocked{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_events_failed_total{job="emitlane",instance="relay-a",result="retryable"}
+    values: 0+1x30
+  - series: emitlane_control_read_failures_total{job="emitlane",instance="relay-a"}
+    values: 0+1x30
+  - series: emitlane_relay_presence_failures_total{job="emitlane",instance="relay-a",operation="heartbeat"}
+    values: 0+1x30
+  - series: emitlane_consumer_paused_partitions{job="emitlane",instance="relay-a",consumer="billing",reason="dead"}
+    values: 1x30
+  - series: emitlane_consumer_lag_records{job="emitlane",instance="relay-a",consumer="billing",topic="orders"}
+    values: 1001x30
+  - series: emitlane_relay_worker_saturation_ratio{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_integrity_checks_total{job="emitlane",instance="relay-a",mode="summary",result="violations"}
+    values: 0+1x30
+  - series: emitlane_relay_instances_stale{job="emitlane",instance="relay-a"}
+    values: 1x30
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: EmitLaneTargetDown
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneStatsStale
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneBacklogOld
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneDeadEvents
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneOrderingGap
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneOrderingDeadBlocked
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLanePausedBacklog
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLanePublishFailures
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneControlFailures
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLanePresenceFailures
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneConsumerBlocked
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneConsumerLag
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneRelaySaturated
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneIntegrityViolation
+    exp_alerts: []
+  - eval_time: 0m
+    alertname: EmitLaneStaleRelays
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneTargetDown
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: critical
+      exp_annotations:
+        summary: EmitLane metrics target is unavailable
+        description: Check process liveness and the scrape path. A failed readiness probe during a broker outage
+          must not trigger a restart loop.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanetargetdown
+  - eval_time: 20m
+    alertname: EmitLaneStatsStale
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane database snapshot is stale
+        description: Queue and ordering gauges retain their last successful values. Check PostgreSQL connectivity
+          and pool capacity before trusting them.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanestatsstale
+  - eval_time: 20m
+    alertname: EmitLaneBacklogOld
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane pending events are older than five minutes
+        description: Inspect relay status, broker failures, retries and ordering blocks. Do not delete pending events
+          or assume a stopped relay has lost them.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanebacklogold
+  - eval_time: 20m
+    alertname: EmitLaneDeadEvents
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane has dead outbox events
+        description: Inspect redacted dead events and repair the cause. Retry the original identity after review;
+          replay creates a new identity.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanedeadevents
+  - eval_time: 20m
+    alertname: EmitLaneOrderingGap
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane ordered stream has a persistent gap
+        description: Inspect the affected stream and supply the missing domain sequence. Never advance the cursor
+          manually.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneorderinggap
+  - eval_time: 20m
+    alertname: EmitLaneOrderingDeadBlocked
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane ordered stream is blocked by a dead event
+        description: Repair and retry the expected dead event. Later events remain recoverable; historical replay
+          must not move the cursor.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneorderingdeadblocked
+  - eval_time: 20m
+    alertname: EmitLanePublishFailures
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane broker publishes are failing
+        description: Inspect Kafka connectivity, authentication and acknowledgement errors. Keep retryable events
+          durable; assess the configured retry budget.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepublishfailures
+  - eval_time: 20m
+    alertname: EmitLaneControlFailures
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane cannot read durable relay control
+        description: Check PostgreSQL and pool availability. New claims wait for readable control state; do not
+          bypass pause checks.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanecontrolfailures
+  - eval_time: 20m
+    alertname: EmitLanePresenceFailures
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane relay presence writes are failing
+        description: Check PostgreSQL and connection capacity. Presence is visibility data; delivery recovery still
+          depends on event leases.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepresencefailures
+  - eval_time: 20m
+    alertname: EmitLaneConsumerBlocked
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+        consumer: billing
+      exp_annotations:
+        summary: EmitLane managed consumer has blocked partitions
+        description: Inspect Inbox state and the pause reason. Repair the cause; do not commit Kafka offsets past
+          an unprocessed record.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneconsumerblocked
+  - eval_time: 20m
+    alertname: EmitLaneConsumerLag
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+        consumer: billing
+        topic: orders
+      exp_annotations:
+        summary: EmitLane managed consumer lag is sustained
+        description: Inspect blocked partitions, handler latency and worker capacity. Check Kafka retention headroom
+          before increasing concurrency.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneconsumerlag
+  - eval_time: 20m
+    alertname: EmitLaneRelaySaturated
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane relay workers are saturated with backlog
+        description: Compare broker and claim latency with database pool capacity. Raising concurrency without capacity
+          can slow recovery.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanerelaysaturated
+  - eval_time: 20m
+    alertname: EmitLaneIntegrityViolation
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: critical
+      exp_annotations:
+        summary: EmitLane integrity check found durable-state violations
+        description: Capture the integrity JSON report and audit history. Avoid ad-hoc SQL repairs. Checks must
+          be scheduled separately; absence of violations is not proof that a check ran.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneintegrityviolation
+  - eval_time: 20m
+    alertname: EmitLaneStaleRelays
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane relay heartbeat is stale
+        description: Check the named process and lease takeover. Stale presence after process death is expected;
+          it does not itself prove lost events.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanestalerelays
+- name: intentional pause suppresses age and saturation; other instance stays isolated
+  interval: 1m
+  input_series:
+  - series: emitlane_pending_events{job="emitlane",instance="relay-a"}
+    values: 10x30
+  - series: emitlane_oldest_pending_seconds{job="emitlane",instance="relay-a"}
+    values: 400x30
+  - series: emitlane_relay_worker_saturation_ratio{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_relay_paused{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_relay_paused{job="emitlane",instance="relay-b"}
+    values: '0x30'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLaneBacklogOld
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneRelaySaturated
+    exp_alerts: []
+  - eval_time: 14m
+    alertname: EmitLanePausedBacklog
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLanePausedBacklog
+    exp_alerts:
+    - exp_labels:
+        job: emitlane
+        instance: relay-a
+        severity: warning
+      exp_annotations:
+        summary: EmitLane pause is holding pending events
+        description: Confirm that the durable cluster pause is intentional. Resume with an operator reason when
+          maintenance is complete.
+        runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepausedbacklog
+- name: disabled or freshly updated snapshots do not alert
+  interval: 1m
+  input_series:
+  - series: emitlane_stats_interval_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_stats_last_success_timestamp_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_stats_interval_seconds{job="emitlane",instance="relay-b"}
+    values: 60x30
+  - series: emitlane_stats_last_success_timestamp_seconds{job="emitlane",instance="relay-b"}
+    values: 0+60x30
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLaneStatsStale
+    exp_alerts: []
+- name: long configured snapshot interval is respected
+  interval: 1m
+  input_series:
+  - series: emitlane_stats_interval_seconds{job="emitlane",instance="relay-a"}
+    values: 600x30
+  - series: emitlane_stats_last_success_timestamp_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLaneStatsStale
+    exp_alerts: []
+- name: short spike clears before firing
+  interval: 1m
+  input_series:
+  - series: up{job="emitlane",instance="relay-a"}
+    values: 1 0 1x28
+  - series: emitlane_oldest_pending_seconds{job="emitlane",instance="relay-a"}
+    values: 0 400 0x28
+  - series: emitlane_pending_events{job="emitlane",instance="relay-a"}
+    values: 10x30
+  - series: emitlane_relay_paused{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_dead_events{job="emitlane",instance="relay-a"}
+    values: 0 1 0x28
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: EmitLaneTargetDown
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: EmitLaneBacklogOld
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: EmitLaneDeadEvents
+    exp_alerts: []
+- name: consumer handler retries are automatic; not an operator block
+  interval: 1m
+  input_series:
+  - series: emitlane_consumer_paused_partitions{job="emitlane",instance="relay-a",consumer="billing",reason="retry"}
+    values: 1x30
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLaneConsumerBlocked
+    exp_alerts: []
+- name: counter reset without errors does not fire
+  interval: 1m
+  input_series:
+  - series: emitlane_events_failed_total{job="emitlane",instance="relay-a",result="retryable"}
+    values: 10x10 0x19
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLanePublishFailures
+    exp_alerts: []
+- name: healthy instrumented deployment remains quiet
+  interval: 1m
+  input_series:
+  - series: up{job="emitlane",instance="relay-a"}
+    values: 1x30
+  - series: emitlane_stats_interval_seconds{job="emitlane",instance="relay-a"}
+    values: 5x30
+  - series: emitlane_stats_last_success_timestamp_seconds{job="emitlane",instance="relay-a"}
+    values: 0+60x30
+  - series: emitlane_pending_events{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_oldest_pending_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_relay_paused{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_dead_events{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_ordering_gap_age_seconds{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_ordering_streams_gap{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_ordering_streams_dead_blocked{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_events_failed_total{job="emitlane",instance="relay-a",result="retryable"}
+    values: '0x30'
+  - series: emitlane_control_read_failures_total{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_relay_presence_failures_total{job="emitlane",instance="relay-a",operation="heartbeat"}
+    values: '0x30'
+  - series: emitlane_consumer_paused_partitions{job="emitlane",instance="relay-a",consumer="billing",reason="dead"}
+    values: '0x30'
+  - series: emitlane_consumer_lag_records{job="emitlane",instance="relay-a",consumer="billing",topic="orders"}
+    values: '0x30'
+  - series: emitlane_relay_worker_saturation_ratio{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  - series: emitlane_integrity_checks_total{job="emitlane",instance="relay-a",mode="summary",result="violations"}
+    values: '0x30'
+  - series: emitlane_relay_instances_stale{job="emitlane",instance="relay-a"}
+    values: '0x30'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: EmitLaneTargetDown
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneStatsStale
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneBacklogOld
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneDeadEvents
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneOrderingGap
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneOrderingDeadBlocked
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLanePausedBacklog
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLanePublishFailures
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneControlFailures
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLanePresenceFailures
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneConsumerBlocked
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneConsumerLag
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneRelaySaturated
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneIntegrityViolation
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: EmitLaneStaleRelays
+    exp_alerts: []

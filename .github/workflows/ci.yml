@@ -21,6 +21,28 @@ defaults:
     shell: bash
 
 jobs:
+  monitoring:
+    name: monitoring
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate dashboard wiring and queries
+        run: python3 deploy/monitoring/check-dashboard.py > /tmp/emitlane-dashboard-rules.json
+
+      - name: Check and test Prometheus configuration
+        run: |
+          docker run --rm --network=none --entrypoint /bin/sh \
+            -v "$PWD/deploy/monitoring:/rules:ro" \
+            -v /tmp/emitlane-dashboard-rules.json:/dashboard-rules.json:ro \
+            -w /rules \
+            prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 \
+            -ec '/bin/promtool check rules alerts.yml /dashboard-rules.json && /bin/promtool test rules alerts.test.yml'
+
   format:
     name: format
     runs-on: ubuntu-latest

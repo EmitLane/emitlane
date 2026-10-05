@@ -1,0 +1,158 @@
+# Starter thresholds; see docs/MONITORING.md before enabling notifications.
+groups:
+- name: emitlane
+  interval: 30s
+  rules:
+  - alert: EmitLaneTargetDown
+    expr: up{job=~"emitlane.*"} == 0
+    labels:
+      severity: critical
+    annotations:
+      summary: EmitLane metrics target is unavailable
+      description: Check process liveness and the scrape path. A failed readiness probe during a broker outage must
+        not trigger a restart loop.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanetargetdown
+    for: 2m
+  - alert: EmitLaneStatsStale
+    expr: (time() - emitlane_stats_last_success_timestamp_seconds > clamp_min(3 * emitlane_stats_interval_seconds,
+      120)) and (emitlane_stats_interval_seconds > 0)
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane database snapshot is stale
+      description: Queue and ordering gauges retain their last successful values. Check PostgreSQL connectivity
+        and pool capacity before trusting them.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanestatsstale
+    for: 2m
+  - alert: EmitLaneBacklogOld
+    expr: (emitlane_oldest_pending_seconds > 300 and emitlane_pending_events > 0) unless (emitlane_relay_paused
+      == 1)
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane pending events are older than five minutes
+      description: Inspect relay status, broker failures, retries and ordering blocks. Do not delete pending events
+        or assume a stopped relay has lost them.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanebacklogold
+    for: 5m
+  - alert: EmitLaneDeadEvents
+    expr: emitlane_dead_events > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane has dead outbox events
+      description: Inspect redacted dead events and repair the cause. Retry the original identity after review;
+        replay creates a new identity.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanedeadevents
+    for: 5m
+  - alert: EmitLaneOrderingGap
+    expr: emitlane_ordering_gap_age_seconds > 60 and emitlane_ordering_streams_gap > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane ordered stream has a persistent gap
+      description: Inspect the affected stream and supply the missing domain sequence. Never advance the cursor
+        manually.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneorderinggap
+    for: 2m
+  - alert: EmitLaneOrderingDeadBlocked
+    expr: emitlane_ordering_streams_dead_blocked > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane ordered stream is blocked by a dead event
+      description: Repair and retry the expected dead event. Later events remain recoverable; historical replay
+        must not move the cursor.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneorderingdeadblocked
+    for: 5m
+  - alert: EmitLanePausedBacklog
+    expr: emitlane_pending_events > 0 and emitlane_relay_paused == 1
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane pause is holding pending events
+      description: Confirm that the durable cluster pause is intentional. Resume with an operator reason when maintenance
+        is complete.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepausedbacklog
+    for: 15m
+  - alert: EmitLanePublishFailures
+    expr: sum by (job, instance) (rate(emitlane_events_failed_total[5m])) > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane broker publishes are failing
+      description: Inspect Kafka connectivity, authentication and acknowledgement errors. Keep retryable events
+        durable; assess the configured retry budget.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepublishfailures
+    for: 5m
+  - alert: EmitLaneControlFailures
+    expr: increase(emitlane_control_read_failures_total[5m]) > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane cannot read durable relay control
+      description: Check PostgreSQL and pool availability. New claims wait for readable control state; do not bypass
+        pause checks.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanecontrolfailures
+    for: 1m
+  - alert: EmitLanePresenceFailures
+    expr: sum by (job, instance) (rate(emitlane_relay_presence_failures_total[5m])) > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane relay presence writes are failing
+      description: Check PostgreSQL and connection capacity. Presence is visibility data; delivery recovery still
+        depends on event leases.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanepresencefailures
+    for: 5m
+  - alert: EmitLaneConsumerBlocked
+    expr: sum by (job, instance, consumer) (emitlane_consumer_paused_partitions{reason=~"dead|protocol|database|offset_commit"})
+      > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane managed consumer has blocked partitions
+      description: Inspect Inbox state and the pause reason. Repair the cause; do not commit Kafka offsets past
+        an unprocessed record.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneconsumerblocked
+    for: 5m
+  - alert: EmitLaneConsumerLag
+    expr: emitlane_consumer_lag_records > 1000
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane managed consumer lag is sustained
+      description: Inspect blocked partitions, handler latency and worker capacity. Check Kafka retention headroom
+        before increasing concurrency.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneconsumerlag
+    for: 10m
+  - alert: EmitLaneRelaySaturated
+    expr: (emitlane_relay_worker_saturation_ratio >= 0.9 and emitlane_pending_events > 0) unless (emitlane_relay_paused
+      == 1)
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane relay workers are saturated with backlog
+      description: Compare broker and claim latency with database pool capacity. Raising concurrency without capacity
+        can slow recovery.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanerelaysaturated
+    for: 10m
+  - alert: EmitLaneIntegrityViolation
+    expr: sum by (job, instance) (increase(emitlane_integrity_checks_total{result="violations"}[1h])) > 0
+    labels:
+      severity: critical
+    annotations:
+      summary: EmitLane integrity check found durable-state violations
+      description: Capture the integrity JSON report and audit history. Avoid ad-hoc SQL repairs. Checks must be
+        scheduled separately; absence of violations is not proof that a check ran.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlaneintegrityviolation
+  - alert: EmitLaneStaleRelays
+    expr: emitlane_relay_instances_stale > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: EmitLane relay heartbeat is stale
+      description: Check the named process and lease takeover. Stale presence after process death is expected; it
+        does not itself prove lost events.
+      runbook_url: https://github.com/EmitLane/emitlane/blob/main/docs/MONITORING.md#emitlanestalerelays
+    for: 10m
