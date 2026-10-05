@@ -157,6 +157,7 @@ func New(cfg Config, store Store, pub broker.Publisher, opts ...Option) (*Relay,
 	if r.rnd == nil {
 		r.rnd = newLockedRand(1, 2)
 	}
+	r.metrics.SetStatsInterval(cfg.StatsInterval)
 	return r, nil
 }
 
@@ -730,6 +731,7 @@ func (r *Relay) refreshStats(ctx context.Context) {
 		st, err = r.store.StatsSnapshot(ctx)
 	}
 	if err != nil {
+		r.metrics.RecordStatsSnapshot(false, r.clock.Now())
 		r.log.Warn("stats snapshot failed", "error", err)
 		return
 	}
@@ -742,6 +744,7 @@ func (r *Relay) refreshStats(ctx context.Context) {
 		float64(st.GapStreams), float64(st.DeadBlockedStreams),
 		float64(st.OwnedPartitions), float64(st.HandoffPartitions), st.MaxGapAgeSeconds,
 	)
+	r.metrics.RecordStatsSnapshot(true, r.clock.Now())
 }
 
 func (r *Relay) heartbeatLoop(ctx context.Context, store PresenceStore) {

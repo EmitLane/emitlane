@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -60,6 +62,9 @@ type Metrics struct {
 	relayClaimDuration     prometheus.Histogram
 	relayBackpressure      *prometheus.CounterVec
 	relayWakeups           *prometheus.CounterVec
+	statsInterval          prometheus.Gauge
+	statsLastSuccess       prometheus.Gauge
+	statsFailures          prometheus.Counter
 }
 
 // NewMetrics registers instruments with reg. Labels are bounded enums or
@@ -69,6 +74,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		reg = prometheus.DefaultRegisterer
 	}
 	m := &Metrics{
+		statsInterval:    prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "stats_interval_seconds", Help: "Configured Relay database snapshot interval; zero means disabled or no Relay configured."}),
+		statsLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "stats_last_success_timestamp_seconds", Help: "Unix time of the last successful Relay database snapshot; zero until the first success."}),
+		statsFailures:    prometheus.NewCounter(prometheus.CounterOpts{Namespace: namespace, Name: "stats_snapshot_failures_total", Help: "Failed Relay database snapshot reads; queue gauges retain their last successful values."}),
 		enqueued: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "events_enqueued_total",
@@ -284,6 +292,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		}
 	}
 	collectors := []prometheus.Collector{
+		m.statsInterval,
+		m.statsLastSuccess,
+		m.statsFailures,
 		m.enqueued,
 		m.delivered,
 		m.failed,
@@ -348,6 +359,26 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		registered = append(registered, c)
 	}
 	return m, nil
+}
+
+// SetStatsInterval declares whether a Relay collects database snapshots.
+func (m *Metrics) SetStatsInterval(interval time.Duration) {
+	if m != nil {
+		m.statsInterval.Set(max(0, interval.Seconds()))
+	}
+}
+
+// RecordStatsSnapshot marks freshness only after all snapshot gauges are set.
+// Failure leaves the last successful timestamp and queue gauges intact.
+func (m *Metrics) RecordStatsSnapshot(success bool, completedAt time.Time) {
+	if m == nil {
+		return
+	}
+	if !success {
+		m.statsFailures.Inc()
+		return
+	}
+	m.statsLastSuccess.Set(float64(completedAt.UnixNano()) / 1e9)
 }
 
 func (m *Metrics) SetRelayCapacity(active, capacity int) {
