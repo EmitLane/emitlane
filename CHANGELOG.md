@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/EmitLane/emitlane/compare/v0.8.0...v0.9.0) (2026-10-05)
+
+
+### Features
+
+* **operations:** prepare v0.9 monitoring and recovery qualification ([#33](https://github.com/EmitLane/emitlane/issues/33)) ([ff73dab](https://github.com/EmitLane/emitlane/commit/ff73dabe1564e3d0d4aae36ee94ba4a138e8c0d2))
+
 ## [0.8.0](https://github.com/EmitLane/emitlane/compare/v0.7.0...v0.8.0) (2026-10-01)
 
 
