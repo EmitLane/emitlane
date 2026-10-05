@@ -250,6 +250,8 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 - [Replay safety](docs/REPLAY.md)
 - [Integrity verification](docs/INTEGRITY.md)
 - [Operations runbook](docs/OPERATIONS.md)
+- [Prometheus alerts and Grafana dashboard](docs/MONITORING.md)
+- [Backup and restore](docs/BACKUP_RESTORE.md)
 - [Benchmark harness](docs/BENCHMARKING.md)
 - [Performance and capacity](docs/PERFORMANCE.md)
 - [Upgrading](docs/UPGRADING.md)
@@ -258,10 +260,11 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-[v0.7.0](https://github.com/EmitLane/emitlane/releases/tag/v0.7.0) is the released
-baseline, including Kafka TLS/SASL. [v0.8 development](docs/V0_8.md) focuses on
-compatibility contracts, migration safety, and unambiguous event metadata,
-without a new schema migration. Managed processing is duplicate-safe
+[v0.8.0](https://github.com/EmitLane/emitlane/releases/tag/v0.8.0) is the released
+baseline, including Kafka TLS/SASL, compatibility contracts, migration safety and
+unambiguous event metadata. [v0.9 development](docs/V0_9.md) focuses on operational
+readiness: tested monitoring configuration, snapshot freshness and stronger
+backup/restore and managed consumer audit evidence, without a new schema migration. Managed processing is duplicate-safe
 for PostgreSQL effects committed with the Inbox transition, while Kafka and the
 relay remain at least once. As a pre-1.0 project, APIs and operational defaults
 may still change during the `v0.x` series.
