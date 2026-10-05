@@ -4,12 +4,14 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/emitlane/emitlane/outbox"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
@@ -53,7 +55,7 @@ VALUES ('restore-consumer', $1, $2, NULL, 2, 'restore.orders', 0, $3, 'preserve 
 			t.Fatal(err)
 		}
 	}
-	snapshot := migrationCompatibilitySnapshot(t, ctx, source)
+	snapshot := logicalRestoreSnapshot(t, ctx, source)
 	var orderingBefore string
 	if err := source.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(s) ORDER BY destination, ordering_key)::text FROM emitlane.ordering_streams s`).Scan(&orderingBefore); err != nil {
 		t.Fatal(err)
@@ -82,8 +84,8 @@ VALUES ('restore-consumer', $1, $2, NULL, 2, 'restore.orders', 0, $3, 'preserve 
 		"--format=custom", "--no-owner", "--no-acl", "--file="+dumpPath)
 	run("pg_restore", "--username=emitlane", "--dbname="+restored.Config().ConnConfig.Database,
 		"--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", dumpPath)
-	if after := migrationCompatibilitySnapshot(t, ctx, restored); after != snapshot {
-		t.Fatalf("restore changed retained Outbox/Inbox/history/constraints\nbefore: %s\nafter: %s", snapshot, after)
+	if after := logicalRestoreSnapshot(t, ctx, restored); after != snapshot {
+		t.Fatal("restore changed retained Outbox/Inbox/history/constraints")
 	}
 	var orderingAfter string
 	if err := restored.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(s) ORDER BY destination, ordering_key)::text FROM emitlane.ordering_streams s`).Scan(&orderingAfter); err != nil {
@@ -100,7 +102,29 @@ FROM public.restore_orders b JOIN emitlane.outbox_events o USING (id) WHERE b.id
 	if err := pgstore.MigrateUp(ctx, restored); err != nil {
 		t.Fatal(fmt.Errorf("migrate restored current schema: %w", err))
 	}
-	if after := migrationCompatibilitySnapshot(t, ctx, restored); after != snapshot {
+	if after := logicalRestoreSnapshot(t, ctx, restored); after != snapshot {
 		t.Fatal("repeated migration changed restored retained state")
 	}
+}
+
+func logicalRestoreSnapshot(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
+	t.Helper()
+	var snapshot map[string]any
+	if err := json.Unmarshal([]byte(migrationCompatibilitySnapshot(t, ctx, pool)), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	// The source and restore intentionally use different database names.
+	// Preserve column definitions but omit the catalog-name references, which
+	// PostgreSQL correctly rewrites to the destination database during restore.
+	for _, column := range snapshot["columns"].([]any) {
+		definition := column.(map[string]any)
+		for _, name := range []string{"table_catalog", "udt_catalog", "domain_catalog", "collation_catalog"} {
+			delete(definition, name)
+		}
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
