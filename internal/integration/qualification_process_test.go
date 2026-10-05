@@ -143,7 +143,9 @@ func TestQualificationProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, err := kafkaadapter.NewPublisher(kafkaadapter.Config{Brokers: brokers, ClientID: "qualification-crash-child", PublishTimeout: 500 * time.Millisecond})
+	// franz-go requires RecordDeliveryTimeout >= 1s. Relay still supplies its
+	// tighter 500ms publish context and matching ordering fence.
+	pub, err := kafkaadapter.NewPublisher(kafkaadapter.Config{Brokers: brokers, ClientID: "qualification-crash-child", PublishTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
