@@ -5,6 +5,7 @@ package integration_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -64,11 +65,15 @@ func TestManagedConsumerReliabilitySoak(t *testing.T) {
 	commitFailure := make(chan struct{}, 1)
 	failFactory := &failFirstCommitFactory{inner: newManagedFactory(t, e, topic, group), failed: commitFailure}
 	handler := func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+		var payload soakPayload
+		if err := json.Unmarshal(message.Payload, &payload); err != nil {
+			return err
+		}
 		if int(message.EventID[0])%19 == 0 && message.Attempt == 1 {
 			return errors.New("injected retryable handler failure")
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id, amount) VALUES ($1, $2)`,
-			message.EventID.String(), message.Attempt)
+			message.EventID.String(), payload.Sequence)
 		return err
 	}
 	consumerA := launchManaged(t, e, configA, store, failFactory, handler)
@@ -89,6 +94,11 @@ func TestManagedConsumerReliabilitySoak(t *testing.T) {
 			case <-ticker.C:
 			}
 			eventID := uuid.New()
+			payload, err := json.Marshal(soakPayload{Seed: seed, Sequence: sequence})
+			if err != nil {
+				producerFailures.Add(1)
+				continue
+			}
 			tx, err := e.pool.Begin(soakCtx)
 			if err != nil {
 				producerFailures.Add(1)
@@ -98,7 +108,7 @@ func TestManagedConsumerReliabilitySoak(t *testing.T) {
 				"soak-"+eventID.String(), sequence); err == nil {
 				_, err = writer.Enqueue(soakCtx, tx, outbox.Event{
 					ID: eventID.String(), Destination: topic, Type: "soak.input",
-					Key: []byte(eventID.String()), Payload: []byte(seed),
+					Key: []byte(eventID.String()), Payload: payload,
 				})
 			}
 			if err == nil {
@@ -187,10 +197,21 @@ FROM emitlane.inbox_events WHERE consumer=$1`, consumerName).Scan(
 	if report.Summary.Violations != 0 || report.Summary.InboxStaleLeases != 0 {
 		t.Fatalf("soak integrity result: %+v", report)
 	}
+	auditCtx, cancelAudit := context.WithTimeout(context.Background(), 30*time.Second)
+	expected, err := auditManagedSoakDatabase(auditCtx, e.pool, topic, consumerName)
+	cancelAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := consumeTopicSnapshot(t, e.brokers, topic, 60*time.Second)
+	duplicates, err := auditManagedSoakRecords(records, expected, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	commit, branch, dirty, diffHash := soakGitProvenance(t)
-	t.Logf("consumer_soak result=PASS profile=short duration=%s seed=%s platform=%s/%s git_commit=%s git_branch=%s git_dirty=%t git_diff_sha256=%s committed=%d processed=%d protected_effects=%d retries=%d producer_transient_failures=%d",
+	t.Logf("consumer_soak result=PASS profile=managed duration=%s seed=%s platform=%s/%s git_commit=%s git_branch=%s git_dirty=%t git_diff_sha256=%s committed=%d processed=%d protected_effects=%d retries=%d producer_transient_failures=%d kafka_records=%d kafka_duplicates=%d audited_ids=%d",
 		duration, seed, runtime.GOOS, runtime.GOARCH, commit, branch, dirty, diffHash,
-		total, processed, business, retried, producerFailures.Load())
+		total, processed, business, retried, producerFailures.Load(), len(records), duplicates, len(expected))
 }
 
 func waitSoakPhase(t *testing.T, ctx context.Context, duration time.Duration) {
