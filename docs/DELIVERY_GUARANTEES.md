@@ -23,7 +23,8 @@ Broker delivery is at least once.
 The claim transaction marks rows `inflight` and assigns `lease_owner` /
 `lease_until`. That transaction is committed **before** any Kafka I/O. A process
 crash after claim and before publish leaves an expiring lease; another worker
-recovers the event without consuming a publish attempt.
+recovers it. Claim alone consumes no publish attempt; a crash after the
+pre-publish attempt increment can over-count one attempt.
 
 Kafka acknowledgement is required before the row is marked `delivered`. If the
 process dies after broker ACK and before the database update, the event remains
@@ -36,6 +37,10 @@ request, and PostgreSQL retry may duplicate it. Disabling producer sequence
 state prevents a later distinct event from being falsely acknowledged against
 an unresolved earlier sequence.
 
+Outbox event leases expire without renewal during publish. The configured
+publish timeout must be shorter than the lease duration. Ordered partition
+leases and managed Inbox leases are renewed by their own protocols.
+
 ## Attempts
 
 `attempts` is the number of broker publish attempts that have been started. The
@@ -47,6 +52,37 @@ becomes `dead`. Dead events are never deleted automatically.
 There is an unavoidable narrow crash window after recording an attempt and
 before entering the Kafka client. This can over-count an attempt, but it cannot
 silently lose or delete the event.
+
+## Retry policy
+
+Relay retry uses exponential backoff with full jitter:
+
+```text
+cap = min(max_delay, base_delay * 2^(attempt - 1))
+delay = random(0, cap)
+```
+
+With defaults, the first failed call waits between zero and one second and
+later caps double. The configured delay ceiling is 30 minutes, but the default
+ten-attempt budget is exhausted before reaching it. The tenth failed call moves
+to `dead`. Permanent broker
+errors move directly to `dead`. Policy exhaustion preserves the event for an
+operator; an extended outage does not promise automatic delivery after the
+attempt budget has been exhausted.
+
+## Pause, retry, and replay
+
+Pause gates new PostgreSQL claims across current relays. Already-claimed work
+may finish; pause is not a dependency failure and does not fail health probes.
+
+Outbox dead retry preserves identity, resets attempts and returns the row to
+`pending`. Managed Inbox dead retry preserves identity, source coordinates and
+attempt history and moves to `retry_wait`. Both mutations are audited.
+
+Replay creates a new UUIDv7 with source and batch provenance, leaves the source
+unchanged and can execute downstream business effects again. Ordered sources
+require explicit unordered replay, which does not advance the historical stream.
+See [Replay safety](REPLAY.md) and [Operations](OPERATIONS.md).
 
 ## Consumer / Inbox
 

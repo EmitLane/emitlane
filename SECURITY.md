@@ -1,6 +1,6 @@
 # Security policy
 
-EmitLane has published pre-1.0 releases; v0.7.0 is the current released baseline.
+EmitLane has published pre-1.0 releases; the current version is v0.9.1.
 When reporting a vulnerability, identify the affected tag and whether it also
 affects the latest release. A long-term support window and backport policy have
 not yet been established; do not assume older minor versions receive fixes.

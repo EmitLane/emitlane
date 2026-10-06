@@ -1,11 +1,35 @@
 # Upgrading EmitLane
 
-## v0.7 to v0.8 development: compatibility guards
+The current release is **v0.9.1** and requires schema **4** for standalone
+Relay startup. Back up before migrations, use one migration runner and verify
+readiness after rollout. Binary rollback and database downgrade are separate
+operations; never use a down migration as a routine binary rollback.
+
+## v0.8 to v0.9 / v0.9.1: monitoring and recovery
+
+These releases retain schema 4 and the existing delivery and managed consumer
+state transitions. No new migration is required. Roll out Relays individually
+and adopt the [Monitoring](MONITORING.md) assets with deployment-specific scrape
+jobs, consumer labels, thresholds and alert routing.
+
+Queue snapshot freshness metrics distinguish a successful HTTP scrape from
+fresh database observations. Read [Backup and restore](BACKUP_RESTORE.md) before
+recovering PostgreSQL and Kafka independently. v0.9 adds recovery fixtures;
+it does not provide automatic cross-system restore or qualify multi-broker
+faults, production-size PITR or a version matrix.
+
+v0.9.1 updates dependencies and release-container verification. Review its
+[Changelog](../CHANGELOG.md) entry when pinning artifacts. Binary rollback to
+v0.8 keeps schema 4; retain an appropriate monitoring configuration because
+older binaries do not export the new snapshot freshness instruments.
+
+## v0.7 to v0.8: compatibility guards
 
 v0.8 retains schema 4 and existing public function signatures. Deploying this
 binary does not require a new migration. Apply ordinary readiness checks and
 roll out Relays one at a time. Kafka transport security requirements remain the
-same. The candidate must pass qualification before release; see [v0.8 scope](V0_8.md).
+same. See the historical [v0.8 release record](releases/v0.8.0.md) for
+the scope and candidate evidence.
 
 Migration history must be exactly a contiguous prefix `1..N` where `N <= 4`.
 `MigrateUp`, `MigrateDown` and `SchemaVersion` now return an error wrapping
@@ -198,3 +222,15 @@ handler for the same consumer/event identity.
 The v4 down migration refuses rollback while any Inbox row is not a
 legacy-compatible processed marker. Export or resolve managed state before an
 intentional rollback; never discard pending, inflight, retry, or dead work.
+
+## v0.5 to v0.6: scaling and backpressure
+
+v0.6 retains schema 4. It adds bounded worker refill, adaptive idle polling and
+concurrency/backpressure observations. No migration is required; existing
+consumer lifecycle identities and delivery guarantees remain unchanged.
+
+Review Relay and consumer concurrency together with database connections and
+Kafka partitions. See [Performance](PERFORMANCE.md) and the current
+[Configuration](CONFIGURATION.md) reference rather than assuming that a larger
+batch increases active worker capacity. Embedded callers must keep
+`IdleBackoffMax >= PollInterval`. Binary rollback to v0.5 keeps schema 4.

@@ -1,8 +1,10 @@
 # PostgreSQL data model
 
 PostgreSQL is the durable source of truth. Payload is opaque `BYTEA`; routing,
-state, tracing, and diagnostics use explicit columns. Migration version 1 owns
-only the objects listed below.
+state, tracing, and diagnostics use explicit columns. The current schema is
+version 4. The initial tables below describe migration 1; the version 2–4
+sections describe its additive evolution. The embedded [SQL migrations](../migrations/)
+are the authoritative definitions, including constraints and triggers.
 
 ## Outbox table
 
@@ -118,7 +120,7 @@ applying SQL. Down migrations v3/v4 lock protected tables before checking state
 so concurrent inserts cannot invalidate a safety check. See
 [upgrade and rollback procedures](UPGRADING.md).
 
-The down migration explicitly drops only the tables and helper function created
+The version 1 down migration explicitly drops only the tables and helper function created
 by version 1. It never uses `DROP SCHEMA ... CASCADE`. If application-owned
 objects exist in the `emitlane` schema, they and the schema are preserved.
 
@@ -146,7 +148,7 @@ immutable.
 
 ## Schema version 3
 
-Migration `000003_ordered_delivery` is additive to the released v2 schema. It
+Migration `000003_ordering` is additive to the released v2 schema. It
 adds nullable `ordering_key`, `ordering_sequence`, and `ordering_partition`
 columns to outbox rows. A check constraint requires all three or none, and a
 partial unique index protects `(destination, ordering_key, ordering_sequence)`.

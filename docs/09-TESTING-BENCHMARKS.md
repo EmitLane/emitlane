@@ -6,32 +6,20 @@ EmitLane is infrastructure. Unit tests are necessary but insufficient. The proje
 
 ## CI baseline
 
-Every pull request should eventually run:
-
-```text
-gofmt check
-go vet
-staticcheck
-go test ./...
-go test -race ./...
-govulncheck
-integration: PostgreSQL
-integration: Kafka
-```
+The committed [CI workflow](../.github/workflows/ci.yml) defines formatting,
+vet, staticcheck, unit and race tests, PostgreSQL/Kafka integration tests,
+vulnerability scanning, builds, and monitoring configuration checks.
+[Benchmark smoke](../.github/workflows/benchmark-smoke.yml) and
+[release artifact smoke](../.github/workflows/release-smoke.yml) run under their
+own triggers. Workflow definitions describe coverage, not proof that a specific
+commit passed; report results with the exact commit and environment.
 
 ## Integration environment
 
-Use Testcontainers or an equivalent reproducible setup for:
-
-```text
-PostgreSQL
-Kafka
-EmitLane
-Producer fixture
-Consumer fixture
-```
-
-Do not mock the broker for the tests that claim delivery correctness.
+The integration suite uses Testcontainers with PostgreSQL 16 and Kafka 4.3.1.
+Correctness scenarios use real storage and broker clients, alongside targeted
+fault-injection hooks. Single-broker tests do not qualify multi-broker leader/ISR
+failures or an infrastructure version matrix.
 
 ## Required chaos/failure tests
 
@@ -59,7 +47,7 @@ Inbox prevents duplicate local DB effect
 
 This is one of the most important tests in the whole project.
 
-### Scenario C — Kafka unavailable for ten minutes
+### Scenario C — Kafka unavailable beyond one retry delay
 
 Expected:
 
@@ -68,7 +56,11 @@ Expected:
 - database load remains bounded;
 - events remain durable;
 - metrics expose backlog age;
-- delivery resumes when Kafka recovers.
+- pending/retryable work resumes when Kafka recovers;
+- events that exhausted the attempt budget remain `dead` until operator retry.
+
+For a ten-minute outage drill, record a retry policy with enough budget for the
+intended automatic recovery. The default finite policy can exhaust before then.
 
 ### Scenario D — relay instance death
 
@@ -122,67 +114,29 @@ Expected:
 
 ## Example demo application
 
-`examples/ecommerce` should contain:
+[`examples/ecommerce`](../examples/ecommerce/) runs an Orders HTTP API and a
+managed Payments consumer in one example process. `POST /orders` commits the
+order and Outbox row in one transaction; Relay publishes `order.created`;
+Payments commits its protected database effect and Inbox marker together.
+There is no Email service or `payment.completed` stage in this example.
 
-```text
-Order Service
-Payment Service
-Email Service
-```
+The [Quickstart](QUICKSTART.md) and `scripts/demo-chaos.sh` show broker outage,
+durable backlog and recovery. Repeatable crash-window and multi-instance
+scenarios live in the integration suite and soak runners.
 
-Flow:
+## Benchmark harness
 
-```text
-POST /orders
-      │
-      ▼
-Order DB + outbox
-      │
-      ▼
-order.created
-      │
-      ▼
-Payment Service + inbox
-      │
-      ▼
-payment.completed
-      │
-      ▼
-Email Service
-```
-
-A chaos/demo script should be able to:
-
-```text
-stop Kafka
-create 1,000 orders
-show durable backlog
-restart Kafka
-prove all events eventually arrive
-```
-
-## Benchmark command concept
+The executable is a separate Go harness, not an `emitlane benchmark` subcommand:
 
 ```bash
-emitlane benchmark \
-  --events 1000000 \
-  --payload-size 1024 \
-  --workers 8
+go run ./benchmarks/cmd/emitlane-bench --help
 ```
 
-Measure:
-
-- enqueue throughput;
-- relay throughput;
-- p50/p95/p99 delivery latency;
-- CPU;
-- PostgreSQL CPU/I/O;
-- Kafka publish rate;
-- retry overhead;
-- DB queries per idle second;
-- effect of batch size;
-- effect of concurrency;
-- effect of multiple relay instances.
+Use [Benchmarking](BENCHMARKING.md) for supported scenarios, flags, environment
+metadata and JSON output; use [Performance](PERFORMANCE.md) for tuning and
+measurement boundaries. Measure enqueue/delivery rates, latency percentiles,
+CPU and allocation profiles, database/broker costs, idle polling, retries,
+batching and concurrency under a reproducible workload.
 
 ## Important benchmark rule
 
@@ -195,8 +149,6 @@ Do **not** market arbitrary throughput numbers until a reproducible benchmark ex
 - durability settings;
 - source code/command;
 - warm-up method.
-
-## LISTEN/NOTIFY benchmark question
 
 ## v0.6 scale checks
 

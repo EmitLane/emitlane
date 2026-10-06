@@ -105,7 +105,7 @@ The managed runtime does not make HTTP, email, filesystem, or other external
 effects transactional. A downstream EmitLane Outbox row should be written in
 the handler transaction instead.
 
-### Admin API — post-v0.1 operability feature
+### Admin API
 
 Responsibilities:
 
@@ -120,11 +120,11 @@ Responsibilities:
 
 Responsibilities:
 
-- migrations;
-- diagnostics;
-- dead-event listing and retry;
-- version/build information;
-- `doctor` checks.
+- migrations and dependency/schema diagnostics;
+- redacted event, relay, ordering, and Inbox inspection;
+- audited pause/resume, dead retry, and replay;
+- read-only integrity checks;
+- version/build information.
 
 ## Deployment modes
 
@@ -191,37 +191,28 @@ The database transaction used to claim events must be committed **before broker 
 
 ## Claiming strategy
 
-Use PostgreSQL row locking:
+The unordered claim path uses two bounded `FOR UPDATE SKIP LOCKED` scans:
+first due `pending` rows, then expired `inflight` rows for remaining capacity.
+Both exclude ordered events and require the durable runtime-control row to be
+unpaused. This avoids the former combined pending-or-expired `OR` query.
 
-```sql
-WITH picked AS (
-    SELECT id
-    FROM emitlane.outbox_events
-    WHERE available_at <= NOW()
-      AND (
-            status = 'pending'
-         OR (status = 'inflight' AND lease_until <= NOW())
-      )
-    ORDER BY available_at, created_at, id
-    FOR UPDATE SKIP LOCKED
-    LIMIT $1
-)
-UPDATE emitlane.outbox_events AS e
-SET
-    status = 'inflight',
-    lease_owner = $2,
-    lease_until = NOW() + ($3 * INTERVAL '1 millisecond')
-FROM picked
-WHERE e.id = picked.id
-RETURNING e.*;
-```
+The selected rows receive `status=inflight`, the instance owner and a
+PostgreSQL-clock lease expiry in the same short transaction. Claim commits
+before the rows are dispatched. Every claim is capped by free worker slots;
+there is no prefetched queue of leased events.
 
-Properties:
+The separate ordered claim joins stream cursors and partition authority. It
+requires the expected sequence, matching owner/epoch, a valid partition lease,
+a passed handoff barrier and unpaused control state. Scheduler refill alternates
+ordered and unordered priority when both populations have work.
 
-- competing relay instances skip locked rows;
-- the claim transaction is short;
-- a worker crash leaves an expiring lease instead of a permanent lock;
-- old in-flight rows can be reclaimed.
+The authoritative SQL lives in [unordered storage](../storage/postgres/store.go)
+and [ordered storage](../storage/postgres/ordered_delivery.go). See
+[Ordered delivery](ORDERED_DELIVERY.md) for fencing and timing assumptions.
+
+Outbox event leases are not renewed during publish. Publish timeout must remain
+below the event lease. Ordered partition leases and managed Inbox leases have
+separate renewal protocols. Expired event leases remain automatically recoverable.
 
 ## Wake-up strategy
 
@@ -246,7 +237,7 @@ Important PostgreSQL semantics:
 - therefore notification cannot be the durable queue;
 - table polling remains the source-of-truth fallback.
 
-## Proposed packages
+## Package layout
 
 Go module: `github.com/emitlane/emitlane`
 
@@ -285,20 +276,20 @@ emitlane/
 
 ## Dependency direction
 
-Suggested layering:
+Package layering:
 
 ```text
 outbox        → small DB abstractions only
 inbox         → small DB abstractions only
 relay         → storage port + publisher port + telemetry ports
 broker/kafka  → implements publisher and managed consumer source
-storage/pg    → implements storage
+storage/postgres → implements storage
 cmd           → composition root
 ```
 
 Do not let core packages depend on Kafka-specific types.
 
-## Proposed technology choices
+## Technology choices
 
 - Go;
 - `pgx/v5`;

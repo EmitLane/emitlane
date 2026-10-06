@@ -18,9 +18,14 @@ compose file:
 EMITLANE_POSTGRES_PORT=15432 \
 EMITLANE_KAFKA_PORT=29092 \
 EMITLANE_HTTP_PORT=18080 \
+EMITLANE_ADMIN_PORT=18082 \
 ECOMMERCE_HTTP_PORT=18081 \
 docker compose -f docker-compose.example.yml up --build
 ```
+
+The example commands below use the default ports; substitute your overrides
+when configured. The Compose Admin API uses port 8082 and the development token
+`emitlane-local-admin`. See the [Swagger UI guide](openapi/README.md).
 
 Create an order (business row + outbox event in one transaction):
 
@@ -102,57 +107,71 @@ default; they may contain PII.
 
 ## PostgreSQL roles
 
-Do not use a superuser at runtime. Suggested grants (adjust role names):
+Apply migrations as a separate DDL owner before granting runtime access.
+Create the login roles through your deployment tooling first, grant `CONNECT`
+on the application database, and adapt the role names below. These grants cover
+EmitLane schema 4; grant access to your own business tables separately.
 
 ```sql
-GRANT USAGE ON SCHEMA emitlane TO emitlane_writer, emitlane_relay, emitlane_consumer;
+GRANT USAGE ON SCHEMA emitlane
+TO emitlane_writer, emitlane_relay, emitlane_consumer,
+   emitlane_reader, emitlane_operator;
 
+-- Writer: caller-owned transactions, including optional ordered writes.
 GRANT INSERT ON TABLE emitlane.outbox_events TO emitlane_writer;
 GRANT SELECT, INSERT, UPDATE ON TABLE emitlane.ordering_streams TO emitlane_writer;
 
+-- Standalone relay: startup/readiness read the migration history.
+GRANT SELECT ON TABLE emitlane.schema_migrations TO emitlane_relay;
 GRANT SELECT, UPDATE ON TABLE emitlane.outbox_events TO emitlane_relay;
-GRANT SELECT, UPDATE ON TABLE emitlane.ordering_streams, emitlane.ordering_partitions TO emitlane_relay;
+GRANT SELECT, UPDATE ON TABLE emitlane.ordering_streams,
+    emitlane.ordering_partitions TO emitlane_relay;
 GRANT SELECT ON TABLE emitlane.runtime_control TO emitlane_relay;
 GRANT SELECT, INSERT, UPDATE ON TABLE emitlane.relay_instances TO emitlane_relay;
-GRANT DELETE ON TABLE emitlane.outbox_events TO emitlane_relay; -- delivered cleanup only
+GRANT DELETE ON TABLE emitlane.outbox_events TO emitlane_relay;
+-- Omit DELETE only when EMITLANE_RETENTION_DELIVERED=0.
 
+-- Consumer: legacy helpers and managed Inbox lifecycle.
 GRANT INSERT, SELECT, UPDATE ON TABLE emitlane.inbox_events TO emitlane_consumer;
+GRANT SELECT ON TABLE emitlane.schema_migrations TO emitlane_consumer;
+-- Add writer grants if its handler enqueues a downstream Outbox event.
+
+-- Read-only CLI inspection and integrity checks.
+GRANT SELECT ON TABLE emitlane.schema_migrations, emitlane.outbox_events,
+    emitlane.inbox_events, emitlane.ordering_streams, emitlane.ordering_partitions,
+    emitlane.runtime_control, emitlane.relay_instances, emitlane.admin_audit_log
+TO emitlane_reader, emitlane_operator;
+
+-- Operator mutations: pause/resume, retry, replay and transactional audit.
+GRANT INSERT, UPDATE ON TABLE emitlane.outbox_events TO emitlane_operator;
+GRANT UPDATE ON TABLE emitlane.runtime_control, emitlane.inbox_events
+TO emitlane_operator;
+GRANT INSERT ON TABLE emitlane.admin_audit_log TO emitlane_operator;
 ```
 
-`pg_notify` / `LISTEN` do not require superuser.
+The standalone Admin API shares the relay's pool and database identity. If you
+enable it, grant that identity the operator's read and mutation privileges too,
+for example with `GRANT emitlane_operator TO emitlane_relay` when role
+inheritance is configured. A CLI operator can use its own database credentials.
+There is no separate Admin API database URL or per-token read-only role.
 
-## Environment variables
+`doctor` checks relay permissions and, when Admin API is enabled, operational
+mutation permissions. Its ordering check also requires `INSERT` on
+`ordering_streams`, although relay delivery itself only needs `SELECT/UPDATE`
+there. For a diagnostic role intended to pass that check, additionally grant
+`INSERT ON TABLE emitlane.ordering_streams`; do not confuse this diagnostic
+requirement with the relay's delivery requirements.
 
-| Variable | Default | Notes |
-|---|---|---|
-| `EMITLANE_DATABASE_URL` | required | PostgreSQL URL |
-| `EMITLANE_KAFKA_BROKERS` | required | Comma-separated broker list |
-| `EMITLANE_KAFKA_CLIENT_ID` | `emitlane` | Kafka client id |
-| `EMITLANE_KAFKA_AUTO_CREATE_TOPICS` | `false` | Allow broker auto-create; intended for development |
-| `EMITLANE_HTTP_ADDR` | `:8080` | Health/metrics listen address |
-| `EMITLANE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `EMITLANE_INSTANCE_ID` | hostname + random | Unique relay instance |
-| `EMITLANE_RELAY_BATCH_SIZE` | `100` | Claim batch size |
-| `EMITLANE_RELAY_CONCURRENCY` | `4` | In-flight publishes |
-| `EMITLANE_RELAY_POLL_INTERVAL` | `5s` | Polling fallback |
-| `EMITLANE_RELAY_LEASE_DURATION` | `30s` | Must exceed publish timeout |
-| `EMITLANE_ORDERING_REBALANCE_INTERVAL` | `2s` | Virtual-partition ownership refresh |
-| `EMITLANE_ORDERING_LEASE_DURATION` | `30s` | Must exceed publish timeout + ordering safety margin |
-| `EMITLANE_ORDERING_SAFETY_MARGIN` | `1s` | Added to the stale-publish handoff bound |
-| `EMITLANE_RETRY_MAX_ATTEMPTS` | `10` | Then `dead` |
-| `EMITLANE_RETRY_BASE_DELAY` | `1s` | Exponential backoff base |
-| `EMITLANE_RETRY_MAX_DELAY` | `30m` | Backoff cap |
-| `EMITLANE_PUBLISH_TIMEOUT` | `10s` | Must be `<` lease duration |
-| `EMITLANE_SHUTDOWN_TIMEOUT` | `15s` | Drain on SIGTERM |
-| `EMITLANE_STATS_INTERVAL` | `5s` | Queue gauge refresh |
-| `EMITLANE_RETENTION_DELIVERED` | `168h` | `0` disables cleanup |
-| `EMITLANE_RETENTION_INTERVAL` | `1m` | Cleanup ticker |
-| `EMITLANE_RETENTION_BATCH` | `1000` | Cleanup batch size |
-| `EMITLANE_DB_MAX_CONNS` | `10` | pgx pool |
-| `EMITLANE_DB_MIN_CONNS` | `2` | pgx pool |
-| `EMITLANE_DB_MAX_CONN_LIFETIME` | `1h` | pgx pool; must be greater than zero |
+`pg_notify` / `LISTEN` do not require superuser. If your installation revokes
+default function execution privileges, restore execution of `pg_notify` and
+EmitLane's schema helper/trigger functions for the appropriate runtime roles.
 
-Never commit credentials. Outbox payloads are stored in PostgreSQL as application data.
+## Configuration
+
+The complete [environment configuration reference](CONFIGURATION.md) covers
+all standalone settings, defaults, validation bounds, TLS/SASL and Admin API.
+The example application's `DATABASE_URL`, `KAFKA_BROKERS`, `HTTP_ADDR` and
+`ORDERS_TOPIC` settings are described there too. Never commit real credentials.
 
 ## Tests
 

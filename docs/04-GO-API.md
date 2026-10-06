@@ -1,7 +1,8 @@
-# Go API design
+# Go API
 
-The v0.1 API is deliberately small and PostgreSQL-specific. It is pre-1.0 and
-may evolve, but transaction ownership and delivery semantics are explicit.
+This guide describes the public SDK in v0.9.1. The API is PostgreSQL-specific
+and pre-1.0; transaction ownership and delivery semantics are explicit. See
+[compatibility contracts](COMPATIBILITY.md) before upgrading.
 
 ## Outbox event
 
@@ -128,7 +129,7 @@ the stable event ID.
 
 ## Broker port and Kafka adapter
 
-The v0.7 development adapter accepts a shared `kafka.SecurityConfig` through
+The Kafka adapter accepts a shared `kafka.SecurityConfig` through
 `kafka.Config.Security` and `kafka.ConsumerConfig.Security`. It supports verified
 TLS/mTLS and SASL PLAIN/SCRAM over TLS. Constructors snapshot secret files; recreate
 clients/factories to rotate them. See [Kafka connection security](KAFKA_SECURITY.md)
@@ -248,8 +249,9 @@ their processing span.
 
 ## Compatibility
 
-The module path is `github.com/emitlane/emitlane`. v0.1 is pre-1.0, so API
-changes remain possible; exported surface is kept intentionally small.
+The module path is `github.com/emitlane/emitlane`. EmitLane remains pre-1.0;
+see [compatibility contracts](COMPATIBILITY.md) for source, lifecycle, wire, and
+configuration boundaries.
 
 ## v0.2 relay capabilities
 

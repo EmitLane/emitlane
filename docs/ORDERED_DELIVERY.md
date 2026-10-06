@@ -234,7 +234,7 @@ Admin API and CLI inspection compute, without exposing payloads:
 Metrics aggregate bounded counts and durations. Ordering keys, event IDs,
 request IDs, Relay instance IDs, and owner names are never metric labels.
 Structured logs and operation-scoped traces may contain ordering identity and
-epoch but never payloads. Doctor validates schema version 3, both ordering
+epoch but never payloads. Doctor requires the current schema version 4 and validates both ordering
 tables, exactly 64 seed rows, required columns, constraints, indexes, and
 ownership query privileges.
 
