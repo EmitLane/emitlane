@@ -1,30 +1,53 @@
 openapi: 3.1.0
 info:
   title: EmitLane Admin API
-  version: 0.5.0
+  version: 0.9.1
   description: >-
+    Contract snapshot for EmitLane v0.9.1 on database schema 4; the route version is /v1.
     Operational API for redacted inspection, relay control, retry, and replay.
     Replay creates a new event identity and can execute downstream business logic again.
     Bearer authentication is required when a token is configured; an
     unauthenticated listener is permitted only on an explicit loopback address.
 servers:
   - url: http://127.0.0.1:8081/v1
+    description: Standalone loopback listener (when enabled)
+  - url: http://127.0.0.1:8082/v1
+    description: Docker Compose example (development bearer token required)
+tags:
+  - { name: Status, description: Queue statistics and read-only integrity }
+  - { name: Events, description: Redacted Outbox inspection and same-identity retry }
+  - { name: Inbox, description: Managed consumer lifecycle and audited retry }
+  - { name: Relays, description: Presence and durable cluster control }
+  - { name: Replay, description: New-identity replay and provenance }
+  - { name: Ordering, description: Stream cursors and virtual partition ownership }
+  - { name: Audit, description: Payload-free operator audit records }
 security:
   - bearerAuth: []
   - {}
 paths:
   /stats:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Status]
+      operationId: getStats
       summary: Read durable queue and relay statistics
       responses:
         "200":
           description: Statistics
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Stats" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /integrity:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Status]
+      operationId: getIntegrity
       summary: Run a bounded read-only integrity summary
       description: >-
         Uses one repeatable-read, read-only PostgreSQL snapshot. Full verification
@@ -36,25 +59,39 @@ paths:
       responses:
         "200":
           description: Bounded integrity report without payloads, headers, or ordering keys
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IntegrityReport" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /inbox/stats:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Inbox]
+      operationId: getInboxStats
       summary: Read managed Inbox lifecycle statistics
       parameters:
         - { name: consumer, in: query, schema: { type: string, maxLength: 256 } }
       responses:
         "200":
           description: Inbox lifecycle and blocked-partition statistics
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/InboxStats" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /inbox/dead:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Inbox]
+      operationId: listDeadInboxEvents
       summary: List dead Inbox records without Kafka payloads
       parameters:
         - { name: consumer, in: query, schema: { type: string, maxLength: 256 } }
@@ -63,6 +100,8 @@ paths:
       responses:
         "200":
           description: Bounded dead-record page
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -74,38 +113,62 @@ paths:
                     items: { $ref: "#/components/schemas/InboxEvent" }
                   limit: { type: integer }
                   offset: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /inbox/events/{id}:
     parameters:
+      - { $ref: "#/components/parameters/RequestID" }
       - { $ref: "#/components/parameters/EventID" }
     get:
+      tags: [Inbox]
+      operationId: getInboxEvent
       summary: Inspect one managed Inbox lifecycle record
       parameters:
         - { name: consumer, in: query, required: true, schema: { type: string, maxLength: 256 } }
       responses:
         "200":
           description: Redacted Inbox lifecycle record
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/InboxEvent" }
         "404": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /inbox/events/{id}/retry:
     parameters:
+      - { $ref: "#/components/parameters/RequestID" }
       - { $ref: "#/components/parameters/EventID" }
     post:
+      tags: [Inbox]
+      operationId: retryInboxEvent
       summary: Explicitly retry one dead Inbox identity
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/InboxRetry" }
       responses:
-        "200": { description: Dead identity moved to retry_wait with attempts preserved }
+        "200":
+          description: Dead identity moved to retry_wait with attempts preserved
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InboxRetryResult" }
         "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Events]
+      operationId: listEvents
       summary: List events without payload, key, or headers
       parameters:
         - { $ref: "#/components/parameters/Status" }
@@ -119,6 +182,8 @@ paths:
       responses:
         "200":
           description: Keyset page
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -129,11 +194,15 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Event" }
                   next_cursor: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events/{id}:
     parameters:
+      - { $ref: "#/components/parameters/RequestID" }
       - { $ref: "#/components/parameters/EventID" }
     get:
+      tags: [Events]
+      operationId: getEvent
       summary: Inspect one event
       description: Payload/key/headers appear only when server exposure and payload=true are both set.
       parameters:
@@ -143,32 +212,52 @@ paths:
       responses:
         "200":
           description: Event
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Event" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events/{id}/retry:
     parameters:
+      - { $ref: "#/components/parameters/RequestID" }
       - { $ref: "#/components/parameters/EventID" }
     post:
+      tags: [Events]
+      operationId: retryEvent
       summary: Retry a dead event with the same event ID
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/Mutation" }
       responses:
-        "200": { description: Event returned to pending }
+        "200":
+          description: Event returned to pending with the same identity and attempts reset
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventRetryResult" }
         "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /events/{id}/replay:
     parameters:
+      - { $ref: "#/components/parameters/RequestID" }
       - { $ref: "#/components/parameters/EventID" }
     post:
+      tags: [Replay]
+      operationId: replayEvent
       summary: Create a new event from a delivered or dead event
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
@@ -176,17 +265,28 @@ paths:
       responses:
         "201":
           description: Replay created atomically with audit
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReplayResult" }
         "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /relays:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Relays]
+      operationId: listRelays
       summary: List active, stale, and stopped relay instances
       responses:
         "200":
           description: Relay instances
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -196,9 +296,14 @@ paths:
                   relays:
                     type: array
                     items: { $ref: "#/components/schemas/RelayInstance" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /relays/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Relays]
+      operationId: getRelay
       summary: Inspect one relay instance
       parameters:
         - name: id
@@ -208,25 +313,40 @@ paths:
       responses:
         "200":
           description: Relay instance
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RelayInstance" }
         "404": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /relay:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Relays]
+      operationId: getRelayControl
       summary: Read persisted cluster pause state
       responses:
         "200":
           description: Control state
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Control" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /relay/pause:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     post:
+      tags: [Relays]
+      operationId: pauseRelay
       summary: Idempotently pause new claims cluster-wide
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
@@ -234,14 +354,24 @@ paths:
       responses:
         "200":
           description: Updated control state
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Control" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /relay/resume:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     post:
+      tags: [Relays]
+      operationId: resumeRelay
       summary: Idempotently resume new claims cluster-wide
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
@@ -249,15 +379,25 @@ paths:
       responses:
         "200":
           description: Updated control state
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Control" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /replays/preview:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     post:
+      tags: [Replay]
+      operationId: previewReplay
       summary: Preview a bounded replay selection without mutation
       description: Preview is advisory because retention and new events can change execution membership.
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
@@ -265,14 +405,24 @@ paths:
       responses:
         "200":
           description: Count and redacted sample
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReplayPreview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /replays:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     post:
+      tags: [Replay]
+      operationId: createReplayBatch
       summary: Atomically create a bounded replay batch and audit row
       requestBody:
+        description: JSON body, limited to 1 MiB; unknown fields are rejected.
         required: true
         content:
           application/json:
@@ -280,13 +430,22 @@ paths:
       responses:
         "201":
           description: Replay batch created
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ReplayResult" }
         "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /audit:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Audit]
+      operationId: listAuditRecords
       summary: List payload-free operator audit records
       parameters:
         - { name: action, in: query, schema: { type: string } }
@@ -295,6 +454,8 @@ paths:
       responses:
         "200":
           description: Audit page
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -305,9 +466,14 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Audit" }
                   next_cursor: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /ordering/streams:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Ordering]
+      operationId: listOrderingStreams
       summary: List ordered streams and their computed operational state
       parameters:
         - name: state
@@ -317,10 +483,12 @@ paths:
         - { name: partition, in: query, schema: { type: integer, minimum: 0, maximum: 63 } }
         - { name: blocked_only, in: query, schema: { type: boolean, default: false } }
         - { $ref: "#/components/parameters/Limit" }
-        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/OrderingCursor" }
       responses:
         "200":
           description: Ordered stream keyset page
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -331,9 +499,14 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/OrderingStream" }
                   next_cursor: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /ordering/stream:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Ordering]
+      operationId: getOrderingStream
       summary: Inspect one ordered stream without exposing event payload
       parameters:
         - { name: destination, in: query, required: true, schema: { type: string } }
@@ -341,17 +514,26 @@ paths:
       responses:
         "200":
           description: Ordered stream
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OrderingStream" }
         "404": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
   /ordering/partitions:
+    parameters:
+      - { $ref: "#/components/parameters/RequestID" }
     get:
+      tags: [Ordering]
+      operationId: listOrderingPartitions
       summary: List desired and leased virtual-partition ownership
       responses:
         "200":
           description: All 64 virtual ordering partitions
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
           content:
             application/json:
               schema:
@@ -361,13 +543,31 @@ paths:
                   partitions:
                     type: array
                     items: { $ref: "#/components/schemas/OrderingPartition" }
+        "401": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+  headers:
+    RequestID:
+      description: Correlation ID reused from a valid request header or generated by the server.
+      schema: { type: string, maxLength: 128 }
   parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      description: >-
+        Optional correlation ID. After trimming whitespace, a non-empty ASCII
+        value without control characters, at most 128 bytes, is reused.
+        An invalid or omitted value is replaced with a generated UUID.
+      schema: { type: string }
+    OrderingCursor:
+      name: cursor
+      in: query
+      description: Opaque ordering-stream keyset cursor from the previous response.
+      schema: { type: string, maxLength: 4096 }
     EventID:
       name: id
       in: path
@@ -389,11 +589,26 @@ components:
       schema: { type: string, maxLength: 1024 }
   responses:
     Error:
-      description: JSON error with request correlation ID
+      description: JSON handler error with request correlation ID
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    EventRetryResult:
+      type: object
+      required: [event_id, status]
+      properties:
+        event_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending] }
+    InboxRetryResult:
+      type: object
+      required: [consumer, event_id, status]
+      properties:
+        consumer: { type: string }
+        event_id: { type: string, format: uuid }
+        status: { type: string, enum: [retry_wait] }
     InboxStats:
       type: object
       required: [processed, pending, inflight, retry_wait, dead, stale_inflight, due_retries, blocked_partitions]
@@ -567,7 +782,7 @@ components:
       type: object
       additionalProperties: false
       properties:
-        reason: { type: string, maxLength: 4096 }
+        reason: { type: string, maxLength: 4096, example: "operator recovery after incident" }
     RequiredMutation:
       allOf:
         - { $ref: "#/components/schemas/Mutation" }

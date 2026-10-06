@@ -1,7 +1,9 @@
 # Kafka connection security
 
-This document defines the v0.7 development contract. Release qualification is
-required before treating the development implementation as production-ready.
+TLS/SASL support was introduced in v0.7.0 and remains available in v0.9.1.
+This guide describes the implemented connection-security contract. Test fixtures
+and recorded qualification evidence have separate scopes; support for a mode
+does not establish every production topology or rotation scenario.
 
 ## Supported modes
 
@@ -147,7 +149,7 @@ Existing connections keep their original credentials until recreated. Certificat
 expiry and revoked credentials can cause delivery retries; monitor the backlog
 and dead state and use audited retry after restoring access when necessary.
 
-## Implementation and validation sequence
+## Security verification coverage
 
 1. Shared TLS/SASL construction, validation and safe error formatting.
 2. Publisher and consumer wiring; standalone environment settings and doctor.
@@ -156,7 +158,7 @@ and dead state and use audited retry after restoring access when necessary.
 4. Existing Kafka outage, ambiguous publish, ordered handoff and managed offset
    recovery regressions on the resulting candidate.
 
-The development suite includes bounded TLS handshakes, configuration/secret-file
+The suite includes bounded TLS handshakes, configuration/secret-file
 checks and a real Kafka matrix under the `integration` build tag:
 
 ```sh
@@ -171,8 +173,8 @@ group resume, wrong passwords, topic/group ACL rejection, invalid trust/name,
 missing client certificate and password-file recreation. Expired certificates
 are covered by the TLS handshake unit test. These tests do not establish live
 broker credential-revocation or certificate-rotation behavior, multi-broker
-failover, or a full release qualification. Authenticated integration tests have
-been authored; passing results must be recorded from the candidate commit.
+failover, or a full release qualification. Passing results must be recorded against the candidate commit; the existence
+of these fixtures alone is not release qualification evidence.
 
 ## Crash review
 

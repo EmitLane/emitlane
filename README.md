@@ -34,7 +34,9 @@ relay instances.
 - **Crash-safe relay** — PostgreSQL remains the source of truth; `LISTEN/NOTIFY`
   only reduces latency and polling remains the recovery path.
 - **Horizontal workers** — batches are claimed with `FOR UPDATE SKIP LOCKED`, then
-  published outside the database transaction under renewable leases.
+  published outside the database transaction under expiring event leases.
+  Publish timeouts stay below those leases; ordered partition leases and managed
+  Inbox leases have separate renewal protocols.
 - **Explicit failures** — exponential backoff, jitter, bounded attempts, and a
   visible `dead` state for poison events.
 - **Duplicate-safe consumers** — Inbox records message processing in the same local
@@ -138,7 +140,7 @@ See [ordered delivery](docs/ORDERED_DELIVERY.md) before enabling this mode.
 ## Delivery model
 
 ```text
-pending ──claim──> processing ──Kafka ACK──> delivered
+pending ──claim──> inflight ──Kafka ACK──> delivered
    ▲                    │
    │                    ├──publish failure──> pending (backoff + jitter)
    │                    ├──attempts exhausted──> dead
@@ -237,6 +239,9 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Documentation
 
+Start with the [documentation index](docs/README.md). The
+[Swagger UI guide](docs/openapi/README.md) opens the Admin API contract locally.
+
 - [Architecture](docs/02-ARCHITECTURE.md)
 - [Database model](docs/03-DATABASE.md)
 - [Go API](docs/04-GO-API.md)
@@ -260,12 +265,12 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-[v0.8.0](https://github.com/EmitLane/emitlane/releases/tag/v0.8.0) is the released
-baseline, including Kafka TLS/SASL, compatibility contracts, migration safety and
-unambiguous event metadata. [v0.9 development](docs/V0_9.md) focuses on operational
-readiness: tested monitoring configuration, snapshot freshness and stronger
-backup/restore and managed consumer audit evidence, without a new schema migration. Managed processing is duplicate-safe
-for PostgreSQL effects committed with the Inbox transition, while Kafka and the
+The current version is **v0.9.1**, using database schema **4**. It includes Kafka
+TLS/SASL, compatibility contracts, migration safety, monitoring configuration,
+snapshot freshness, and backup/restore and managed consumer audit fixtures.
+See the [changelog](CHANGELOG.md) and [release history](docs/releases/README.md)
+for version-specific changes and qualification boundaries. Managed processing
+is duplicate-safe for PostgreSQL effects committed with the Inbox transition, while Kafka and the
 relay remain at least once. As a pre-1.0 project, APIs and operational defaults
 may still change during the `v0.x` series.
 

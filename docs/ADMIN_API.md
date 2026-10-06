@@ -3,6 +3,9 @@
 The Admin API is a separate operational listener. It is disabled by default and
 does not replace `/healthz`, `/readyz`, or `/metrics`.
 
+The [OpenAPI and Swagger UI guide](openapi/README.md) provides the schema and a
+local browser viewer. The contract snapshot corresponds to v0.9.1 and schema 4.
+
 ## Safe configuration
 
 ```bash
@@ -19,7 +22,14 @@ are compared in constant time after hashing and are never logged.
 
 Every response includes a bounded `X-Request-ID`. A valid caller-supplied value
 is reused; otherwise EmitLane generates one. Mutation audit rows contain the
-same request ID.
+same request ID. Accepted IDs are trimmed, non-empty ASCII without control
+characters, up to 128 bytes. The token grants all operations; there are no
+per-token scopes or read-only tokens. The listener serves HTTP without TLS or
+CORS configuration; use your deployment proxy for remote HTTPS access.
+
+The API shares the Relay database credentials. Enable it only with the
+[operator database grants](QUICKSTART.md#postgresql-roles). Compose uses port
+8082 with a development token; standalone defaults remain as shown above.
 
 ## Endpoints
 
@@ -54,7 +64,9 @@ same request ID.
 
 Event filters are `status`, `destination`, `event_type`, `created_after`,
 `created_before`, `replay_batch_id`, `limit`, and `cursor`. Page size defaults
-to 50 and cannot exceed 200. Treat cursors as opaque.
+to 50 and cannot exceed 200. Treat cursors as opaque: event/audit cursors accept
+at most 1024 bytes, ordering-stream cursors 4096 bytes. Inbox dead listing uses
+`offset` instead of a cursor.
 
 ## Payload safety
 
@@ -66,7 +78,13 @@ should remain off unless an incident procedure explicitly needs content access.
 ## Mutations
 
 Pause/resume and retry accept `{"reason":"..."}`. Replay requires a non-empty
-reason. Batch replay accepts:
+reason. Managed Inbox retry also requires `consumer` and a non-empty `reason`.
+Bodies are capped at 1 MiB; malformed JSON or unknown fields return `400` with
+`invalid_json`, an oversized body returns `413` with `invalid_request`.
+
+Outbox retry returns `{"event_id":"...","status":"pending"}` and resets attempts.
+Inbox retry returns `{"consumer":"...","event_id":"...","status":"retry_wait"}`
+and preserves attempts. Batch replay accepts:
 
 ```json
 {

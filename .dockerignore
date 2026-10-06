@@ -2,6 +2,8 @@
 .github
 .idea
 .vscode
+.cursor
+.emitlane
 
 .env
 .env.*

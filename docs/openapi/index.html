@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EmitLane Admin API — Swagger UI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.33.1/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .intro { max-width: 1460px; margin: 0 auto; padding: 20px; font: 16px/1.5 system-ui, sans-serif; }
+    .intro h1 { margin: 0 0 8px; font-size: 24px; }
+    .intro p { margin: 0; }
+    .intro a { color: #165a96; }
+  </style>
+</head>
+<body>
+  <header class="intro">
+    <h1>EmitLane Admin API</h1>
+    <p>Browse the contract. Request execution is disabled in this documentation viewer.
+      <a href="admin-v1.yaml">OpenAPI YAML</a> · <a href="../ADMIN_API.md">Operator guide</a></p>
+  </header>
+  <div id="swagger-ui"></div>
+  <noscript><p class="intro">Enable JavaScript to view Swagger UI, or read the linked OpenAPI YAML.</p></noscript>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.33.1/swagger-ui-bundle.js"></script>
+  <script>
+    window.addEventListener("load", function () {
+      if (typeof SwaggerUIBundle !== "function") {
+        document.getElementById("swagger-ui").textContent =
+          "Swagger UI assets could not load. Use the OpenAPI YAML link above.";
+        return;
+      }
+      SwaggerUIBundle({
+        url: "./admin-v1.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        displayRequestDuration: true,
+        persistAuthorization: false,
+        supportedSubmitMethods: [],
+        validatorUrl: null,
+        docExpansion: "list",
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: "BaseLayout"
+      });
+    });
+  </script>
+</body>
+</html>

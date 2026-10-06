@@ -114,9 +114,12 @@ func startEnv(t *testing.T) *env {
 		}
 		kafkaPortString := strconv.Itoa(kafkaPort)
 		kafkaC, err := testcontainers.Run(ctx,
-			"apache/kafka-native:4.3.1",
+			// Use the JVM image: the native runtime can segfault during repeated
+			// container startup, before the broker reaches its recovery path.
+			"apache/kafka:4.3.1",
 			testcontainers.WithExposedPorts("9092/tcp"),
 			testcontainers.WithEnv(map[string]string{
+				"KAFKA_HEAP_OPTS":                                "-Xms256m -Xmx512m",
 				"CLUSTER_ID":                                     "MkU3OEVBNTcwNTJENDM2Qk",
 				"KAFKA_NODE_ID":                                  "1",
 				"KAFKA_PROCESS_ROLES":                            "broker,controller",
@@ -139,6 +142,8 @@ func startEnv(t *testing.T) *env {
 					HostIP:   netip.MustParseAddr("127.0.0.1"),
 					HostPort: kafkaPortString,
 				}}
+				hostConfig.Memory = 1536 * 1024 * 1024
+				hostConfig.NanoCPUs = 2_000_000_000
 			}),
 			testcontainers.WithWaitStrategy(
 				wait.ForListeningPort("9092/tcp").WithStartupTimeout(2*time.Minute),

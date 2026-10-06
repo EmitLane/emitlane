@@ -6,6 +6,10 @@ isolated PostgreSQL 16 and Kafka 4.3.1 containers for every run. It never uses
 mocks for correctness results and has no option that can silently point at an
 external database or broker.
 
+This runner qualifies the producer/Relay path. It does not run managed consumer
+handlers or verify protected consumer effects. Use the separate managed soak
+described in [Consumer reliability](CONSUMER_RELIABILITY.md) for that evidence.
+
 ## Requirements
 
 - macOS or Linux;
@@ -33,7 +37,7 @@ injection. Defaults are:
 
 - `quick`: 90 seconds, 2 Relays, 100 ordered streams, about 3,600 committed events;
 - `standard`: 20 minutes, 4 Relays, 1,000 streams, target above 100,000 committed events;
-- `release`: 60 minutes, 4 Relays, 3,500 streams, final local v0.4 release soak.
+- `release`: 60 minutes, 4 Relays, 3,500 streams, Relay release qualification profile.
 
 Soak Relays use a test-specific transient-fault retry policy: 100 maximum
 attempts with 500 ms base delay and a 5 second cap. This keeps deliberate Kafka
@@ -144,7 +148,7 @@ be distinguished. Results and reports include `integrity_violations` and
 
 ## Release run
 
-Before a v0.4 release, start the full run manually and let it finish:
+For Relay release qualification, start the full run manually and let it finish:
 
 ```sh
 make soak-start PROFILE=release

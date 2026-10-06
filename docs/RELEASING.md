@@ -5,10 +5,9 @@ Automation is the default, and a normal merge to `main` never publishes a releas
 
 ## Current readiness gate
 
-Do not enable releases until a maintainer is ready to publish. The product now
-has a Go module, `cmd/emitlane`, Dockerfile, integration tests, and failure-injection
-coverage. A tag is still a human decision: do not create `v0.1.0` just because
-the code exists.
+The repository currently records v0.9.1 in the release manifest and changelog.
+Review release evidence for each new candidate before publishing; existing
+releases and authored tests do not qualify an untested commit.
 
 Release automation is guarded by the repository Actions variable
 `RELEASES_ENABLED`. It must equal the lowercase string `true`; an absent variable
@@ -20,8 +19,8 @@ Docker images are built by GoReleaser into `ghcr.io/emitlane/emitlane` when a
 release runs. The release workflow needs `packages: write` for GHCR. Public
 image visibility should be confirmed in package settings after the first publish.
 
-For v0.4.0, publication additionally requires a clean release-profile soak from
-one exact Git commit for at least one hour against real PostgreSQL and Kafka. It
+The Relay release gate, introduced for v0.4.0, requires a clean release-profile
+soak from one exact Git commit for at least one hour against real PostgreSQL and Kafka. It
 must exercise ordered and unordered load, graceful Relay restarts, crash
 takeovers, Kafka pause plus an actual broker stop/restart, cluster pause/resume,
 and membership changes. After queue quiescence, the runner performs an
@@ -31,21 +30,15 @@ destroyed.
 The release evidence must report zero lost committed events, ordering
 regressions, unexpected sequence skips, final pending/inflight/dead events,
 blocked/gap streams, infrastructure errors, and integrity violations.
+The dedicated [Relay soak](LOCAL_SOAK.md) does not exercise managed consumers;
+record separate [managed consumer qualification](CONSUMER_RELIABILITY.md) evidence.
 At-least-once duplicates are allowed and must not be described as an
 exactly-once result. Integrity warnings are recorded for operator review but do
 not by themselves fail the default soak verdict. Do not publish if the Git tree
 was dirty or the recorded commit and configuration cannot be reproduced.
 
-For v0.5.0, release evidence additionally needs managed consumers on multiple
-Kafka partitions, consumer restart and group rebalance, an actual Kafka fault,
-transient PostgreSQL failure, handler retry, lease reclaim, offset-commit
-recovery, and Outbox-to-Inbox composition. Final managed Inbox pending,
-inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
-duplicate protected database effects, partition-order regressions, and
-integrity violations must be zero. Kafka redeliveries remain allowed.
-
-For v0.5.0, release evidence additionally needs managed consumers on multiple
-Kafka partitions, consumer restart and group rebalance, an actual Kafka fault,
+The managed-consumer release gate, introduced for v0.5.0, additionally needs
+managed consumers on multiple Kafka partitions, consumer restart and group rebalance, an actual Kafka fault,
 transient PostgreSQL failure, handler retry, lease reclaim, offset-commit
 recovery, and Outbox-to-Inbox composition. Final managed Inbox pending,
 inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
@@ -89,7 +82,7 @@ If a tag and GitHub Release exist but the artifact workflow was never started,
 dispatch it for that exact existing tag instead of creating another tag:
 
 ```bash
-gh workflow run release.yml --ref v0.1.0 -f tag=v0.1.0
+gh workflow run release.yml --ref v0.9.1 -f tag=v0.9.1
 ```
 
 If an artifact upload stopped partway through, do not overwrite a completed
@@ -111,9 +104,9 @@ v0.2.0-rc.1
 ```
 
 Do not use names such as `release-1`, `prod`, `latest`, `stable`, or date tags for
-Go module releases. The initial tracked Release Please version is `0.0.0`; that is
-automation state, not a published release. The current coherent vertical slice
-targets `v0.1.0`. Use an alpha, beta, or release-candidate suffix only when
+Go module releases. `.release-please-manifest.json` records the current release
+version; historical initialization at `0.0.0` is not a publication target. Use
+an alpha, beta, or release-candidate suffix only when
 intentionally publishing a prerelease for early feedback. Do not tag an
 initialization or CI-only commit.
 
@@ -153,8 +146,8 @@ all required checks:
 git checkout main
 git pull --ff-only
 
-git tag -a v0.1.1 -m "EmitLane v0.1.1"
-git push origin v0.1.1
+git tag -a v0.9.2 -m "EmitLane v0.9.2"
+git push origin v0.9.2
 ```
 
 Replace the example with the correct unused semantic version. Confirm the tag's
@@ -208,6 +201,7 @@ Under **Settings → Rules → Rulesets**, create an active branch ruleset named
 Require these exact GitHub Actions status checks:
 
 ```text
+monitoring
 format
 vet
 staticcheck
