@@ -23,6 +23,24 @@ go test -p=1 -tags=integration -run '^TestManagedConsumerQualificationSoak$' \
   -count=1 -v -timeout=20m ./internal/integration
 ```
 
+The shared fixture uses `apache/kafka:4.3.1` (JVM), a 256–512 MiB Java heap and
+a 1.5 GiB container memory ceiling. The runner and containers still need an
+aggregate resource limit. The native image is excluded because its startup
+runtime segfaulted on the 46th restart during a qualification run. Do not hide
+startup failures with automatic container retries.
+
+To check repeated startup separately, including preservation of all acknowledged
+records and successful publishing after every restart:
+
+```sh
+GOMAXPROCS=2 GOMEMLIMIT=1536MiB EMITLANE_KAFKA_RESTART_CYCLES=50 \
+go test -p=1 -tags=integration -run '^TestKafkaRepeatedRestart$' \
+  -count=1 -v -timeout=20m ./internal/integration
+```
+
+This regression accepts 2–100 restarts and is skipped unless explicitly enabled.
+It does not replace the EmitLane fault/recovery profile or a 24h/72h run.
+
 The source must be committed and clean. Use a fresh evidence directory for each
 run; an existing `events.jsonl` is rejected. Keep stdout/stderr in a durable log
 and launch through a supervisor that survives SSH disconnects, samples aggregate
