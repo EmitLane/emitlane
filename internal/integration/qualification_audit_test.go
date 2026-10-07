@@ -75,20 +75,24 @@ func qualificationKafkaSnapshot(ctx context.Context, brokers []string, topic, gr
 	if err != nil {
 		return nil, err
 	}
+	partitions := make([]map[string]any, 0, len(ends[topic]))
 	var produced, committed int64
 	for partition, end := range ends[topic] {
 		if end.Err != nil {
 			return nil, end.Err
 		}
 		produced += end.Offset
+		position := int64(0)
 		if offset, ok := offsets.Lookup(topic, partition); ok {
 			if offset.Err != nil {
 				return nil, offset.Err
 			}
-			committed += max(offset.At, 0)
+			position = max(offset.At, 0)
+			committed += position
 		}
+		partitions = append(partitions, map[string]any{"partition": partition, "end_offset": end.Offset, "committed_offset": position, "lag": end.Offset - position})
 	}
-	return map[string]any{"end_offsets": produced, "committed_offsets": committed, "lag": produced - committed}, nil
+	return map[string]any{"end_offsets": produced, "committed_offsets": committed, "lag": produced - committed, "partitions": partitions}, nil
 }
 
 // Stream Kafka in bounded batches. Expected/seen IDs live in PostgreSQL, not

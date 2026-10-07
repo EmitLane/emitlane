@@ -68,7 +68,8 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	}
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "branch": branch,
 		"duration": c.duration.String(), "interval": c.interval.String(), "rate": c.rate, "seed": c.seed,
-		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH})
+		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "recovery": c.recovery.String(), "audit": c.audit.String(),
+		"diagnostic_interval": "30s", "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
 	// Absence of PASS (including interruption) is never passing evidence.
 	passed := false
 	defer func() {
@@ -76,7 +77,9 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 			_ = json.NewEncoder(evidence).Encode(map[string]any{"kind": "incomplete", "time": time.Now().UTC()})
 		}
 	}()
-	e := startEnv(t)
+	original := startEnv(t)
+	e, diagnostics := startQualificationDiagnostics(t, original, c.output)
+	defer func() { diagnostics.finish(t, passed) }()
 	t.Cleanup(func() { e.restoreKafka(t); e.restorePostgres(t) })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -96,6 +99,9 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		if t.Failed() {
+			return // Preserve the ledger until the failure dump is complete.
+		}
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		if _, err := e.pool.Exec(cleanupCtx, `DROP TABLE IF EXISTS public.soak_expected, public.soak_stream_progress, public.soak_effect_progress, public.soak_pruned, public.soak_observed`); err != nil {
@@ -104,16 +110,23 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	})
 	topic, group, name := "qualification-"+uuid.NewString(), "qualification-group-"+uuid.NewString(), "qualification-v1"
 	e.ensureTopicPartitions(t, topic, 8)
+	diagnostics.start(topic, group)
 	consumerConfig := qualificationConsumerConfig(name, "qualification-main")
 	store := newManagedInboxStore(t, e)
-	factory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
+	factory := &qualificationCommitFactory{inner: &qualificationDiagnosticFactory{inner: newManagedFactory(t, e, topic, group), tracer: diagnostics.tracer}}
 	factory.armed.Store(true)
-	consumer := launchManaged(t, e, consumerConfig, store, factory, qualificationHandler)
+	handler := func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+		start := time.Now()
+		err := qualificationHandler(ctx, tx, message)
+		diagnostics.tracer.observe("business.handler", time.Since(start), err)
+		return err
+	}
+	consumer := launchManaged(t, e, consumerConfig, store, factory, handler, managed.WithMetrics(diagnostics.metrics))
 	defer func() { consumer.stop(t) }()
 	pub := e.publisher(t)
 	relayCfg := qualificationRelayConfig("qualification-main")
 	startRelay := func() *runningQualificationRelay {
-		return launchQualificationRelay(e.newRelay(t, relayCfg, pub, relay.FailureHooks{}))
+		return launchQualificationRelay(e.newRelay(t, relayCfg, pub, relay.FailureHooks{}, relay.WithMetrics(diagnostics.metrics)))
 	}
 	rly := startRelay()
 	defer func() { rly.stop(t) }()
@@ -163,7 +176,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 			case "consumer_crash":
 				consumer.stop(t)
 				killQualificationChild(t, e, c, topic, group, name, "consumer", cycles)
-				consumer = launchManaged(t, e, consumerConfig, store, factory, qualificationHandler)
+				consumer = launchManaged(t, e, consumerConfig, store, factory, handler, managed.WithMetrics(diagnostics.metrics))
 			case "relay_claim_crash", "relay_ack_crash":
 				rly.stop(t)
 				killQualificationChild(t, e, c, topic, group, name, fault, cycles)
@@ -172,7 +185,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 				other := consumerConfig
 				other.InstanceID = "qualification-peer"
 				peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
-				peer := launchManaged(t, e, other, store, peerFactory, qualificationHandler)
+				peer := launchManaged(t, e, other, store, peerFactory, handler, managed.WithMetrics(diagnostics.metrics))
 				// Observe actual assignment, rather than equating elapsed time with
 				// a successful group join. Cleanup also covers a failed assertion.
 				assignedDeadline := time.Now().Add(12 * time.Second)
@@ -252,34 +265,60 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	if cycles < 2 {
 		t.Fatalf("only %d full fault cycles completed; increase duration", cycles)
 	}
-	// Repair only expected poison rows; every other dead row is a failure.
-	recoveryEnd := time.Now().Add(2 * time.Minute)
+	// Fast offset progress drives recovery. Do not repeatedly join millions of
+	// ledger rows while the consumer is trying to catch up. The independent full
+	// identity/effect audit still runs after recovery and remains mandatory.
+	recoveryStart := time.Now()
+	recoveryEnd := recoveryStart.Add(c.recovery)
+	write(qualificationSnapshot(t, e, topic, group, name, cycles, producerFailures.Load()))
+	loadEndCtx, stopLoadEnd := context.WithTimeout(ctx, 10*time.Second)
+	loadEndKafka, err := qualificationKafkaSnapshot(loadEndCtx, e.brokers, topic, group)
+	stopLoadEnd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(map[string]any{"kind": "recovery_begin", "time": time.Now().UTC(), "timeout": c.recovery.String(), "kafka": loadEndKafka})
+	var remaining int64
+	lastProgress := time.Time{}
 	for {
 		retriedDead += retryQualificationDead(t, e, name)
-		var remaining int64
-		if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.soak_expected x LEFT JOIN emitlane.inbox_events i ON i.consumer=$1 AND i.event_id=x.event_id LEFT JOIN emitlane.outbox_events o ON o.id=x.event_id WHERE i.status IS DISTINCT FROM 'processed' OR (o.id IS NOT NULL AND o.status<>'delivered')`, name).Scan(&remaining); err != nil {
+		if time.Since(lastProgress) < 5*time.Second && time.Now().Before(recoveryEnd) {
+			time.Sleep(time.Second)
+			continue
+		}
+		lastProgress = time.Now()
+		progressCtx, stopProgress := context.WithTimeout(ctx, 5*time.Second)
+		kafka, err := qualificationKafkaSnapshot(progressCtx, e.brokers, topic, group)
+		stopProgress()
+		if err != nil {
 			t.Fatal(err)
 		}
-		if remaining == 0 {
-			kafka, err := qualificationKafkaSnapshot(ctx, e.brokers, topic, group)
+		write(map[string]any{"kind": "recovery_progress", "time": time.Now().UTC(), "elapsed_seconds": time.Since(recoveryStart).Seconds(), "kafka": kafka})
+		if kafka["lag"].(int64) == 0 || time.Now().After(recoveryEnd) {
+			checkCtx, stopCheck := context.WithTimeout(ctx, 30*time.Second)
+			err := e.pool.QueryRow(checkCtx, `SELECT COUNT(*) FROM public.soak_expected x LEFT JOIN emitlane.inbox_events i ON i.consumer=$1 AND i.event_id=x.event_id LEFT JOIN emitlane.outbox_events o ON o.id=x.event_id WHERE i.status IS DISTINCT FROM 'processed' OR (o.id IS NOT NULL AND o.status<>'delivered')`, name).Scan(&remaining)
+			stopCheck()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if kafka["lag"].(int64) == 0 {
+			if remaining == 0 && kafka["lag"].(int64) == 0 {
 				break
 			}
 		}
 		if time.Now().After(recoveryEnd) {
-			t.Fatalf("drain exceeded two minutes; %d unprocessed events", remaining)
+			t.Fatalf("recovery exceeded %s; %d unfinished events, Kafka lag=%v", c.recovery, remaining, kafka["lag"])
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(time.Second)
 	}
+	recoverySeconds := time.Since(recoveryStart).Seconds()
+	write(map[string]any{"kind": "recovery_end", "time": time.Now().UTC(), "elapsed_seconds": recoverySeconds, "remaining": remaining})
+
 	consumer.stop(t)
 	rly.stop(t)
 	if retriedDead == 0 || pruned == 0 || factory.injected.Load() < 2 {
 		t.Fatalf("missing coverage: dead retries=%d pruned=%d offset failures=%d", retriedDead, pruned, factory.injected.Load())
 	}
-	auditCtx, stopAudit := context.WithTimeout(ctx, 10*time.Minute)
+	auditCtx, stopAudit := context.WithTimeout(ctx, c.audit)
 	defer stopAudit()
 	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed)
 	total := auditQualificationDatabase(t, auditCtx, e, topic, name)
@@ -301,6 +340,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	write(qualificationSnapshot(t, e, topic, group, name, cycles, producerFailures.Load()))
 	write(map[string]any{"kind": "PASS", "time": time.Now().UTC(), "commit": commit,
 		"cycles": cycles, "coverage": coverage, "committed": total, "kafka_records": kafkaRecords, "kafka_duplicates": duplicates,
+		"load_end_kafka": loadEndKafka, "recovery_seconds": recoverySeconds, "recovery_budget": c.recovery.String(),
 		"retried_dead": retriedDead, "pruned": pruned, "offset_failures": factory.injected.Load(), "integrity": report})
 	passed = true
 	t.Logf("qualification PASS commit=%s cycles=%d committed=%d kafka_records=%d duplicates=%d dead_retries=%d pruned=%d offset_failures=%d", commit, cycles, total, kafkaRecords, duplicates, retriedDead, pruned, factory.injected.Load())

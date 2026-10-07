@@ -92,6 +92,7 @@ func startEnv(t *testing.T) *env {
 			postgres.WithUsername("emitlane"),
 			postgres.WithPassword("emitlane"),
 			postgres.BasicWaitStrategies(),
+			qualificationPostgresOptions(),
 			testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
 				if hostConfig.PortBindings == nil {
 					hostConfig.PortBindings = containernetwork.PortMap{}
@@ -117,6 +118,7 @@ func startEnv(t *testing.T) *env {
 			// Use the JVM image: the native runtime can segfault during repeated
 			// container startup, before the broker reaches its recovery path.
 			"apache/kafka:4.3.1",
+			qualificationKafkaOptions(),
 			testcontainers.WithExposedPorts("9092/tcp"),
 			testcontainers.WithEnv(map[string]string{
 				"KAFKA_HEAP_OPTS":                                "-Xms256m -Xmx512m",

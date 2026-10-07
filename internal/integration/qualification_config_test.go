@@ -11,10 +11,10 @@ import (
 )
 
 type qualificationConfig struct {
-	duration, interval time.Duration
-	rate               int
-	seed               int64
-	output             string
+	duration, interval, recovery, audit time.Duration
+	rate                                int
+	seed                                int64
+	output                              string
 }
 
 func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
@@ -23,12 +23,16 @@ func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
 	t.Setenv("EMITLANE_QUALIFICATION_INTERVAL", "")
 	t.Setenv("EMITLANE_QUALIFICATION_RATE", "")
 	t.Setenv("EMITLANE_QUALIFICATION_SEED", "")
+	t.Setenv("EMITLANE_QUALIFICATION_RECOVERY", "")
+	t.Setenv("EMITLANE_QUALIFICATION_AUDIT", "")
 	if c, err := readQualificationConfig(); err != nil || c.interval != time.Minute || c.rate != 10 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
 	for _, tc := range []struct{ key, value string }{
 		{"EMITLANE_QUALIFICATION_DURATION", "73h"}, {"EMITLANE_QUALIFICATION_DURATION", "1m"},
 		{"EMITLANE_QUALIFICATION_OUTPUT", ""}, {"EMITLANE_QUALIFICATION_INTERVAL", "1s"},
+		{"EMITLANE_QUALIFICATION_RECOVERY", "0"}, {"EMITLANE_QUALIFICATION_RECOVERY", "5h"},
+		{"EMITLANE_QUALIFICATION_AUDIT", "2h"}, {"EMITLANE_QUALIFICATION_AUDIT", "garbage"},
 		{"EMITLANE_QUALIFICATION_RATE", "100"}, {"EMITLANE_QUALIFICATION_SEED", "invalid"},
 	} {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
@@ -41,7 +45,7 @@ func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
 }
 
 func readQualificationConfig() (qualificationConfig, error) {
-	c := qualificationConfig{rate: 10, seed: 20261005, output: os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")}
+	c := qualificationConfig{recovery: 2 * time.Minute, audit: 10 * time.Minute, rate: 10, seed: 20261005, output: os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")}
 	var err error
 	c.duration, err = time.ParseDuration(os.Getenv("EMITLANE_QUALIFICATION_DURATION"))
 	if err != nil || c.duration < 2*time.Minute || c.duration > 72*time.Hour {
@@ -64,6 +68,22 @@ func readQualificationConfig() (qualificationConfig, error) {
 		c.seed, err = strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("qualification seed: %w", err)
+		}
+	}
+	for _, option := range []struct {
+		key     string
+		target  *time.Duration
+		maximum time.Duration
+	}{
+		{"EMITLANE_QUALIFICATION_RECOVERY", &c.recovery, 4 * time.Hour},
+		{"EMITLANE_QUALIFICATION_AUDIT", &c.audit, time.Hour},
+	} {
+		if raw := os.Getenv(option.key); raw != "" {
+			value, err := time.ParseDuration(raw)
+			if err != nil || value < time.Minute || value > option.maximum {
+				return c, fmt.Errorf("%s must be between 1m and %s", option.key, option.maximum)
+			}
+			*option.target = value
 		}
 	}
 	if c.output == "" {
