@@ -182,20 +182,23 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 				killQualificationChild(t, e, c, topic, group, name, fault, cycles)
 				rly = startRelay()
 			case "rebalance":
-				other := consumerConfig
-				other.InstanceID = "qualification-peer"
-				peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
-				peer := launchManaged(t, e, other, store, peerFactory, handler, managed.WithMetrics(diagnostics.metrics))
-				// Observe actual assignment, rather than equating elapsed time with
-				// a successful group join. Cleanup also covers a failed assertion.
-				assignedDeadline := time.Now().Add(12 * time.Second)
-				for peerFactory.assignments.Load() == 0 && time.Now().Before(assignedDeadline) {
-					time.Sleep(50 * time.Millisecond)
-				}
-				if peerFactory.assignments.Load() == 0 {
-					t.Fatal("peer consumer never received a partition assignment")
-				}
-				peer.stop(t)
+				func() {
+					other := consumerConfig
+					other.InstanceID = "qualification-peer"
+					peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
+					peer := launchManaged(t, e, other, store, peerFactory, handler, managed.WithMetrics(diagnostics.metrics))
+					defer peer.stop(t)
+					// Observe actual assignment, rather than equating elapsed time with
+					// a successful group join. Cleanup also covers a failed assertion.
+					assignedDeadline := time.Now().Add(12 * time.Second)
+					for peerFactory.assignments.Load() == 0 && time.Now().Before(assignedDeadline) {
+						time.Sleep(50 * time.Millisecond)
+					}
+					if peerFactory.assignments.Load() == 0 {
+						t.Fatal("peer consumer never received a partition assignment")
+					}
+					peer.stop(t)
+				}()
 			case "kafka_restart":
 				e.stopKafka(t)
 				time.Sleep(2 * time.Second)
