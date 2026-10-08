@@ -27,7 +27,11 @@ Qualification explicitly runs PostgreSQL with `fsync=on`,
 `synchronous_commit=on` and `full_page_writes=on`, verified at startup. Earlier
 qualification used the PostgreSQL testcontainers module default `fsync=off`;
 its performance results do not establish throughput with durable disk writes.
-Other integration fixtures retain their existing settings.
+Qualification also gives its PostgreSQL container 512 MiB of `/dev/shm` for
+parallel full identity/effect audits, verifies that capacity at startup, and
+records it in `fixture.json`. This capacity is not reserved RAM; it can be
+charged to the container/aggregate memory budget when used. Other integration
+fixtures retain their existing settings.
 
 The shared fixture uses `apache/kafka:4.3.1` (JVM), a 256–512 MiB Java heap and
 a 1.5 GiB container memory ceiling. The runner and containers still need an
@@ -76,7 +80,13 @@ Every completed cycle includes:
 
 Consumer joins require an observed partition assignment. Recovery must also
 drain group offset lag to zero. Offset commit failure is re-armed every cycle. Transient handler failures are
-injected throughout the load. At least two full cycles, two observed offset
+injected throughout the load. Poison frequency and eight-attempt exhaustion
+are unchanged. During healthy intervals and recovery, the simulated operator
+checks for exhausted poisons every 100 ms instead of the previous one-second
+interval; each repair still uses the public audited Inbox retry. The interval
+is recorded in the start evidence. This changes operator response latency and
+therefore must be accounted for when comparing backlog/recovery results with
+older runs; it is not a production consumer throughput optimization. At least two full cycles, two observed offset
 commit failures, poison repair and actual deletion are required for PASS.
 
 Relay crash helpers receive a newly committed unordered probe in the same

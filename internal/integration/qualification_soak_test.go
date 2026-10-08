@@ -69,7 +69,7 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "branch": branch,
 		"duration": c.duration.String(), "interval": c.interval.String(), "rate": c.rate, "seed": c.seed,
 		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "recovery": c.recovery.String(), "audit": c.audit.String(),
-		"diagnostic_interval": "30s", "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
+		"diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(), "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
 	// Absence of PASS (including interruption) is never passing evidence.
 	passed := false
 	defer func() {
@@ -167,7 +167,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 			}
 			select {
 			case <-loadCtx.Done():
-			case <-time.After(min(time.Second, time.Until(until))):
+			case <-time.After(min(qualificationOperatorRepairInterval, time.Until(until))):
 			}
 		}
 	}
@@ -289,7 +289,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	for {
 		retriedDead += retryQualificationDead(t, e, name)
 		if time.Since(lastProgress) < 5*time.Second && time.Now().Before(recoveryEnd) {
-			time.Sleep(time.Second)
+			time.Sleep(qualificationOperatorRepairInterval)
 			continue
 		}
 		lastProgress = time.Now()
@@ -314,7 +314,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		if time.Now().After(recoveryEnd) {
 			t.Fatalf("recovery exceeded %s; %d unfinished events, Kafka lag=%v", c.recovery, remaining, kafka["lag"])
 		}
-		time.Sleep(time.Second)
+		time.Sleep(qualificationOperatorRepairInterval)
 	}
 	recoverySeconds := time.Since(recoveryStart).Seconds()
 	write(map[string]any{"kind": "recovery_end", "time": time.Now().UTC(), "elapsed_seconds": recoverySeconds, "remaining": remaining})
@@ -351,6 +351,10 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	passed = true
 	t.Logf("qualification PASS commit=%s cycles=%d committed=%d kafka_records=%d duplicates=%d dead_retries=%d pruned=%d offset_failures=%d", commit, cycles, total, kafkaRecords, duplicates, retriedDead, pruned, factory.injected.Load())
 }
+
+// Repair polling is part of the simulated operator, not consumer retry policy.
+// A one-second check imposed extra head-of-line stalls after retry exhaustion.
+const qualificationOperatorRepairInterval = 100 * time.Millisecond
 
 func qualificationConsumerConfig(name, instance string) managed.Config {
 	c := managedTestConfig(name, instance)

@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/moby/moby/api/types/container"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/testcontainers/testcontainers-go"
 
@@ -34,6 +35,7 @@ import (
 )
 
 const qualificationKafkaLogDirectory = "/tmp/qualification-kafka-logs"
+const qualificationPostgresShmBytes = 512 * 1024 * 1024
 
 func qualificationKafkaOptions() testcontainers.CustomizeRequestOption {
 	return func(req *testcontainers.GenericContainerRequest) error {
@@ -50,6 +52,14 @@ func qualificationPostgresOptions() testcontainers.CustomizeRequestOption {
 	return func(req *testcontainers.GenericContainerRequest) error {
 		if os.Getenv("EMITLANE_QUALIFICATION_DURATION") == "" {
 			return nil
+		}
+		// Parallel identity audits can exceed Docker's default /dev/shm size.
+		// This is capacity for the same full audit, not a disabled planner or
+		// reduced set of identity/effect checks.
+		if err := testcontainers.WithHostConfigModifier(func(config *container.HostConfig) {
+			config.ShmSize = qualificationPostgresShmBytes
+		})(req); err != nil {
+			return err
 		}
 		return testcontainers.WithCmd("postgres", "-c", "fsync=on", "-c", "synchronous_commit=on",
 			"-c", "full_page_writes=on", "-c", "shared_preload_libraries=pg_stat_statements",
@@ -175,11 +185,18 @@ func startQualificationDiagnostics(t *testing.T, original *env, output string) (
 	if err := d.pool.QueryRow(ctx, "SELECT current_setting('fsync')='on' AND current_setting('synchronous_commit')='on' AND current_setting('full_page_writes')='on'").Scan(&durable); err != nil || !durable {
 		t.Fatalf("qualification durability settings: enabled=%t error=%v", durable, err)
 	}
+	info, err := original.postgres.Inspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.HostConfig == nil || info.HostConfig.ShmSize < qualificationPostgresShmBytes {
+		t.Fatal("qualification PostgreSQL shared-memory capacity is below 512 MiB")
+	}
 	d.file, err = os.OpenFile(filepath.Join(output, "diagnostics.jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture, err := json.Marshal(map[string]any{"postgres_container": original.postgres.GetContainerID(), "kafka_container": original.kafka.GetContainerID(), "kafka_log_directory": qualificationKafkaLogDirectory})
+	fixture, err := json.Marshal(map[string]any{"postgres_container": original.postgres.GetContainerID(), "postgres_shm_size_bytes": info.HostConfig.ShmSize, "kafka_container": original.kafka.GetContainerID(), "kafka_log_directory": qualificationKafkaLogDirectory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +462,9 @@ func TestQualificationPostgresDurabilityIsOptIn(t *testing.T) {
 	if strings.Join(req.Cmd, " ") != "postgres -c fsync=off" {
 		t.Fatal("ordinary fixture changed")
 	}
+	if req.HostConfigModifier != nil {
+		t.Fatal("ordinary fixture shared memory changed")
+	}
 	t.Setenv("EMITLANE_QUALIFICATION_DURATION", "3m")
 	if err := qualificationPostgresOptions()(&req); err != nil {
 		t.Fatal(err)
@@ -453,6 +473,11 @@ func TestQualificationPostgresDurabilityIsOptIn(t *testing.T) {
 		if !strings.Contains(strings.Join(req.Cmd, " "), setting) {
 			t.Fatalf("missing %s", setting)
 		}
+	}
+	config := container.HostConfig{}
+	req.HostConfigModifier(&config)
+	if config.ShmSize != qualificationPostgresShmBytes {
+		t.Fatalf("qualification shared memory: %d", config.ShmSize)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 
 	kafkaadapter "github.com/emitlane/emitlane/broker/kafka"
 	managed "github.com/emitlane/emitlane/consumer"
+	"github.com/emitlane/emitlane/integrity"
 	"github.com/emitlane/emitlane/relay"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
 	"github.com/google/uuid"
@@ -245,6 +246,9 @@ func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
 	if dumpPath == "" {
 		t.Skip("opt-in replay of a preserved qualification database")
 	}
+	// Reproduce audits with the same durable qualification fixture and shared
+	// memory capacity, rather than the ordinary fsync=off test defaults.
+	t.Setenv("EMITLANE_QUALIFICATION_DURATION", "3m")
 	output := os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")
 	if output == "" {
 		t.Fatal("EMITLANE_QUALIFICATION_OUTPUT is required")
@@ -289,6 +293,24 @@ func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
 		}
 		total := auditQualificationDatabase(t, ctx, e, topic, consumer, retries)
 		t.Logf("preserved completed database audit: committed=%d retry_operations=%d", total, retries)
+		verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := verifier.Check(ctx, integrity.ModeFull)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Summary.Violations != 0 || report.Summary.InboxStaleLeases != 0 || report.FindingsTruncated {
+			t.Fatalf("preserved integrity: %+v", report)
+		}
+		proof, err := json.Marshal(map[string]any{"committed": total, "retry_operations": retries, "integrity": report})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(output, "preserved-audit.json"), proof, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rows, err := e.pool.Query(ctx, `SELECT status, ordering_key IS NOT NULL, count(*), min(available_at)
  FROM emitlane.outbox_events GROUP BY status, ordering_key IS NOT NULL`)
