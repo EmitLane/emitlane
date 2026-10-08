@@ -443,6 +443,10 @@ func produceQualification(ctx context.Context, e *env, topic string, c qualifica
 }
 
 func enqueueQualification(ctx context.Context, e *env, topic, id string, p qualificationPayload) error {
+	return enqueueQualificationAt(ctx, e, topic, id, p, time.Time{})
+}
+
+func enqueueQualificationAt(ctx context.Context, e *env, topic, id string, p qualificationPayload, availableAt time.Time) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -467,7 +471,7 @@ func enqueueQualification(ctx context.Context, e *env, topic, id string, p quali
 	if p.Stream != "" {
 		key = p.Stream
 	}
-	_, err = e.writer.Enqueue(ctx, tx, outbox.Event{ID: id, Destination: topic, Type: "qualification.input", Key: []byte(key), Payload: payload, OrderingKey: p.Stream, Sequence: p.StreamSequence})
+	_, err = e.writer.Enqueue(ctx, tx, outbox.Event{ID: id, Destination: topic, Type: "qualification.input", Key: []byte(key), Payload: payload, OrderingKey: p.Stream, Sequence: p.StreamSequence, AvailableAt: availableAt})
 	if err != nil {
 		return err
 	}
@@ -475,6 +479,11 @@ func enqueueQualification(ctx context.Context, e *env, topic, id string, p quali
 }
 
 func qualificationPauseProbe(t *testing.T, e *env, topic string, seed int64) string {
+	t.Helper()
+	return qualificationProbe(t, e, topic, seed, time.Time{})
+}
+
+func qualificationProbe(t *testing.T, e *env, topic string, seed int64, availableAt time.Time) string {
 	t.Helper()
 	id := uuid.NewString()
 	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -484,7 +493,7 @@ func qualificationPauseProbe(t *testing.T, e *env, topic string, seed int64) str
 	if err := e.pool.QueryRow(ctx, `SELECT COALESCE(MIN(sequence),0)-1 FROM public.soak_expected WHERE sequence<0`).Scan(&seq); err != nil {
 		t.Fatal(err)
 	}
-	if err := enqueueQualification(ctx, e, topic, id, qualificationPayload{Seed: seed, Sequence: seq}); err != nil {
+	if err := enqueueQualificationAt(ctx, e, topic, id, qualificationPayload{Seed: seed, Sequence: seq}, availableAt); err != nil {
 		t.Fatal(err)
 	}
 	return id

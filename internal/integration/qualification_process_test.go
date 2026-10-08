@@ -36,7 +36,18 @@ func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, 
 	if mode != "consumer" {
 		// The parent Relay is stopped. A quiet or stopped producer must not
 		// leave the helper waiting for an event that will never be committed.
-		probe = uuid.MustParse(qualificationPauseProbe(t, e, topic, c.seed))
+		// Put the audited probe ahead of the ready unordered backlog using the
+		// Writer's scheduling API. Its claim and ACK still use the real Relay;
+		// reaching that crash window must not require draining the whole queue.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var availableAt time.Time
+		err := e.pool.QueryRow(ctx, `SELECT LEAST(NOW(), MIN(available_at)) - INTERVAL '1 millisecond'
+ FROM emitlane.outbox_events WHERE ordering_key IS NULL AND status IN ('pending','inflight')`).Scan(&availableAt)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe = uuid.MustParse(qualificationProbe(t, e, topic, c.seed, availableAt))
 	}
 	executable, err := os.Executable()
 	if err != nil {
