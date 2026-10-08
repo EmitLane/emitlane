@@ -327,7 +327,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	auditCtx, stopAudit := context.WithTimeout(ctx, c.audit)
 	defer stopAudit()
 	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed)
-	total := auditQualificationDatabase(t, auditCtx, e, topic, name)
+	total := auditQualificationDatabase(t, auditCtx, e, topic, name, retriedDead)
 	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)

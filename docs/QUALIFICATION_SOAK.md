@@ -88,6 +88,11 @@ seconds are retained in its log. Producer completion/error is checked between
 faults and during healthy intervals, so a stopped generator cannot masquerade
 as a healthy load.
 
+The operator audit checks every retry against its repaired poison identity and
+consumer, requires an audit for every repaired poison, and reconciles the total
+with successful retry operations. One poison can need multiple audited retries:
+Inbox attempts are retained, and a later failure can return it to `dead`.
+
 Half the normal load uses eight ordered streams. Sequence allocation belongs
 to the producer transaction, including through ambiguous database commits.
 The consumer checks stream progress inside the same transaction as its Inbox
@@ -209,3 +214,8 @@ go test -p=1 -tags=integration -run '^TestQualificationCrashHelperFromFailureSna
 This restores into a fresh disposable PostgreSQL/Kafka fixture and adds one
 audited probe. It verifies the ACK-before-database-acknowledgement window; it
 does not restore Kafka history or establish the failed run's final integrity.
+For a snapshot that already completed the Kafka identity audit and recovery,
+`EMITLANE_QUALIFICATION_REPLAY_RETRIES` can supply its recorded successful retry
+operation count to also rerun the database identity/effect/operator audit before
+adding the crash probe. This remains a snapshot regression, not a terminal PASS
+for the original run.

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -270,6 +271,14 @@ func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("preserved ledger: expected=%d processed=%d protected_effects=%d", expected, processed, effects)
+	if value := os.Getenv("EMITLANE_QUALIFICATION_REPLAY_RETRIES"); value != "" {
+		retries, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || retries < 1 {
+			t.Fatalf("invalid preserved retry count %q", value)
+		}
+		total := auditQualificationDatabase(t, ctx, e, topic, consumer, retries)
+		t.Logf("preserved completed database audit: committed=%d retry_operations=%d", total, retries)
+	}
 	rows, err := e.pool.Query(ctx, `SELECT status, ordering_key IS NOT NULL, count(*), min(available_at)
  FROM emitlane.outbox_events GROUP BY status, ordering_key IS NOT NULL`)
 	if err != nil {

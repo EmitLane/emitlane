@@ -236,9 +236,9 @@ func auditQualificationBatch(ctx context.Context, e *env, order *qualificationOr
 	return tx.Commit(ctx)
 }
 
-func auditQualificationDatabase(t *testing.T, ctx context.Context, e *env, topic, name string) int64 {
+func auditQualificationDatabase(t *testing.T, ctx context.Context, e *env, topic, name string, retries int64) int64 {
 	t.Helper()
-	var mismatch, total, audits, repairs, poisons int64
+	var mismatch, total int64
 	// FULL JOIN detects substitutions/extra rows as well as missing rows. The
 	// business transaction is authoritative even after delivered retention.
 	if err := e.pool.QueryRow(ctx, `
@@ -258,14 +258,8 @@ FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mis
 	if total == 0 || mismatch != 0 {
 		t.Fatalf("database audit: committed=%d identity/effect mismatches=%d", total, mismatch)
 	}
-	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM emitlane.admin_audit_log WHERE action='inbox.retry' AND actor='qualification' AND reason='poison input repaired'`).Scan(&audits); err != nil {
+	if err := checkQualificationRetryAudit(ctx, e, name, retries); err != nil {
 		t.Fatal(err)
-	}
-	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FILTER(WHERE repaired),COUNT(*) FILTER(WHERE poison) FROM public.soak_expected`).Scan(&repairs, &poisons); err != nil {
-		t.Fatal(err)
-	}
-	if poisons == 0 || repairs != poisons || audits != repairs {
-		t.Fatalf("operator audit: poisons=%d repairs=%d audit rows=%d", poisons, repairs, audits)
 	}
 	var streamMismatch int64
 	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.soak_stream_progress s JOIN public.soak_effect_progress e USING(stream) WHERE s.sequence<>e.sequence OR s.sequence=0`).Scan(&streamMismatch); err != nil {
@@ -275,6 +269,75 @@ FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mis
 		t.Fatalf("%d business streams did not reach their committed sequence", streamMismatch)
 	}
 	return total
+}
+
+func checkQualificationRetryAudit(ctx context.Context, e *env, name string, retries int64) error {
+	var poisons, repairs, audits, invalid, missing, ledgerMismatch int64
+	// RetryDead preserves attempts. A repaired poison can become dead again
+	// after a later failure, so audit every operation and every target identity,
+	// rather than assuming one operation per repaired event.
+	err := e.pool.QueryRow(ctx, `WITH retries AS (
+ SELECT target_event_id,actor,reason,details FROM emitlane.admin_audit_log WHERE action='inbox.retry'
+)
+SELECT (SELECT COUNT(*) FROM public.soak_expected WHERE poison),
+ (SELECT COUNT(*) FROM public.soak_expected WHERE repaired),
+ (SELECT COUNT(*) FROM retries),
+ (SELECT COUNT(*) FROM retries a LEFT JOIN public.soak_expected x ON x.event_id=a.target_event_id
+  WHERE x.event_id IS NULL OR NOT x.poison OR NOT x.repaired
+   OR a.actor IS DISTINCT FROM 'qualification' OR a.reason IS DISTINCT FROM 'poison input repaired'
+   OR a.details->>'consumer' IS DISTINCT FROM $1),
+ (SELECT COUNT(*) FROM public.soak_expected x WHERE x.poison
+  AND NOT EXISTS (SELECT 1 FROM retries a WHERE a.target_event_id=x.event_id)),
+ (SELECT COUNT(*) FROM public.soak_expected WHERE poison IS DISTINCT FROM repaired)`, name).
+		Scan(&poisons, &repairs, &audits, &invalid, &missing, &ledgerMismatch)
+	if err != nil {
+		return err
+	}
+	if poisons == 0 || repairs != poisons || audits != retries || invalid != 0 || missing != 0 || ledgerMismatch != 0 {
+		return fmt.Errorf("operator audit: poisons=%d repairs=%d retries=%d audit rows=%d invalid targets=%d missing targets=%d ledger mismatches=%d",
+			poisons, repairs, retries, audits, invalid, missing, ledgerMismatch)
+	}
+	return nil
+}
+
+func TestQualificationRetryAuditAcceptsRepeatedRepairAndRejectsWrongTargets(t *testing.T) {
+	e := startEnv(t)
+	ctx, stop := context.WithTimeout(context.Background(), time.Minute)
+	defer stop()
+	if _, err := e.pool.Exec(ctx, `CREATE TABLE public.soak_expected(event_id UUID PRIMARY KEY,poison BOOLEAN NOT NULL,repaired BOOLEAN NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	const poison = "00000000-0000-4000-8000-000000000001"
+	const other = "00000000-0000-4000-8000-000000000002"
+	for _, tc := range []struct {
+		name, mutation string
+		retries        int64
+		valid          bool
+	}{
+		{"repeated repair", "", 2, true},
+		{"missing operation", "", 3, false},
+		{"missing poison identity", "INSERT INTO public.soak_expected VALUES('" + other + "',TRUE,TRUE)", 2, false},
+		{"nonpoison identity", "UPDATE public.soak_expected SET poison=FALSE,repaired=FALSE", 2, false},
+		{"wrong consumer", "UPDATE emitlane.admin_audit_log SET details='{}'", 2, false},
+		{"unknown target", "UPDATE emitlane.admin_audit_log SET target_event_id='" + other + "'", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := e.pool.Exec(ctx, `TRUNCATE public.soak_expected,emitlane.admin_audit_log;
+INSERT INTO public.soak_expected VALUES('`+poison+`',TRUE,TRUE);
+INSERT INTO emitlane.admin_audit_log(id,action,actor,reason,target_event_id,details)
+SELECT gen_random_uuid(),'inbox.retry','qualification','poison input repaired','`+poison+`','{"consumer":"qualification-v1"}' FROM generate_series(1,2)`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mutation != "" {
+				if _, err := e.pool.Exec(ctx, tc.mutation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := checkQualificationRetryAudit(ctx, e, "qualification-v1", tc.retries); (err == nil) != tc.valid {
+				t.Fatalf("valid=%t error=%v", tc.valid, err)
+			}
+		})
+	}
 }
 
 func TestQualificationOrderAuditRejectsRegressionGapAndPartitionChange(t *testing.T) {
