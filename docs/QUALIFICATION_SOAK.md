@@ -79,6 +79,15 @@ drain group offset lag to zero. Offset commit failure is re-armed every cycle. T
 injected throughout the load. At least two full cycles, two observed offset
 commit failures, poison repair and actual deletion are required for PASS.
 
+Relay crash helpers receive a newly committed unordered probe in the same
+business/expected-event ledger used by the final audit. The parent stops its
+Relay first, then creates the probe; the helper's atomic marker identifies that
+exact event and crash window before SIGKILL. A drained Outbox must not turn a
+crash check into an idle timeout. Helper progress and a stack dump after twenty
+seconds are retained in its log. Producer completion/error is checked between
+faults and during healthy intervals, so a stopped generator cannot masquerade
+as a healthy load.
+
 Half the normal load uses eight ordered streams. Sequence allocation belongs
 to the producer transaction, including through ambiguous database commits.
 The consumer checks stream progress inside the same transaction as its Inbox
@@ -187,3 +196,16 @@ go test -p=1 -tags=integration -run '^TestQualificationFailureDumpRestoresLedger
 This opt-in check restores the dump in a separate database inside its disposable
 PostgreSQL container, verifies the authoritative ledger, and reads the complete
 Kafka tar archive to reject truncation or missing record segments.
+
+To reproduce a Relay ACK crash-window failure from a saved database:
+
+```sh
+EMITLANE_QUALIFICATION_REPLAY_DUMP=/absolute/failure-database.dump \
+EMITLANE_QUALIFICATION_OUTPUT=/absolute/new/replay-results \
+go test -p=1 -tags=integration -run '^TestQualificationCrashHelperFromFailureSnapshot$' \
+  -count=1 -v -timeout=5m ./internal/integration
+```
+
+This restores into a fresh disposable PostgreSQL/Kafka fixture and adds one
+audited probe. It verifies the ACK-before-database-acknowledgement window; it
+does not restore Kafka history or establish the failed run's final integrity.

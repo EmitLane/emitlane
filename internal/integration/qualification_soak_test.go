@@ -133,14 +133,25 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	loadCtx, stopLoad := context.WithTimeout(ctx, c.duration)
 	producerDone := make(chan struct{})
 	var producerFailures atomic.Int64
-	producerError := make(chan error, 1)
+	var producerResult error // Read only after producerDone closes.
 	go func() {
 		defer close(producerDone)
-		err := produceQualification(loadCtx, e, topic, c, &producerFailures)
-		e.log.Info("qualification producer stopped", "error", err, "context_error", loadCtx.Err())
-		producerError <- err
+		producerResult = produceQualification(loadCtx, e, topic, c, &producerFailures)
+		e.log.Info("qualification producer stopped", "error", producerResult, "context_error", loadCtx.Err())
 	}()
 	defer func() { stopLoad(); <-producerDone }()
+	checkProducer := func() {
+		select {
+		case <-producerDone:
+			if producerResult != nil {
+				t.Fatal(producerResult)
+			}
+			if loadCtx.Err() == nil {
+				t.Fatal("qualification producer stopped before the load deadline")
+			}
+		default:
+		}
+	}
 	rng := rand.New(rand.NewSource(c.seed))
 	cycles, retriedDead, pruned := 0, int64(0), int64(0)
 	deadline := time.Now().Add(c.duration)
@@ -149,6 +160,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	// fault cycle can drain them, making a long run a growing-backlog test.
 	waitHealthy := func(until time.Time) {
 		for loadCtx.Err() == nil && time.Now().Before(until) {
+			checkProducer()
 			if n := retryQualificationDead(t, e, name); n > 0 {
 				retriedDead += n
 				write(map[string]any{"kind": "operator_retry", "time": time.Now().UTC(), "cycle": cycles, "events": n})
@@ -166,13 +178,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		// Shuffle reproducibly, while preserving every fault in every full cycle.
 		rng.Shuffle(len(faults), func(i, j int) { faults[i], faults[j] = faults[j], faults[i] })
 		for _, fault := range faults {
-			select {
-			case err := <-producerError:
-				if err != nil {
-					t.Fatal(err)
-				}
-			default:
-			}
+			checkProducer()
 			write(map[string]any{"kind": "fault_begin", "time": time.Now().UTC(), "cycle": cycles + 1, "fault": fault})
 			switch fault {
 			case "consumer_crash":
@@ -241,6 +247,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 					}
 				}
 			}
+			checkProducer()
 			coverage[fault]++
 			write(map[string]any{"kind": "fault_end", "time": time.Now().UTC(), "cycle": cycles + 1, "fault": fault})
 			if n := retryQualificationDead(t, e, name); n > 0 {
@@ -259,13 +266,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	waitHealthy(deadline)
 	<-loadCtx.Done()
 	<-producerDone
-	select {
-	case err := <-producerError:
-		if err != nil {
-			t.Fatal(err)
-		}
-	default:
-	}
+	checkProducer()
 	stopLoad()
 	if cycles < 2 {
 		t.Fatalf("only %d full fault cycles completed; increase duration", cycles)
