@@ -326,6 +326,10 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	}
 	auditCtx, stopAudit := context.WithTimeout(ctx, c.audit)
 	defer stopAudit()
+	// Persist the independent operation counter before an audit can fail. The
+	// per-action records omit retries made inside the retention fault itself.
+	write(map[string]any{"kind": "audit_begin", "time": time.Now().UTC(), "retried_dead": retriedDead,
+		"pruned": pruned, "offset_failures": factory.injected.Load()})
 	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed)
 	total := auditQualificationDatabase(t, auditCtx, e, topic, name, retriedDead)
 	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
