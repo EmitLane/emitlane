@@ -6,11 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -99,8 +99,18 @@ func TestQualificationProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	logger.Info("crash helper started", "mode", mode)
+	// Capture the child itself before the parent's 25s deadline. Parent profiles
+	// cannot explain a child blocked on a pool, partition fence or broker ACK.
+	go func() {
+		time.Sleep(20 * time.Second)
+		logger.Warn("crash helper still waiting", "mode", mode,
+			"pool_acquired", pool.Stat().AcquiredConns(), "pool_total", pool.Stat().TotalConns())
+		_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+	}()
 	ready := func() {
+		logger.Info("crash helper reached window", "mode", mode)
 		if err := os.WriteFile(os.Getenv("EMITLANE_QUALIFICATION_SIGNAL"), []byte(mode), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -151,9 +161,16 @@ func TestQualificationProcessHelper(t *testing.T) {
 	}
 	defer pub.Close()
 	hooks := relay.FailureHooks{}
+	hooks.AfterClaimCommit = func(_ context.Context, event relay.Event) error {
+		logger.Info("crash helper claim committed", "mode", mode, "event_id", event.ID,
+			"ordered", event.OrderingKey != "", "attempts", event.Attempts)
+		if mode == "relay_claim_crash" {
+			ready()
+		}
+		return nil
+	}
 	switch mode {
 	case "relay_claim_crash":
-		hooks.AfterClaimCommit = func(context.Context, relay.Event) error { ready(); return nil }
 	case "relay_ack_crash":
 		hooks.AfterPublishAck = func(context.Context, relay.Event) error { ready(); return nil }
 	default:
