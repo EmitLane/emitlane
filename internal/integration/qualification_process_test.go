@@ -141,7 +141,11 @@ func TestQualificationProcessHelper(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(os.Getenv("EMITLANE_QUALIFICATION_SIGNAL"), data, 0600); err != nil {
+		path := os.Getenv("EMITLANE_QUALIFICATION_SIGNAL")
+		if err := os.WriteFile(path+".tmp", data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(path+".tmp", path); err != nil {
 			t.Fatal(err)
 		}
 		select {}
