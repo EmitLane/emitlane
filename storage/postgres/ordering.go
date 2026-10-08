@@ -86,6 +86,8 @@ FOR UPDATE`)
 	leaseUntil := now.Add(leaseDuration)
 	publishMS := int(intervalMS(publishTimeout))
 	acquired, renewed, released := 0, 0, 0
+	var renewalIDs []int16
+	var renewalEpochs []int64
 	for i := range locked {
 		row := &locked[i]
 		desired := internalordering.DesiredOwner(row.id, members)
@@ -108,13 +110,8 @@ WHERE partition_id=$1 AND lease_owner=$4`, row.id, barrier, now, owner); err != 
 			released++
 
 		case desired == owner && actual == owner && valid:
-			if _, err := tx.Exec(ctx, `
-UPDATE emitlane.ordering_partitions
-SET lease_until=$2, publish_timeout_ms=$3, updated_at=$4
-WHERE partition_id=$1 AND lease_owner=$5 AND epoch=$6`,
-				row.id, leaseUntil, publishMS, now, owner, row.epoch); err != nil {
-				return nil, fmt.Errorf("renew ordering partition %d: %w", row.id, err)
-			}
+			renewalIDs = append(renewalIDs, row.id)
+			renewalEpochs = append(renewalEpochs, row.epoch)
 			row.leaseUntil = &leaseUntil
 			row.publishTimeoutMS = &publishMS
 			renewed++
@@ -141,6 +138,24 @@ WHERE partition_id=$1
 			row.handoffNotBefore = barrier
 			row.publishTimeoutMS = &publishMS
 			acquired++
+		}
+	}
+	if len(renewalIDs) > 0 {
+		// All partition rows are already locked in this transaction. Renew the
+		// selected owner/epoch pairs together rather than paying one network
+		// round trip per virtual partition. No ownership or barrier is changed.
+		tag, err := tx.Exec(ctx, `
+UPDATE emitlane.ordering_partitions AS partition
+SET lease_until=$4, publish_timeout_ms=$5, updated_at=$6
+FROM UNNEST($1::smallint[], $2::bigint[]) AS renewal(partition_id, epoch)
+WHERE partition.partition_id=renewal.partition_id
+  AND partition.lease_owner=$3 AND partition.epoch=renewal.epoch
+  AND partition.lease_until > $6`, renewalIDs, renewalEpochs, owner, leaseUntil, publishMS, now)
+		if err != nil {
+			return nil, fmt.Errorf("renew ordering partitions: %w", err)
+		}
+		if tag.RowsAffected() != int64(len(renewalIDs)) {
+			return nil, fmt.Errorf("renew ordering partitions: updated %d of %d locked leases", tag.RowsAffected(), len(renewalIDs))
 		}
 	}
 
