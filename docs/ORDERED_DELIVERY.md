@@ -95,6 +95,11 @@ Acquisition and release are short PostgreSQL transactions. Every ownership
 change increments `epoch`. Delivery does not require a long-lived database
 transaction and no transaction is held during Kafka I/O.
 
+Within reconciliation, valid leases belonging to the caller are renewed in
+one SQL statement using their locked partition IDs, owners and epochs. A
+partial renewal rolls back the reconciliation; renewal does not change epochs
+or handoff barriers and does not extend another owner's leases.
+
 Schema v3 marks Relay presence rows as ordering-capable. A database claim guard
 prevents a v0.2 Relay from moving an ordered row to inflight, even though its
 released query does not know about ordering columns. This keeps an ordered row

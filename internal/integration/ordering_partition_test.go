@@ -209,3 +209,40 @@ func TestOrderingPartitionRenewalPreservesPeerLeasesAndEpochs(t *testing.T) {
 func sameOrderingTime(a, b *time.Time) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && a.Equal(*b))
 }
+
+func TestOrderingPartitionRenewalRollsBackIncompleteUpdate(t *testing.T) {
+	e := startEnv(t)
+	registerOrderingRelay(t, e, "renew-rollback")
+	before := reconcileOrdering(t, e, "renew-rollback")
+	ctx := context.Background()
+	// Simulate a database-side rejection of one renewal. The store must not
+	// return a successful snapshot or leave the other 63 leases extended.
+	if _, err := e.pool.Exec(ctx, `CREATE FUNCTION public.reject_one_renewal() RETURNS trigger LANGUAGE plpgsql AS $$
+ BEGIN IF NEW.partition_id=31 THEN RETURN NULL; END IF; RETURN NEW; END $$;
+ CREATE TRIGGER reject_one_renewal BEFORE UPDATE ON emitlane.ordering_partitions
+ FOR EACH ROW EXECUTE FUNCTION public.reject_one_renewal()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := e.pool.Exec(context.Background(), `DROP TRIGGER reject_one_renewal ON emitlane.ordering_partitions;
+ DROP FUNCTION public.reject_one_renewal()`); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := e.store.ReconcileOrderingPartitions(ctx, "renew-rollback", testPartitionLease,
+		2*testPublishWindow, testPresenceStale, testOrderingSafety); err == nil {
+		t.Fatal("incomplete renewal reported success")
+	}
+	for _, prior := range before {
+		var until time.Time
+		var epoch int64
+		var publishMS int64
+		if err := e.pool.QueryRow(ctx, `SELECT lease_until, epoch, publish_timeout_ms
+ FROM emitlane.ordering_partitions WHERE partition_id=$1`, prior.PartitionID).Scan(&until, &epoch, &publishMS); err != nil {
+			t.Fatal(err)
+		}
+		if !until.Equal(*prior.LeaseUntil) || epoch != prior.Epoch || publishMS != 100 {
+			t.Fatalf("partial renewal escaped rollback: partition=%d until=%s epoch=%d publish_ms=%d", prior.PartitionID, until, epoch, publishMS)
+		}
+	}
+}
