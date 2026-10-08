@@ -186,3 +186,70 @@ func TestQualificationProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Restore only into the disposable fixture database, never the original run.
+// This opt-in reproducer keeps crash-window failures inspectable after teardown.
+func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
+	dumpPath := os.Getenv("EMITLANE_QUALIFICATION_REPLAY_DUMP")
+	if dumpPath == "" {
+		t.Skip("opt-in replay of a preserved qualification database")
+	}
+	output := os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")
+	if output == "" {
+		t.Fatal("EMITLANE_QUALIFICATION_OUTPUT is required")
+	}
+	if err := os.MkdirAll(output, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := startEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dump, err := os.Open(dumpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dump.Close()
+	restore := exec.CommandContext(ctx, "docker", "exec", "-i", e.postgres.GetContainerID(),
+		"pg_restore", "--clean", "--if-exists", "--exit-on-error", "-U", "emitlane", "-d", "emitlane")
+	restore.Stdin = dump
+	if out, err := restore.CombinedOutput(); err != nil {
+		t.Fatalf("restore disposable database: %v %s", err, out)
+	}
+	e.pool.Reset()
+	var topic, consumer string
+	if err := e.pool.QueryRow(ctx, `SELECT destination FROM emitlane.outbox_events LIMIT 1`).Scan(&topic); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.pool.QueryRow(ctx, `SELECT consumer FROM emitlane.inbox_events LIMIT 1`).Scan(&consumer); err != nil {
+		t.Fatal(err)
+	}
+	e.ensureTopicPartitions(t, topic, 8)
+	var expected, processed, effects int64
+	if err := e.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.soak_expected),
+ (SELECT count(*) FROM emitlane.inbox_events WHERE status='processed'),
+ (SELECT count(*) FROM public.business_payments)`).Scan(&expected, &processed, &effects); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("preserved ledger: expected=%d processed=%d protected_effects=%d", expected, processed, effects)
+	rows, err := e.pool.Query(ctx, `SELECT status, ordering_key IS NOT NULL, count(*), min(available_at)
+ FROM emitlane.outbox_events GROUP BY status, ordering_key IS NOT NULL`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var status string
+		var ordered bool
+		var count int64
+		var available time.Time
+		if err := rows.Scan(&status, &ordered, &count, &available); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		t.Logf("preserved outbox: status=%s ordered=%t count=%d earliest=%s", status, ordered, count, available)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	killQualificationChild(t, e, qualificationConfig{output: output}, topic, "qualification-replay", consumer, "relay_ack_crash", 0)
+}
