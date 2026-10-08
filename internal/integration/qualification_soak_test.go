@@ -136,7 +136,9 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	producerError := make(chan error, 1)
 	go func() {
 		defer close(producerDone)
-		producerError <- produceQualification(loadCtx, e, topic, c, &producerFailures)
+		err := produceQualification(loadCtx, e, topic, c, &producerFailures)
+		e.log.Info("qualification producer stopped", "error", err, "context_error", loadCtx.Err())
+		producerError <- err
 	}()
 	defer func() { stopLoad(); <-producerDone }()
 	rng := rand.New(rand.NewSource(c.seed))

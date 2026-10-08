@@ -19,12 +19,24 @@ import (
 	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/emitlane/emitlane/relay"
 	pgstore "github.com/emitlane/emitlane/storage/postgres"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, group, name, mode string, cycle int) {
+type qualificationCrashWindow struct {
+	Mode    string    `json:"mode"`
+	EventID uuid.UUID `json:"event_id"`
+}
+
+func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, group, name, mode string, cycle int) uuid.UUID {
 	t.Helper()
+	var probe uuid.UUID
+	if mode != "consumer" {
+		// The parent Relay is stopped. A quiet or stopped producer must not
+		// leave the helper waiting for an event that will never be committed.
+		probe = uuid.MustParse(qualificationPauseProbe(t, e, topic, c.seed))
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +51,8 @@ func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, 
 	cmd := exec.Command(executable, "-test.run=^TestQualificationProcessHelper$", "-test.timeout=40s")
 	cmd.Env = append(os.Environ(), "EMITLANE_QUALIFICATION_HELPER="+mode, "EMITLANE_QUALIFICATION_DATABASE="+e.databaseURL,
 		"EMITLANE_QUALIFICATION_BROKERS="+strings.Join(e.brokers, ","), "EMITLANE_QUALIFICATION_TOPIC="+topic,
-		"EMITLANE_QUALIFICATION_GROUP="+group, "EMITLANE_QUALIFICATION_CONSUMER="+name, "EMITLANE_QUALIFICATION_SIGNAL="+signalPath)
+		"EMITLANE_QUALIFICATION_GROUP="+group, "EMITLANE_QUALIFICATION_CONSUMER="+name, "EMITLANE_QUALIFICATION_SIGNAL="+signalPath,
+		"EMITLANE_QUALIFICATION_PROBE="+probe.String())
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
@@ -79,6 +92,15 @@ func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, 
 	if !errors.As(err, &exit) || exit.ExitCode() != -1 {
 		t.Fatalf("%s helper was not killed: %v", mode, err)
 	}
+	data, err := os.ReadFile(signalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var window qualificationCrashWindow
+	if err := json.Unmarshal(data, &window); err != nil || window.Mode != mode || window.EventID == uuid.Nil || (probe != uuid.Nil && window.EventID != probe) {
+		t.Fatalf("invalid crash-window proof: %+v error=%v", window, err)
+	}
+	return window.EventID
 }
 
 // Spawned using this test binary: the parent kills us only after the ready
@@ -109,9 +131,17 @@ func TestQualificationProcessHelper(t *testing.T) {
 			"pool_acquired", pool.Stat().AcquiredConns(), "pool_total", pool.Stat().TotalConns())
 		_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
 	}()
-	ready := func() {
-		logger.Info("crash helper reached window", "mode", mode)
-		if err := os.WriteFile(os.Getenv("EMITLANE_QUALIFICATION_SIGNAL"), []byte(mode), 0600); err != nil {
+	probe, err := uuid.Parse(os.Getenv("EMITLANE_QUALIFICATION_PROBE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := func(eventID uuid.UUID) {
+		logger.Info("crash helper reached window", "mode", mode, "event_id", eventID)
+		data, err := json.Marshal(qualificationCrashWindow{Mode: mode, EventID: eventID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("EMITLANE_QUALIFICATION_SIGNAL"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
 		select {}
@@ -138,7 +168,7 @@ func TestQualificationProcessHelper(t *testing.T) {
 			if _, err := tx.Exec(ctx, `INSERT INTO public.business_payments(order_id,amount) VALUES($1,$2)`, m.EventID.String(), p.Sequence); err != nil {
 				return err
 			}
-			ready()
+			ready(m.EventID)
 			return nil
 		}, managed.WithLogger(logger))
 		if err != nil {
@@ -164,15 +194,20 @@ func TestQualificationProcessHelper(t *testing.T) {
 	hooks.AfterClaimCommit = func(_ context.Context, event relay.Event) error {
 		logger.Info("crash helper claim committed", "mode", mode, "event_id", event.ID,
 			"ordered", event.OrderingKey != "", "attempts", event.Attempts)
-		if mode == "relay_claim_crash" {
-			ready()
+		if mode == "relay_claim_crash" && event.ID == probe {
+			ready(event.ID)
 		}
 		return nil
 	}
 	switch mode {
 	case "relay_claim_crash":
 	case "relay_ack_crash":
-		hooks.AfterPublishAck = func(context.Context, relay.Event) error { ready(); return nil }
+		hooks.AfterPublishAck = func(_ context.Context, event relay.Event) error {
+			if event.ID == probe {
+				ready(event.ID)
+			}
+			return nil
+		}
 	default:
 		t.Fatalf("unknown qualification helper mode %q", mode)
 	}
@@ -251,5 +286,9 @@ func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows.Close()
-	killQualificationChild(t, e, qualificationConfig{output: output}, topic, "qualification-replay", consumer, "relay_ack_crash", 0)
+	probe := killQualificationChild(t, e, qualificationConfig{output: output}, topic, "qualification-replay", consumer, "relay_ack_crash", 0)
+	var pendingAck bool
+	if err := e.pool.QueryRow(ctx, `SELECT status='inflight' AND attempts=1 AND delivered_at IS NULL FROM emitlane.outbox_events WHERE id=$1`, probe).Scan(&pendingAck); err != nil || !pendingAck {
+		t.Fatalf("probe not left in ACK-before-DB-ack window: %t %v", pendingAck, err)
+	}
 }
