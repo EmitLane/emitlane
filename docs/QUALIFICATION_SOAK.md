@@ -78,7 +78,15 @@ Every completed cycle includes:
 - poison handler retry exhaustion, operator repair and audited Inbox retry;
 - bounded delivered-row retention with durable proof of prior delivered state.
 
-Consumer joins require an observed partition assignment. Recovery must also
+Consumer joins require an observed partition assignment within one minute,
+including coordinator discovery after an injected Kafka restart. This is a
+bounded qualification assertion, not a change to production consumer timeouts.
+The start record includes `rebalance_assignment_timeout`; each successful join
+writes `rebalance_assignment` with the observed count and elapsed wait. A timeout
+writes `rebalance_timeout` and fails the run. Elapsed time alone never proves a
+successful join. A real-broker regression restarts Kafka and delays peer source
+creation by 15 seconds to exercise a join beyond the former 12-second budget.
+Recovery must also
 drain group offset lag to zero. Offset commit failure is re-armed every cycle. Transient handler failures are
 injected throughout the load. Poison frequency and eight-attempt exhaustion
 are unchanged. During healthy intervals and recovery, the simulated operator

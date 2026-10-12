@@ -69,7 +69,8 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "branch": branch,
 		"duration": c.duration.String(), "interval": c.interval.String(), "rate": c.rate, "seed": c.seed,
 		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "recovery": c.recovery.String(), "audit": c.audit.String(),
-		"diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(), "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
+		"diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(),
+		"rebalance_assignment_timeout": qualificationRebalanceAssignmentTimeout.String(), "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
 	// Absence of PASS (including interruption) is never passing evidence.
 	passed := false
 	defer func() {
@@ -198,13 +199,19 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 					defer peer.stop(t)
 					// Observe actual assignment, rather than equating elapsed time with
 					// a successful group join. Cleanup also covers a failed assertion.
-					assignedDeadline := time.Now().Add(12 * time.Second)
-					for peerFactory.assignments.Load() == 0 && time.Now().Before(assignedDeadline) {
-						time.Sleep(50 * time.Millisecond)
+					assignmentStart := time.Now()
+					assignmentCtx, stopAssignment := context.WithTimeout(ctx, qualificationRebalanceAssignmentTimeout)
+					err := waitQualificationAssignment(assignmentCtx, peerFactory)
+					stopAssignment()
+					proof := map[string]any{"kind": "rebalance_assignment", "time": time.Now().UTC(), "cycle": cycles + 1,
+						"assignments": peerFactory.assignments.Load(), "wait_seconds": time.Since(assignmentStart).Seconds(),
+						"timeout": qualificationRebalanceAssignmentTimeout.String()}
+					if err != nil {
+						proof["kind"], proof["error"] = "rebalance_timeout", err.Error()
+						write(proof)
+						t.Fatalf("peer consumer received no partition assignment within %s: %v", qualificationRebalanceAssignmentTimeout, err)
 					}
-					if peerFactory.assignments.Load() == 0 {
-						t.Fatal("peer consumer never received a partition assignment")
-					}
+					write(proof)
 					peer.stop(t)
 				}()
 			case "kafka_restart":
