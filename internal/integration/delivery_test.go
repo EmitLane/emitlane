@@ -78,6 +78,11 @@ func reserveLocalPort() (int, error) {
 func startEnv(t *testing.T) *env {
 	t.Helper()
 	sharedOnce.Do(func() {
+		capacity, err := readQualificationCapacity()
+		if err != nil {
+			sharedErr = err
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		postgresPort, err := reserveLocalPort()
@@ -144,8 +149,8 @@ func startEnv(t *testing.T) *env {
 					HostIP:   netip.MustParseAddr("127.0.0.1"),
 					HostPort: kafkaPortString,
 				}}
-				hostConfig.Memory = 1536 * 1024 * 1024
-				hostConfig.NanoCPUs = 2_000_000_000
+				hostConfig.Memory = capacity.KafkaMemoryMiB * 1024 * 1024
+				hostConfig.NanoCPUs = capacity.KafkaCPUs * 1_000_000_000
 			}),
 			testcontainers.WithWaitStrategy(
 				wait.ForListeningPort("9092/tcp").WithStartupTimeout(2*time.Minute),

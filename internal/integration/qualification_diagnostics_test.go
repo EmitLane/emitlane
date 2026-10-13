@@ -148,6 +148,13 @@ func startQualificationDiagnostics(t *testing.T, original *env, output string) (
 	if err != nil {
 		t.Fatal(err)
 	}
+	capacity, err := readQualificationCapacity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity.PoolConns > 0 {
+		config.MaxConns = capacity.PoolConns
+	}
 	config.ConnConfig.Tracer = d.tracer
 	config.ConnConfig.RuntimeParams["application_name"] = "qualification-workload"
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
@@ -196,7 +203,14 @@ func startQualificationDiagnostics(t *testing.T, original *env, output string) (
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture, err := json.Marshal(map[string]any{"postgres_container": original.postgres.GetContainerID(), "postgres_shm_size_bytes": info.HostConfig.ShmSize, "kafka_container": original.kafka.GetContainerID(), "kafka_log_directory": qualificationKafkaLogDirectory})
+	kafkaInfo, err := original.kafka.Inspect(ctx)
+	if err != nil || kafkaInfo.HostConfig == nil {
+		t.Fatalf("inspect Kafka capacity: %v", err)
+	}
+	if kafkaInfo.HostConfig.Memory != capacity.KafkaMemoryMiB*1024*1024 || kafkaInfo.HostConfig.NanoCPUs != capacity.KafkaCPUs*1_000_000_000 {
+		t.Fatal("Kafka actual capacity differs from requested profile")
+	}
+	fixture, err := json.Marshal(map[string]any{"capacity": capacity, "pool_max_connections": config.MaxConns, "kafka_memory_bytes": kafkaInfo.HostConfig.Memory, "kafka_nano_cpus": kafkaInfo.HostConfig.NanoCPUs, "postgres_container": original.postgres.GetContainerID(), "postgres_shm_size_bytes": info.HostConfig.ShmSize, "kafka_container": original.kafka.GetContainerID(), "kafka_log_directory": qualificationKafkaLogDirectory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,22 +430,130 @@ type qualificationDiagnosticFactory struct {
 }
 
 func (f *qualificationDiagnosticFactory) NewSource(id string, listener managed.RebalanceListener) (managed.Source, error) {
-	s, err := f.inner.NewSource(id, listener)
+	observer := &qualificationDiagnosticSource{tracer: f.tracer}
+	s, err := f.inner.NewSource(id, &qualificationDiagnosticListener{RebalanceListener: listener, source: observer})
 	if err != nil {
 		return nil, err
 	}
-	return &qualificationDiagnosticSource{Source: s, tracer: f.tracer}, nil
+	observer.Source = s
+	return observer, nil
 }
 
 type qualificationDiagnosticSource struct {
 	managed.Source
-	tracer *qualificationQueryTracer
+	tracer     *qualificationQueryTracer
+	partition  int32
+	started    time.Time
+	unresolved bool
+	pauseMu    sync.Mutex
+	paused     map[int32]time.Time
+}
+
+func qualificationPartitionKey(partition int32, operation string) string {
+	if partition < 0 || partition >= 8 {
+		return "consumer.partition.other." + operation
+	}
+	return fmt.Sprintf("consumer.partition.%d.%s", partition, operation)
+}
+
+func (s *qualificationDiagnosticSource) Poll(ctx context.Context) (managed.SourceRecord, error) {
+	record, err := s.Source.Poll(ctx)
+	if err == nil {
+		s.partition = record.Partition
+		s.started = time.Now()
+		s.unresolved = false
+	}
+	return record, err
+}
+
+func (s *qualificationDiagnosticSource) Rewind(record managed.SourceRecord) {
+	s.unresolved = true
+	s.Source.Rewind(record)
+}
+
+func (s *qualificationDiagnosticSource) AllowRebalance() {
+	if !s.started.IsZero() {
+		result := "resolved"
+		if s.unresolved {
+			result = "unresolved"
+		}
+		s.tracer.observe(qualificationPartitionKey(s.partition, result), time.Since(s.started), nil)
+		s.started = time.Time{}
+	}
+	s.Source.AllowRebalance()
+}
+
+func (s *qualificationDiagnosticSource) Pause(partition managed.TopicPartition) {
+	// Qualification has exactly eight partitions; do not retain arbitrary keys.
+	s.pauseMu.Lock()
+	if partition.Partition >= 0 && partition.Partition < 8 {
+		if s.paused == nil {
+			s.paused = make(map[int32]time.Time)
+		}
+		if _, ok := s.paused[partition.Partition]; !ok {
+			s.paused[partition.Partition] = time.Now()
+		}
+	}
+	s.pauseMu.Unlock()
+	s.Source.Pause(partition)
+}
+
+func (s *qualificationDiagnosticSource) Resume(partition managed.TopicPartition) {
+	s.pauseMu.Lock()
+	if at, ok := s.paused[partition.Partition]; ok {
+		s.tracer.observe(qualificationPartitionKey(partition.Partition, "pause_residence"), time.Since(at), nil)
+		delete(s.paused, partition.Partition)
+	}
+	s.pauseMu.Unlock()
+	s.Source.Resume(partition)
+}
+
+func (s *qualificationDiagnosticSource) Close() {
+	s.censorPauses(nil)
+	s.Source.Close()
+}
+
+func (s *qualificationDiagnosticSource) censorPauses(partitions map[string][]int32) {
+	s.pauseMu.Lock()
+	defer s.pauseMu.Unlock()
+	clearOne := func(partition int32) {
+		if at, ok := s.paused[partition]; ok {
+			s.tracer.observe(qualificationPartitionKey(partition, "pause_censored"), time.Since(at), nil)
+			delete(s.paused, partition)
+		}
+	}
+	if partitions == nil {
+		for partition := range s.paused {
+			clearOne(partition)
+		}
+		return
+	}
+	for _, values := range partitions {
+		for _, partition := range values {
+			clearOne(partition)
+		}
+	}
+}
+
+type qualificationDiagnosticListener struct {
+	managed.RebalanceListener
+	source *qualificationDiagnosticSource
+}
+
+func (l *qualificationDiagnosticListener) Revoked(partitions map[string][]int32) {
+	l.source.censorPauses(partitions)
+	l.RebalanceListener.Revoked(partitions)
+}
+func (l *qualificationDiagnosticListener) Lost(partitions map[string][]int32) {
+	l.source.censorPauses(partitions)
+	l.RebalanceListener.Lost(partitions)
 }
 
 func (s *qualificationDiagnosticSource) Commit(ctx context.Context, record managed.SourceRecord) error {
 	start := time.Now()
 	err := s.Source.Commit(ctx, record)
 	s.tracer.observe("kafka.offset_commit", time.Since(start), err)
+	s.tracer.observe(qualificationPartitionKey(record.Partition, "offset_commit"), time.Since(start), err)
 	return err
 }
 

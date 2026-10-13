@@ -164,7 +164,22 @@ Every qualification now writes `diagnostics.jsonl` at approximately 30-second
 intervals. Sampling uses one separate PostgreSQL connection with a five-second
 sample deadline; it does not borrow from the workload pool. Its small overhead
 and PostgreSQL statement/I/O instrumentation are part of the measured profile.
-The workload retains its existing pool default and two Relay/consumer workers.
+The workload defaults to the existing pgx pool size and two Relay/consumer workers.
+For controlled capacity comparisons only, qualification accepts
+`EMITLANE_QUALIFICATION_CONSUMERS` (1–8), `EMITLANE_QUALIFICATION_POOL` (1–32),
+`EMITLANE_QUALIFICATION_KAFKA_MEMORY_MIB` (1536–3072), and
+`EMITLANE_QUALIFICATION_KAFKA_CPUS` (0–4; zero removes the broker CPU ceiling).
+Unset options preserve the previous fixture. Overrides apply only when qualification
+is explicitly enabled. They do not change production defaults, eight attempts,
+retry backoff, poison frequency, operator polling, ordering or any final audit.
+Requested capacity is recorded in `start`; actual Kafka limits and pool capacity
+are checked and recorded in `fixture.json`. Compare actual admitted event counts
+as well as the requested rate: producer slowdown must not look like faster recovery.
+
+Bounded timings for each of the eight partitions include handler/offset commit,
+resolved/unresolved processing attempts and observed pause residence. A pause
+still active when ownership is revoked/lost or a source closes is recorded as censored, not as a completed
+pause. These are overlapping observations across workers, not additive wall time.
 
 Evidence includes:
 

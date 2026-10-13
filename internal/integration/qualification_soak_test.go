@@ -57,6 +57,10 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	if dirty {
 		t.Fatal("qualification requires a clean committed source")
 	}
+	capacity, err := readQualificationCapacity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	encode := json.NewEncoder(evidence)
 	write := func(value any) {
 		if err := encode.Encode(value); err != nil {
@@ -69,7 +73,7 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "branch": branch,
 		"duration": c.duration.String(), "interval": c.interval.String(), "rate": c.rate, "seed": c.seed,
 		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "recovery": c.recovery.String(), "audit": c.audit.String(),
-		"diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(),
+		"capacity": capacity, "diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(),
 		"rebalance_assignment_timeout": qualificationRebalanceAssignmentTimeout.String(), "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
 	// Absence of PASS (including interruption) is never passing evidence.
 	passed := false
@@ -113,6 +117,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	e.ensureTopicPartitions(t, topic, 8)
 	diagnostics.start(topic, group)
 	consumerConfig := qualificationConsumerConfig(name, "qualification-main")
+	consumerConfig.Concurrency = capacity.Consumers
 	store := newManagedInboxStore(t, e)
 	factory := &qualificationCommitFactory{inner: &qualificationDiagnosticFactory{inner: newManagedFactory(t, e, topic, group), tracer: diagnostics.tracer}}
 	factory.armed.Store(true)
@@ -120,6 +125,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		start := time.Now()
 		err := qualificationHandler(ctx, tx, message)
 		diagnostics.tracer.observe("business.handler", time.Since(start), err)
+		diagnostics.tracer.observe(qualificationPartitionKey(message.Partition, "handler"), time.Since(start), err)
 		return err
 	}
 	consumer := launchManaged(t, e, consumerConfig, store, factory, handler, managed.WithMetrics(diagnostics.metrics))
