@@ -52,6 +52,15 @@ inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
 duplicate protected database effects, partition-order regressions, and
 integrity violations must be zero. Kafka redeliveries remain allowed.
 
+## Public v1 acceptance
+
+Before selecting a stable v1.0.0 tag, complete the candidate-specific
+[acceptance record](V1_RELEASE_CHECKLIST.md), including the documented remaining
+infrastructure, restore, endurance and independent application-pilot evidence.
+A passing managed qualification is one input to that record. It does not qualify
+a different runtime commit, a sustained capacity target, or untested deployment
+topologies. Keep explicit failures and untested items visible.
+
 ## Normal release flow
 
 1. Merge focused pull requests to `main`. Their squash titles must use
