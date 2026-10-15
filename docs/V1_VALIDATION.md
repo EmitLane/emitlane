@@ -126,3 +126,18 @@ This qualifies the selected v0.9.1 source rebuilt with the patched compiler,
 not the byte-identical published binary, every historical version, schema
 migration rollback, or a real application rollout. There is no schema change
 in this candidate. Do not treat this fixture as the independent pilot.
+
+### Multi-relay fixture evidence
+
+The standalone soak harness requests and verifies PostgreSQL `fsync`,
+`synchronous_commit`, and `full_page_writes` as `on`, a minimum 512 MiB shared
+memory segment, and a loopback PostgreSQL endpoint. It records actual fixture
+settings, independent Kafka audit results and the complete integrity report.
+The broker pause and stop/restart are distinct faults. Release-profile verdicts
+require successful completion of all six fault categories, including graceful
+relay restart, SIGKILL takeover, cluster pause and membership change. Fault
+records retain ownership snapshots; relay process logs retain signal outcomes.
+The independent Kafka scan checks payload, key, ordering headers and partition
+stability for every record, including duplicates. These checks strengthen the
+test harness only; adding them does not certify a release until the profile has
+actually run and its evidence has been reviewed.

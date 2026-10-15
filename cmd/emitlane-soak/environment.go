@@ -31,13 +31,26 @@ type soakEnvironment struct {
 	databaseURL     string
 	brokers         []string
 	postgresVersion string
+	fixture         map[string]any
 }
 
 func startEnvironment(ctx context.Context, runID string) (*soakEnvironment, error) {
 	labels := map[string]string{"com.emitlane.soak.run_id": runID, "com.emitlane.soak.owned": "true"}
+	postgresPort, err := reservePort()
+	if err != nil {
+		return nil, err
+	}
 	pgContainer, err := tcpostgres.Run(ctx, postgresImage,
 		tcpostgres.WithDatabase("emitlane"), tcpostgres.WithUsername("emitlane"), tcpostgres.WithPassword("emitlane"),
 		tcpostgres.BasicWaitStrategies(), testcontainers.WithLabels(labels),
+		testcontainers.WithCmd("postgres", "-c", "fsync=on", "-c", "synchronous_commit=on", "-c", "full_page_writes=on"),
+		testcontainers.WithHostConfigModifier(func(c *container.HostConfig) {
+			c.ShmSize = 512 * 1024 * 1024
+			if c.PortBindings == nil {
+				c.PortBindings = containernetwork.PortMap{}
+			}
+			c.PortBindings[containernetwork.MustParsePort("5432/tcp")] = []containernetwork.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: strconv.Itoa(postgresPort)}}
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("start PostgreSQL: %w", err)
@@ -100,6 +113,10 @@ func startEnvironment(ctx context.Context, runID string) (*soakEnvironment, erro
 		return fail(err)
 	}
 	env := &soakEnvironment{postgres: pgContainer, kafka: kafkaContainer, pool: pool, store: store, databaseURL: conn, brokers: []string{net.JoinHostPort("127.0.0.1", portText)}, postgresVersion: pgVersion}
+	if err := env.verifyFixture(ctx); err != nil {
+		env.close(context.Background())
+		return nil, err
+	}
 	if err := env.createTopics(ctx, "emitlane-soak-ordered-"+runID, "emitlane-soak-unordered-"+runID); err != nil {
 		env.close(context.Background())
 		return nil, err
@@ -196,6 +213,13 @@ func (e *soakEnvironment) setKafkaPaused(ctx context.Context, paused bool) error
 	if paused {
 		if _, err := client.ContainerPause(ctx, e.kafka.GetContainerID(), mobyclient.ContainerPauseOptions{}); err != nil {
 			return fmt.Errorf("pause Kafka container: %w", err)
+		}
+		state, err := e.kafka.State(ctx)
+		if err != nil {
+			return err
+		}
+		if !state.Paused {
+			return fmt.Errorf("Kafka did not pause")
 		}
 		return nil
 	}
