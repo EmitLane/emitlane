@@ -70,3 +70,31 @@ version matrices, PostgreSQL HA/PITR or an independent application pilot.
 A profile is unqualified until its exact candidate run has terminal success and
 reviewed evidence. Authored tests and successful compilation are not PASS results.
 See [v1 acceptance](V1_RELEASE_CHECKLIST.md).
+
+## Standalone Relay upgrade and rollback
+
+Build both the v0.9.1 commit and the candidate with the patched release
+compiler. Embed the full source commit through `main.commit` in each CLI.
+Then run the opt-in test with absolute binary paths and a new output directory:
+
+```sh
+EMITLANE_PREVIOUS_RELAY_BINARY=/absolute/emitlane-v0.9.1 \
+EMITLANE_CURRENT_RELAY_BINARY=/absolute/emitlane-candidate \
+EMITLANE_ROLLING_OUTPUT=/absolute/new-results/rolling \
+go test -p=1 -tags=integration \
+  -run '^TestRelayRollingUpgradeAndRollbackFromV091$' \
+  -count=1 -v -timeout=10m ./internal/integration
+```
+
+The test starts real standalone CLI processes against the disposable durable
+PostgreSQL/Kafka fixture. It requires live presence and simultaneous valid
+ordered-partition ownership by both versions, then processes mixed ordered and
+unordered events through old-only, mixed-version, candidate-only and rollback
+to old-only phases. Each phase drains both protected effects and Kafka offsets.
+The final independent Kafka and database identity audits and full integrity
+report remain mandatory. Child logs and structured evidence are preserved.
+
+This qualifies the selected v0.9.1 source rebuilt with the patched compiler,
+not the byte-identical published binary, every historical version, schema
+migration rollback, or a real application rollout. There is no schema change
+in this candidate. Do not treat this fixture as the independent pilot.

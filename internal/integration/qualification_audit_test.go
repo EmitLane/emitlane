@@ -241,18 +241,9 @@ func auditQualificationDatabase(t *testing.T, ctx context.Context, e *env, topic
 	var mismatch, total int64
 	// FULL JOIN detects substitutions/extra rows as well as missing rows. The
 	// business transaction is authoritative even after delivered retention.
-	if err := e.pool.QueryRow(ctx, `
-SELECT COUNT(*) FILTER(WHERE x.event_id IS NULL OR b.id IS NULL OR b.amount IS DISTINCT FROM x.sequence
- OR i.status IS DISTINCT FROM 'processed' OR p.amount IS DISTINCT FROM x.sequence OR a.event_id IS NULL
- OR (o.id IS NULL AND r.event_id IS NULL) OR (o.id IS NOT NULL AND o.status <> 'delivered')),
- COUNT(x.event_id)
-FROM public.soak_expected x
-FULL JOIN public.business_orders b ON b.id='soak-'||x.event_id::text
-FULL JOIN emitlane.inbox_events i ON i.consumer=$2 AND i.event_id=x.event_id
-FULL JOIN public.business_payments p ON p.order_id=x.event_id::text
-FULL JOIN public.soak_observed a ON a.event_id=x.event_id
-FULL JOIN (SELECT id,status FROM emitlane.outbox_events WHERE destination=$1) o ON o.id=x.event_id
-FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mismatch, &total); err != nil {
+	var err error
+	mismatch, total, err = qualificationDatabaseIdentityAudit(ctx, e, topic, name)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if total == 0 || mismatch != 0 {
@@ -269,6 +260,24 @@ FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mis
 		t.Fatalf("%d business streams did not reach their committed sequence", streamMismatch)
 	}
 	return total
+}
+
+// Shared identity audit; operator repair coverage remains separately mandatory
+// for the repeated qualification profile, while rolling profiles have no poisons.
+func qualificationDatabaseIdentityAudit(ctx context.Context, e *env, topic, name string) (mismatch, total int64, err error) {
+	err = e.pool.QueryRow(ctx, `
+SELECT COUNT(*) FILTER(WHERE x.event_id IS NULL OR b.id IS NULL OR b.amount IS DISTINCT FROM x.sequence
+ OR i.status IS DISTINCT FROM 'processed' OR p.amount IS DISTINCT FROM x.sequence OR a.event_id IS NULL
+ OR (o.id IS NULL AND r.event_id IS NULL) OR (o.id IS NOT NULL AND o.status <> 'delivered')),
+ COUNT(x.event_id)
+FROM public.soak_expected x
+FULL JOIN public.business_orders b ON b.id='soak-'||x.event_id::text
+FULL JOIN emitlane.inbox_events i ON i.consumer=$2 AND i.event_id=x.event_id
+FULL JOIN public.business_payments p ON p.order_id=x.event_id::text
+FULL JOIN public.soak_observed a ON a.event_id=x.event_id
+FULL JOIN (SELECT id,status FROM emitlane.outbox_events WHERE destination=$1) o ON o.id=x.event_id
+FULL JOIN public.soak_pruned r ON r.event_id=x.event_id`, topic, name).Scan(&mismatch, &total)
+	return mismatch, total, err
 }
 
 func checkQualificationRetryAudit(ctx context.Context, e *env, name string, retries int64) error {
