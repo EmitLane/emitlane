@@ -117,7 +117,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		}
 	})
 	topic, group, name := "qualification-"+uuid.NewString(), "qualification-group-"+uuid.NewString(), "qualification-v1"
-	e.ensureTopicPartitions(t, topic, c.partitions)
+	e.ensureTopicPartitions(t, topic, int32(c.partitions))
 	diagnostics.start(topic, group)
 	consumerConfig := qualificationConsumerConfig(name, "qualification-main")
 	consumerConfig.Concurrency = capacity.Consumers

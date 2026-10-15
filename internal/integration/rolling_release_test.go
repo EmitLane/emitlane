@@ -173,7 +173,7 @@ CREATE TABLE public.soak_observed(event_id UUID PRIMARY KEY,records BIGINT NOT N
 	drain("old-only-after-rollback")
 	old.stop(t)
 	consumer.stop(t)
-	records, duplicates := auditQualificationKafka(t, ctx, e, topic, 20261015)
+	records, duplicates := auditQualificationKafka(t, ctx, e, topic, 20261015, 8)
 	mismatch, total, err := qualificationDatabaseIdentityAudit(ctx, e, topic, name)
 	if err != nil || mismatch != 0 || total != seq {
 		t.Fatalf("rolling identity/effect audit=%d/%d/%d: %v", mismatch, total, seq, err)

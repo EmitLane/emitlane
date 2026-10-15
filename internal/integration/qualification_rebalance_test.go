@@ -48,7 +48,7 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 	for _, partitions := range []int{8, 16} {
 		t.Run(fmt.Sprintf("partitions%d", partitions), func(t *testing.T) {
 			topic, group, name := "rebalance-capacity-"+uuid.NewString(), "rebalance-capacity-group-"+uuid.NewString(), "rebalance-capacity-"+uuid.NewString()
-			e.ensureTopicPartitions(t, topic, partitions)
+			e.ensureTopicPartitions(t, topic, int32(partitions))
 			store := newManagedInboxStore(t, e)
 			handler := func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
 				_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id,amount) VALUES ($1,1)`, message.EventID.String())
