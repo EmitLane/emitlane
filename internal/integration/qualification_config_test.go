@@ -13,6 +13,7 @@ import (
 type qualificationConfig struct {
 	duration, interval, recovery, audit time.Duration
 	rate                                int
+	partitions                          int
 	seed                                int64
 	output                              string
 }
@@ -25,6 +26,7 @@ func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
 	t.Setenv("EMITLANE_QUALIFICATION_SEED", "")
 	t.Setenv("EMITLANE_QUALIFICATION_RECOVERY", "")
 	t.Setenv("EMITLANE_QUALIFICATION_AUDIT", "")
+	t.Setenv("EMITLANE_QUALIFICATION_PARTITIONS", "")
 	if c, err := readQualificationConfig(); err != nil || c.interval != time.Minute || c.rate != 10 {
 		t.Fatalf("defaults: %+v %v", c, err)
 	}
@@ -34,6 +36,8 @@ func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
 		{"EMITLANE_QUALIFICATION_RECOVERY", "0"}, {"EMITLANE_QUALIFICATION_RECOVERY", "5h"},
 		{"EMITLANE_QUALIFICATION_AUDIT", "2h"}, {"EMITLANE_QUALIFICATION_AUDIT", "garbage"},
 		{"EMITLANE_QUALIFICATION_RATE", "100"}, {"EMITLANE_QUALIFICATION_SEED", "invalid"},
+		{"EMITLANE_QUALIFICATION_PARTITIONS", "7"}, {"EMITLANE_QUALIFICATION_PARTITIONS", "17"},
+		{"EMITLANE_QUALIFICATION_PARTITIONS", "invalid"},
 	} {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
 			t.Setenv(tc.key, tc.value)
@@ -45,7 +49,7 @@ func TestQualificationConfigRejectsUnsafeOrIncompleteRuns(t *testing.T) {
 }
 
 func readQualificationConfig() (qualificationConfig, error) {
-	c := qualificationConfig{recovery: 2 * time.Minute, audit: 10 * time.Minute, rate: 10, seed: 20261005, output: os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")}
+	c := qualificationConfig{recovery: 2 * time.Minute, audit: 10 * time.Minute, rate: 10, partitions: 8, seed: 20261005, output: os.Getenv("EMITLANE_QUALIFICATION_OUTPUT")}
 	var err error
 	c.duration, err = time.ParseDuration(os.Getenv("EMITLANE_QUALIFICATION_DURATION"))
 	if err != nil || c.duration < 2*time.Minute || c.duration > 72*time.Hour {
@@ -68,6 +72,12 @@ func readQualificationConfig() (qualificationConfig, error) {
 		c.seed, err = strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			return c, fmt.Errorf("qualification seed: %w", err)
+		}
+	}
+	if raw := os.Getenv("EMITLANE_QUALIFICATION_PARTITIONS"); raw != "" {
+		c.partitions, err = strconv.Atoi(raw)
+		if err != nil || c.partitions < 8 || c.partitions > qualificationMaxPartitions {
+			return c, fmt.Errorf("qualification partitions must be between 8 and %d", qualificationMaxPartitions)
 		}
 	}
 	for _, option := range []struct {

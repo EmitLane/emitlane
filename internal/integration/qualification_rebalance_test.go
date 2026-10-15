@@ -6,17 +6,158 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // This is a qualification assertion budget, not a production consumer setting.
 // A broker restart can require coordinator discovery and another group join.
 const qualificationRebalanceAssignmentTimeout = time.Minute
+
+func validateQualificationRebalanceCapacity(partitions, workers int) error {
+	// With more members than partitions, sticky balancing may legitimately keep
+	// every partition on the incumbents. A joined peer can then remain idle.
+	// This particular fault requires real work on the peer, so provision enough
+	// partitions for both full worker pools rather than relaxing the assertion.
+	if partitions < 2*workers {
+		return fmt.Errorf("qualification positive-assignment fault needs at least %d partitions for %d incumbent and %d peer workers; configured %d", 2*workers, workers, workers, partitions)
+	}
+	return nil
+}
+
+func TestQualificationRebalanceCapacityRejectsIdlePeerAssumption(t *testing.T) {
+	if err := validateQualificationRebalanceCapacity(8, 8); err == nil {
+		t.Fatal("oversubscribed group accepted as a guaranteed positive peer-assignment test")
+	}
+	for _, pair := range [][2]int{{8, 4}, {16, 4}, {16, 8}} {
+		if err := validateQualificationRebalanceCapacity(pair[0], pair[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
+	e := startEnv(t)
+	for _, partitions := range []int{8, 16} {
+		t.Run(fmt.Sprintf("partitions%d", partitions), func(t *testing.T) {
+			topic, group, name := "rebalance-capacity-"+uuid.NewString(), "rebalance-capacity-group-"+uuid.NewString(), "rebalance-capacity-"+uuid.NewString()
+			e.ensureTopicPartitions(t, topic, partitions)
+			store := newManagedInboxStore(t, e)
+			handler := func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
+				_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id,amount) VALUES ($1,1)`, message.EventID.String())
+				return err
+			}
+			config := qualificationConsumerConfig(name, "qualification-capacity-main")
+			config.Concurrency = 8
+			mainFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
+			main := launchManaged(t, e, config, store, mainFactory, handler)
+			defer main.stop(t)
+			client, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			admin := kadm.NewClient(client)
+			waitGroup := func(memberCount int) kadm.DescribedGroup {
+				ctx, cancel := context.WithTimeout(context.Background(), qualificationRebalanceAssignmentTimeout)
+				defer cancel()
+				for ctx.Err() == nil {
+					groups, err := admin.DescribeGroups(ctx, group)
+					g := groups[group]
+					if err == nil && g.Err == nil && g.State == "Stable" && len(g.Members) == memberCount {
+						seen := make(map[int32]bool)
+						for _, m := range g.Members {
+							assignment, ok := m.Assigned.AsConsumer()
+							if !ok {
+								t.Fatal("non-consumer assignment")
+							}
+							for _, topicAssignment := range assignment.Topics {
+								if topicAssignment.Topic != topic {
+									t.Fatal("unexpected assigned topic")
+								}
+								for _, partition := range topicAssignment.Partitions {
+									if seen[partition] || partition < 0 || partition >= int32(partitions) {
+										t.Fatal("duplicate or invalid partition ownership")
+									}
+									seen[partition] = true
+								}
+							}
+						}
+						if len(seen) == partitions {
+							return g
+						}
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+				t.Fatalf("group did not stabilize with %d members and complete partition ownership within %s", memberCount, qualificationRebalanceAssignmentTimeout)
+				return kadm.DescribedGroup{}
+			}
+			waitGroup(8)
+			config.InstanceID = "qualification-capacity-peer"
+			peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
+			peer := launchManaged(t, e, config, store, peerFactory, handler)
+			defer peer.stop(t)
+			joined := waitGroup(16)
+			idle := 0
+			for _, m := range joined.Members {
+				assignment, _ := m.Assigned.AsConsumer()
+				count := 0
+				for _, topicAssignment := range assignment.Topics {
+					count += len(topicAssignment.Partitions)
+				}
+				if count == 0 {
+					idle++
+				}
+			}
+			if partitions == 8 && idle != 8 || partitions == 16 && idle != 0 {
+				t.Fatalf("partitions=%d idle members=%d", partitions, idle)
+			}
+			if partitions == 16 {
+				ctx, cancel := context.WithTimeout(context.Background(), qualificationRebalanceAssignmentTimeout)
+				err = waitQualificationAssignment(ctx, peerFactory)
+				cancel()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ids := make([]string, 0, 2*partitions)
+			produceAndWait := func() {
+				for partition := range partitions {
+					id := uuid.New()
+					ids = append(ids, id.String())
+					produceManagedRecordAtPartition(t, e, topic, int32(partition), id, []byte("capacity-handoff"))
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), qualificationRebalanceAssignmentTimeout)
+				defer cancel()
+				for ctx.Err() == nil {
+					var effects, processed int
+					err := e.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM public.business_payments WHERE order_id=ANY($1::text[])),(SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$2 AND event_id::text=ANY($1::text[]) AND status='processed')`, ids, name).Scan(&effects, &processed)
+					if err == nil && effects == len(ids) && processed == len(ids) {
+						return
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+				t.Fatal("oversubscribed group or successor did not process every protected effect")
+			}
+			produceAndWait()
+			main.stop(t)
+			waitGroup(8)
+			produceAndWait()
+			for partition := range partitions {
+				waitCommittedOffset(t, e, group, topic, int32(partition), 2, qualificationRebalanceAssignmentTimeout)
+			}
+			peer.stop(t)
+			t.Logf("QUALIFICATION_CAPACITY_HANDOFF partitions=%d members_at_join=16 idle=%d protected_effects=%d final_lag=0", partitions, idle, len(ids))
+		})
+	}
+}
 
 func waitQualificationAssignment(ctx context.Context, factory *qualificationCommitFactory) error {
 	ticker := time.NewTicker(50 * time.Millisecond)

@@ -36,6 +36,7 @@ import (
 
 const qualificationKafkaLogDirectory = "/tmp/qualification-kafka-logs"
 const qualificationPostgresShmBytes = 512 * 1024 * 1024
+const qualificationMaxPartitions = 16
 
 func qualificationKafkaOptions() testcontainers.CustomizeRequestOption {
 	return func(req *testcontainers.GenericContainerRequest) error {
@@ -450,7 +451,7 @@ type qualificationDiagnosticSource struct {
 }
 
 func qualificationPartitionKey(partition int32, operation string) string {
-	if partition < 0 || partition >= 8 {
+	if partition < 0 || partition >= qualificationMaxPartitions {
 		return "consumer.partition.other." + operation
 	}
 	return fmt.Sprintf("consumer.partition.%d.%s", partition, operation)
@@ -484,9 +485,9 @@ func (s *qualificationDiagnosticSource) AllowRebalance() {
 }
 
 func (s *qualificationDiagnosticSource) Pause(partition managed.TopicPartition) {
-	// Qualification has exactly eight partitions; do not retain arbitrary keys.
+	// Retain only the bounded qualification partition range, never arbitrary keys.
 	s.pauseMu.Lock()
-	if partition.Partition >= 0 && partition.Partition < 8 {
+	if partition.Partition >= 0 && partition.Partition < qualificationMaxPartitions {
 		if s.paused == nil {
 			s.paused = make(map[int32]time.Time)
 		}

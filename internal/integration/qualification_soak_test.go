@@ -73,8 +73,11 @@ func TestManagedConsumerQualificationSoak(t *testing.T) {
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "branch": branch,
 		"duration": c.duration.String(), "interval": c.interval.String(), "rate": c.rate, "seed": c.seed,
 		"go": runtime.Version(), "platform": runtime.GOOS + "/" + runtime.GOARCH, "recovery": c.recovery.String(), "audit": c.audit.String(),
-		"capacity": capacity, "diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(),
+		"capacity": capacity, "topic_partitions": c.partitions, "diagnostic_interval": "30s", "operator_repair_interval": qualificationOperatorRepairInterval.String(),
 		"rebalance_assignment_timeout": qualificationRebalanceAssignmentTimeout.String(), "durability": "fsync=on synchronous_commit=on full_page_writes=on"})
+	if err := validateQualificationRebalanceCapacity(c.partitions, capacity.Consumers); err != nil {
+		t.Fatal(err)
+	}
 	// Absence of PASS (including interruption) is never passing evidence.
 	passed := false
 	defer func() {
@@ -114,7 +117,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		}
 	})
 	topic, group, name := "qualification-"+uuid.NewString(), "qualification-group-"+uuid.NewString(), "qualification-v1"
-	e.ensureTopicPartitions(t, topic, 8)
+	e.ensureTopicPartitions(t, topic, c.partitions)
 	diagnostics.start(topic, group)
 	consumerConfig := qualificationConsumerConfig(name, "qualification-main")
 	consumerConfig.Concurrency = capacity.Consumers
@@ -343,7 +346,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 	// per-action records omit retries made inside the retention fault itself.
 	write(map[string]any{"kind": "audit_begin", "time": time.Now().UTC(), "retried_dead": retriedDead,
 		"pruned": pruned, "offset_failures": factory.injected.Load()})
-	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed)
+	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed, c.partitions)
 	total := auditQualificationDatabase(t, auditCtx, e, topic, name, retriedDead)
 	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
 	if err != nil {
@@ -629,6 +632,7 @@ type qualificationCommitFactory struct {
 	armed       atomic.Bool
 	injected    atomic.Int64
 	assignments atomic.Int64
+	joins       atomic.Int64
 }
 
 func (f *qualificationCommitFactory) NewSource(id string, listener managed.RebalanceListener) (managed.Source, error) {
@@ -645,6 +649,7 @@ type qualificationAssignmentListener struct {
 }
 
 func (l *qualificationAssignmentListener) Assigned(partitions map[string][]int32) {
+	l.factory.joins.Add(1)
 	for _, p := range partitions {
 		l.factory.assignments.Add(int64(len(p)))
 	}

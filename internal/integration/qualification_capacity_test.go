@@ -116,7 +116,7 @@ func TestQualificationPartitionTimingDelegatesUnresolvedAndBoundsPauses(t *testi
 	for n := int32(0); n < 1000; n++ {
 		s.Pause(managed.TopicPartition{Partition: n})
 	}
-	if len(s.paused) != 8 {
+	if len(s.paused) != qualificationMaxPartitions {
 		t.Fatalf("unbounded pauses: %d", len(s.paused))
 	}
 	s.censorPauses(map[string][]int32{"fixture": {7}})

@@ -71,6 +71,34 @@ A profile is unqualified until its exact candidate run has terminal success and
 reviewed evidence. Authored tests and successful compilation are not PASS results.
 See [v1 acceptance](V1_RELEASE_CHECKLIST.md).
 
+## Managed qualification group capacity
+
+The repeated managed-consumer qualification adds a second full worker pool
+during each rebalance fault. Its assertion requires an actual nonempty peer
+assignment within one minute. Provision at least twice as many topic partitions
+as workers in one pool. With eight partitions and eight incumbent plus eight
+peer members, cooperative sticky assignment can legally leave every new member
+idle while the incumbents retain all eight partitions. A successful group join
+does not guarantee new work for a particular member.
+
+`EMITLANE_QUALIFICATION_PARTITIONS` selects8–16 partitions (default8). The
+positive-assignment profile rejects insufficient capacity before creating its
+fixture. Set it to16 for **both** four-worker and eight-worker capacity trials
+to compare the same topic topology. The selected partition count is preserved
+in the start record and independently checked by the full Kafka audit. Do not
+compare a sixteen-partition result directly with an earlier eight-partition
+trial as if only worker concurrency had changed.
+
+`TestQualificationRebalanceCapacityAndOversubscribedHandoff` separately checks
+eight plus eight real group members with eight and sixteen partitions. It
+requires complete unique broker assignments, verifies the expected idle-member
+count, processes protected effects before and after all incumbent members leave,
+and requires final committed offsets. The eight-partition case accepts legitimate
+idle members; it does not certify the repeated soak's positive-peer assertion.
+The sixteen-partition case still requires an actual nonempty peer assignment.
+Neither profile increases the one-minute assertion budget. Preserve failures
+from the previous fixture as failures, including incomplete terminal audits.
+
 ## Standalone Relay upgrade and rollback
 
 Build both the v0.9.1 commit and the candidate with the patched release

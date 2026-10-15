@@ -98,7 +98,7 @@ func qualificationKafkaSnapshot(ctx context.Context, brokers []string, topic, gr
 // Stream Kafka in bounded batches. Expected/seen IDs live in PostgreSQL, not
 // an ever-growing Go map or slice. Audit all snapshot offsets, including any
 // unexpected trailing records, rather than stopping at matching counts.
-func auditQualificationKafka(t *testing.T, ctx context.Context, e *env, topic string, seed int64) (int64, int64) {
+func auditQualificationKafka(t *testing.T, ctx context.Context, e *env, topic string, seed int64, expectedPartitions int) (int64, int64) {
 	t.Helper()
 	meta, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
 	if err != nil {
@@ -118,8 +118,8 @@ func auditQualificationKafka(t *testing.T, ctx context.Context, e *env, topic st
 		starts[partition] = kgo.NewOffset().AtStart()
 		targets[partition] = end.Offset
 	}
-	if len(targets) != 8 {
-		t.Fatalf("audit expected eight partitions, got %d", len(targets))
+	if len(targets) != expectedPartitions {
+		t.Fatalf("audit expected %d partitions, got %d", expectedPartitions, len(targets))
 	}
 	client, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...), kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: starts}), kgo.FetchMaxBytes(1<<20), kgo.FetchMaxWait(100*time.Millisecond))
 	if err != nil {
