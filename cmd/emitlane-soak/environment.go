@@ -219,7 +219,7 @@ func (e *soakEnvironment) setKafkaPaused(ctx context.Context, paused bool) error
 			return err
 		}
 		if !state.Paused {
-			return fmt.Errorf("Kafka did not pause")
+			return fmt.Errorf("kafka did not pause")
 		}
 		return nil
 	}

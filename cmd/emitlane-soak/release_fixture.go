@@ -51,7 +51,7 @@ func (e *soakEnvironment) kafkaRestart(ctx context.Context, duration time.Durati
 		return err
 	}
 	if state.Running {
-		return fmt.Errorf("Kafka still running after stop")
+		return fmt.Errorf("kafka still running after stop")
 	}
 	log.Printf("kafka stopped container=%s running=%t", e.kafka.GetContainerID(), state.Running)
 	if !waitContext(ctx, duration) {
@@ -68,7 +68,7 @@ func (e *soakEnvironment) kafkaRestart(ctx context.Context, duration time.Durati
 		return err
 	}
 	if !state.Running || state.Paused {
-		return fmt.Errorf("Kafka restart state not ready")
+		return fmt.Errorf("kafka restart state not ready")
 	}
 	log.Printf("kafka restarted container=%s running=%t", e.kafka.GetContainerID(), state.Running)
 	return nil
