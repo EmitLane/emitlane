@@ -57,6 +57,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: false
 
       - name: Check Go formatting
@@ -88,6 +89,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -118,6 +120,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -155,6 +158,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -185,6 +189,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -215,6 +220,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -256,6 +262,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module
@@ -288,6 +295,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect Go module

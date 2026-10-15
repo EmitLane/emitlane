@@ -42,6 +42,16 @@ exactly-once guarantee is made.
 Focused, opt-in [validation profiles](V1_VALIDATION.md) cover retained Inbox
 access paths and replicated Kafka faults. Their existence is not a passing result.
 
+## Security toolchain update
+
+The subsequent candidate check on2026-10-15 stopped at vulnerability scanning:
+Go1.27.0 had nine reachable standard-library vulnerabilities, with fixes reported
+in Go1.27.2. Passing correctness/race tests do not override that failure. The
+candidate now requires Go1.27.2, pins Docker build images to that patch and adds
+a reachable-vulnerability scan before release publication. A fresh passing scan
+and rebuilt artifacts are still required; the old24-hour result is correctness
+evidence, not current security qualification.
+
 ## Acceptance items
 
 Every item needs a result, exact candidate identity, configuration, evidence
