@@ -193,6 +193,14 @@ Evidence includes:
 - explicit durable-write settings and timestamped partial-sample errors during
   injected outages. Statistics can reset across PostgreSQL restarts.
 
+`runtime.jsonl` also records producer transaction windows at approximately30seconds
+with actual attempts, successful commit returns, errors and enqueue time. The
+scheduled-slot estimate is not an admitted count: a synchronous enqueue can block
+and the ticker can drop ticks. A commit error can be ambiguous, so final committed
+identity audits remain authoritative. For a healthy-rate estimate exclude every
+producer window that overlaps an injected fault, initialization or recovery;
+classifying only its final timestamp would mix outage time into healthy throughput.
+
 `runtime.jsonl` retains runtime logs. CPU profiles cover fifteen seconds at
 startup and roughly once per hour; terminal heap, goroutine, block and mutex
 profiles use standard Go pprof. No debug listener or public port is opened.

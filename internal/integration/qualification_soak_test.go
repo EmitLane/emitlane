@@ -441,6 +441,26 @@ func qualificationHandler(ctx context.Context, tx pgx.Tx, message managed.Messag
 func produceQualification(ctx context.Context, e *env, topic string, c qualificationConfig, failures *atomic.Int64) error {
 	ticker := time.NewTicker(time.Second / time.Duration(c.rate))
 	defer ticker.Stop()
+	// Count the real producer transaction outcomes in bounded time windows.
+	// The ticker can drop ticks while a synchronous enqueue blocks; configured
+	// rate alone must never be reported as admitted throughput. A successful
+	// return is distinct from a final identity audit after an ambiguous commit.
+	windowStart := time.Now()
+	var attempted, successful, failed int64
+	var enqueueTime, maxEnqueue time.Duration
+	report := func(force bool) {
+		now := time.Now()
+		if !force && now.Sub(windowStart) < 30*time.Second {
+			return
+		}
+		e.log.Info("qualification producer interval", "started_at", windowStart.UTC(), "ended_at", now.UTC(),
+			"seconds", now.Sub(windowStart).Seconds(), "target_rate", c.rate,
+			"scheduled_slots_estimate", now.Sub(windowStart).Seconds()*float64(c.rate),
+			"attempted", attempted, "commit_returns_success", successful, "errors", failed,
+			"enqueue_seconds", enqueueTime.Seconds(), "enqueue_max_seconds", maxEnqueue.Seconds())
+		windowStart, attempted, successful, failed, enqueueTime, maxEnqueue = now, 0, 0, 0, 0, 0
+	}
+	defer report(true)
 	for seq := int64(1); ; seq++ {
 		select {
 		case <-ctx.Done():
@@ -453,7 +473,18 @@ func produceQualification(ctx context.Context, e *env, topic string, c qualifica
 		if seq%2 == 0 {
 			p.Stream = fmt.Sprintf("stream-%d", (seq/2)%8)
 		}
+		started := time.Now()
 		err := enqueueQualification(ctx, e, topic, uuid.NewString(), p)
+		elapsed := time.Since(started)
+		attempted++
+		enqueueTime += elapsed
+		maxEnqueue = max(maxEnqueue, elapsed)
+		if err == nil {
+			successful++
+		} else {
+			failed++
+		}
+		report(false)
 		if errors.Is(err, outbox.ErrInvalidEvent) || errors.Is(err, outbox.ErrDuplicateSequence) || errors.Is(err, outbox.ErrOrderingConflict) || errors.Is(err, outbox.ErrSequenceAlreadyPassed) {
 			return fmt.Errorf("qualification producer: %w", err)
 		}
