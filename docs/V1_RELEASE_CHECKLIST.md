@@ -75,7 +75,8 @@ extend or restart a failed endurance run and overwrite its result.
 - [ ] Complete an independent application pilot, following [Pilot](V1_PILOT.md).
   A repetition of the synthetic qualification cannot stand in for this evidence.
 - [ ] Approve the v1 source/configuration/wire/migration compatibility boundaries,
-  supported environments and security-fix/support policy. Remove conflicting
+  supported environments and security-fix/support policy, using the prepared
+  [v1 contract](V1_CONTRACT.md). Remove conflicting
   pre-1.0 claims only when those decisions have actually been made.
 - [ ] Intentionally prepare the v1 version/changelog and release automation settings.
   The pre-major Release Please configuration does not itself request v1.0.0.
