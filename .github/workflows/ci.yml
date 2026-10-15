@@ -136,7 +136,7 @@ jobs:
       - name: Run Staticcheck
         if: steps.go_project.outputs.exists == 'true'
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           "$(go env GOPATH)/bin/staticcheck" ./...
 
   unit:
