@@ -3,10 +3,13 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +52,13 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 		t.Run(fmt.Sprintf("partitions%d", partitions), func(t *testing.T) {
 			topic, group, name := "rebalance-capacity-"+uuid.NewString(), "rebalance-capacity-group-"+uuid.NewString(), "rebalance-capacity-"+uuid.NewString()
 			e.ensureTopicPartitions(t, topic, int32(partitions))
+			logs := &qualificationRebalanceLogs{}
+			logger := managed.WithLogger(slog.New(slog.NewTextHandler(logs, nil)))
+			defer func() {
+				if t.Failed() {
+					t.Logf("bounded consumer diagnostics:\n%s", logs.snapshot())
+				}
+			}()
 			store := newManagedInboxStore(t, e)
 			handler := func(ctx context.Context, tx pgx.Tx, message managed.Message) error {
 				_, err := tx.Exec(ctx, `INSERT INTO public.business_payments (order_id,amount) VALUES ($1,1)`, message.EventID.String())
@@ -57,7 +67,7 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 			config := qualificationConsumerConfig(name, "qualification-capacity-main")
 			config.Concurrency = 8
 			mainFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
-			main := launchManaged(t, e, config, store, mainFactory, handler)
+			main := launchManaged(t, e, config, store, mainFactory, handler, logger)
 			defer main.stop(t)
 			client, err := kgo.NewClient(kgo.SeedBrokers(e.brokers...))
 			if err != nil {
@@ -102,7 +112,7 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 			waitGroup(8)
 			config.InstanceID = "qualification-capacity-peer"
 			peerFactory := &qualificationCommitFactory{inner: newManagedFactory(t, e, topic, group)}
-			peer := launchManaged(t, e, config, store, peerFactory, handler)
+			peer := launchManaged(t, e, config, store, peerFactory, handler, logger)
 			defer peer.stop(t)
 			joined := waitGroup(16)
 			idle := 0
@@ -128,7 +138,7 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 				}
 			}
 			ids := make([]string, 0, 2*partitions)
-			produceAndWait := func() {
+			produceAndWait := func(phase string) {
 				for partition := range partitions {
 					id := uuid.New()
 					ids = append(ids, id.String())
@@ -139,17 +149,26 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 				for ctx.Err() == nil {
 					var effects, processed int
 					err := e.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM public.business_payments WHERE order_id=ANY($1::text[])),(SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$2 AND event_id::text=ANY($1::text[]) AND status='processed')`, ids, name).Scan(&effects, &processed)
-					if err == nil && effects == len(ids) && processed == len(ids) {
+					if err != nil {
+						t.Fatalf("%s progress query: %v", phase, err)
+					}
+					if effects == len(ids) && processed == len(ids) {
 						return
 					}
 					time.Sleep(50 * time.Millisecond)
 				}
-				t.Fatal("oversubscribed group or successor did not process every protected effect")
+				diagCtx, stopDiag := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopDiag()
+				var state []byte
+				err := e.pool.QueryRow(diagCtx, `SELECT COALESCE(json_agg(json_build_object('event_id',event_id,'status',status,'attempts',attempts,'last_error',last_error,'lease_owner',lease_owner,'lease_until',lease_until)),'[]') FROM emitlane.inbox_events WHERE consumer=$1`, name).Scan(&state)
+				t.Logf("%s Inbox states=%s query_error=%v", phase, state, err)
+				kafka, kafkaErr := qualificationKafkaSnapshot(diagCtx, e.brokers, topic, group)
+				t.Fatalf("%s did not process every protected effect: Kafka=%v error=%v", phase, kafka, kafkaErr)
 			}
-			produceAndWait()
+			produceAndWait("both pools active")
 			main.stop(t)
 			waitGroup(8)
-			produceAndWait()
+			produceAndWait("peer after incumbent shutdown")
 			for partition := range partitions {
 				waitCommittedOffset(t, e, group, topic, int32(partition), 2, qualificationRebalanceAssignmentTimeout)
 			}
@@ -157,6 +176,28 @@ func TestQualificationRebalanceCapacityAndOversubscribedHandoff(t *testing.T) {
 			t.Logf("QUALIFICATION_CAPACITY_HANDOFF partitions=%d members_at_join=16 idle=%d protected_effects=%d final_lag=0", partitions, idle, len(ids))
 		})
 	}
+}
+
+// Consumer warnings must remain available on a failed assertion even when the
+// shared fixture discards ordinary logs. Bound retained output across workers.
+type qualificationRebalanceLogs struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (l *qualificationRebalanceLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if remaining := 64*1024 - l.buffer.Len(); remaining > 0 {
+		_, _ = l.buffer.Write(p[:min(len(p), remaining)])
+	}
+	return len(p), nil
+}
+
+func (l *qualificationRebalanceLogs) snapshot() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buffer.String()
 }
 
 func waitQualificationAssignment(ctx context.Context, factory *qualificationCommitFactory) error {
