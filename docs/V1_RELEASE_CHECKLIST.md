@@ -39,6 +39,9 @@ load hour; MarkRetry rose from 4.09 to 6.62 ms. The test is **not** a sustained
 PostgreSQL effects; external effects still require idempotency. No end-to-end
 exactly-once guarantee is made.
 
+Focused, opt-in [validation profiles](V1_VALIDATION.md) cover retained Inbox
+access paths and replicated Kafka faults. Their existence is not a passing result.
+
 ## Acceptance items
 
 Every item needs a result, exact candidate identity, configuration, evidence
