@@ -7,10 +7,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
-	"os/exec"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/moby/moby/api/types/container"
 	containernetwork "github.com/moby/moby/api/types/network"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -41,10 +42,20 @@ func TestKafkaClusterLeaderISRAndNetworkRecovery(t *testing.T) {
 	if os.Getenv("EMITLANE_KAFKA_CLUSTER_QUALIFICATION") != "1" {
 		t.Skip("opt-in three-broker leader, ISR and private-network qualification")
 	}
+	commit, _, dirty, _ := soakGitProvenance(t)
+	if dirty {
+		t.Fatal("cluster evidence requires clean committed source")
+	}
+	t.Logf("cluster qualification commit=%s Kafka4.3.1 nodes=3 partitions=3 replication_factor=3", commit)
 	t.Setenv("EMITLANE_QUALIFICATION_DURATION", "3m") // durable PostgreSQL fixture
 	e := *startEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer docker.Close()
 	clusterNetwork, err := network.New(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +103,19 @@ func TestKafkaClusterLeaderISRAndNetworkRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer testcontainers.TerminateContainer(brokers[n])
+		defer func(c testcontainers.Container) {
+			if t.Failed() {
+				logCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+				defer stop()
+				logs, err := c.Logs(logCtx)
+				if err == nil {
+					data, _ := io.ReadAll(io.LimitReader(logs, 1024*1024))
+					_ = logs.Close()
+					t.Logf("failed broker%s logs: %s", c.GetContainerID(), data)
+				}
+			}
+			_ = testcontainers.TerminateContainer(c)
+		}(brokers[n])
 		e.brokers = append(e.brokers, net.JoinHostPort("127.0.0.1", port))
 	}
 	var starts errgroup.Group
@@ -289,22 +312,22 @@ func TestKafkaClusterLeaderISRAndNetworkRecovery(t *testing.T) {
 	follower = int(current.Leader) % 3
 	containerID := brokers[follower].GetContainerID()
 	// Only the freshly created test network and exact owned container are touched.
-	if data, err := exec.CommandContext(ctx, "docker", "network", "disconnect", clusterNetwork.Name, containerID).CombinedOutput(); err != nil {
-		t.Fatalf("disconnect test follower: %v: %s", err, data)
+	if _, err := docker.NetworkDisconnect(ctx, clusterNetwork.ID, dockerclient.NetworkDisconnectOptions{Container: containerID}); err != nil {
+		t.Fatalf("disconnect test follower: %v", err)
 	}
 	disconnected := true
 	defer func() {
 		if disconnected {
 			cleanupCtx, stop := context.WithTimeout(context.Background(), 20*time.Second)
 			defer stop()
-			_ = exec.CommandContext(cleanupCtx, "docker", "network", "connect", "--alias", aliases[follower], clusterNetwork.Name, containerID).Run()
+			_, _ = docker.NetworkConnect(cleanupCtx, clusterNetwork.ID, dockerclient.NetworkConnectOptions{Container: containerID, EndpointConfig: &containernetwork.EndpointSettings{Aliases: []string{aliases[follower]}}})
 		}
 	}()
 	partition(2, -1)
 	enqueue(100)
 	drain()
-	if data, err := exec.CommandContext(ctx, "docker", "network", "connect", "--alias", aliases[follower], clusterNetwork.Name, containerID).CombinedOutput(); err != nil {
-		t.Fatalf("reconnect test follower: %v: %s", err, data)
+	if _, err := docker.NetworkConnect(ctx, clusterNetwork.ID, dockerclient.NetworkConnectOptions{Container: containerID, EndpointConfig: &containernetwork.EndpointSettings{Aliases: []string{aliases[follower]}}}); err != nil {
+		t.Fatalf("reconnect test follower: %v", err)
 	}
 	disconnected = false
 	partition(3, -1)
