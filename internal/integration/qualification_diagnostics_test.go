@@ -351,37 +351,17 @@ func (d *qualificationDiagnostics) failureDump(t *testing.T) {
 	ctx, stop := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer stop()
 	proof := map[string]any{"kind": "failure_artifacts", "time": time.Now().UTC()}
+	for key, value := range captureQualificationPostgresFailure(ctx, d.e.postgres.GetContainerID(), d.output) {
+		proof[key] = value
+		if strings.HasSuffix(key, "_error") {
+			t.Errorf("failure PostgreSQL capture %s: %v", key, value)
+		}
+	}
 	var plan []byte
 	if err := d.pool.QueryRow(ctx, `EXPLAIN (FORMAT JSON) SELECT COUNT(*) FROM public.soak_expected x LEFT JOIN emitlane.inbox_events i ON i.consumer='qualification-v1' AND i.event_id=x.event_id LEFT JOIN emitlane.outbox_events o ON o.id=x.event_id WHERE i.status IS DISTINCT FROM 'processed' OR (o.id IS NOT NULL AND o.status<>'delivered')`).Scan(&plan); err != nil {
 		proof["explain_error"] = err.Error()
 	} else {
 		proof["recovery_plan"] = json.RawMessage(plan)
-	}
-	partial := filepath.Join(d.output, "failure-database.dump.partial")
-	f, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err == nil {
-		stderr, logErr := os.OpenFile(filepath.Join(d.output, "failure-dump.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if logErr != nil {
-			err = logErr
-		} else {
-			command := exec.CommandContext(ctx, "docker", "exec", d.e.postgres.GetContainerID(), "pg_dump", "-U", "emitlane", "-d", "emitlane", "-Fc")
-			command.Stdout, command.Stderr = f, stderr
-			err = command.Run()
-			_ = stderr.Close()
-		}
-		if syncErr := f.Sync(); err == nil {
-			err = syncErr
-		}
-		_ = f.Close()
-		if err == nil {
-			err = os.Rename(partial, filepath.Join(d.output, "failure-database.dump"))
-		}
-	}
-	if err != nil {
-		proof["dump_error"] = err.Error()
-		t.Errorf("failure database dump: %v", err)
-	} else {
-		proof["dump"] = "failure-database.dump"
 	}
 	// Stop only this fixture's broker before copying the KRaft metadata and all
 	// record segments. A live filesystem copy is not consistent failure evidence.

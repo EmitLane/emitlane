@@ -141,3 +141,26 @@ The independent Kafka scan checks payload, key, ordering headers and partition
 stability for every record, including duplicates. These checks strengthen the
 test harness only; adding them does not certify a release until the profile has
 actually run and its evidence has been reviewed.
+
+### PostgreSQL failure evidence
+
+Qualification retains the existing 10-second PostgreSQL stop grace, two-minute
+container-start context and 60-second SQL readiness budget. Restart traces record
+actual container state, exit status, restart count and SQL readiness timestamps.
+A failed readiness check remains a failed check.
+
+Before fixture cleanup, failure capture saves the available PostgreSQL container
+logs and inspected state independently of SQL. A failed logical dump keeps its
+`.partial` file and error. The harness then stops only its PostgreSQL fixture,
+checks that it stays stopped and copies its actual `PGDATA`. The gzip CRC and all
+tar member data are read before the raw archive is published. This is a stopped
+byte copy that may require crash recovery; it is not a successful logical dump
+or proof of restoration.
+
+`EMITLANE_QUALIFICATION_CAPTURE_CHECK=1` enables the separate short capture
+regression. It checks a complete logical dump while PostgreSQL is available,
+then captures an unavailable fixture and restores its raw archive into a new
+container with no network. Two committed marker records must survive. This
+small fixture does not qualify a failed endurance run, production restore/PITR
+or Kafka offset reconciliation. Corrupt gzip trailers, missing PostgreSQL control
+files, unsafe member paths and incomplete/running container states are rejected.
