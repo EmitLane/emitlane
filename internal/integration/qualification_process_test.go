@@ -13,9 +13,11 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/emitlane/emitlane/broker"
 	kafkaadapter "github.com/emitlane/emitlane/broker/kafka"
 	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/emitlane/emitlane/integrity"
@@ -29,6 +31,7 @@ import (
 type qualificationCrashWindow struct {
 	Mode    string    `json:"mode"`
 	EventID uuid.UUID `json:"event_id"`
+	ProbeID uuid.UUID `json:"probe_id"`
 }
 
 func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, group, name, mode string, cycle int) uuid.UUID {
@@ -110,10 +113,37 @@ func killQualificationChild(t *testing.T, e *env, c qualificationConfig, topic, 
 		t.Fatal(err)
 	}
 	var window qualificationCrashWindow
-	if err := json.Unmarshal(data, &window); err != nil || window.Mode != mode || window.EventID == uuid.Nil || (probe != uuid.Nil && window.EventID != probe) {
+	if err := json.Unmarshal(data, &window); err != nil || window.Mode != mode || window.EventID == uuid.Nil || window.ProbeID != probe || (mode == "relay_claim_crash" && window.EventID != probe) {
 		t.Fatalf("invalid crash-window proof: %+v error=%v", window, err)
 	}
+	if mode != "consumer" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var committedInflight bool
+		if err := e.pool.QueryRow(ctx, `SELECT EXISTS (
+ SELECT 1 FROM public.soak_expected x JOIN emitlane.outbox_events o ON o.id=x.event_id
+ WHERE x.event_id=$1 AND o.destination=$2 AND o.status='inflight'
+ AND o.lease_owner='qualification-crash-child' AND o.delivered_at IS NULL
+)`, window.EventID, topic).Scan(&committedInflight); err != nil || !committedInflight {
+			t.Fatalf("crash-window event is not a committed inflight ledger event: %s %t %v", window.EventID, committedInflight, err)
+		}
+	}
 	return window.EventID
+}
+
+// Only the separately enabled regression injects this failure. Successful
+// calls always go through the real Kafka publisher and its broker ACK.
+type qualificationProbeFailurePublisher struct {
+	broker.Publisher
+	probe  string
+	failed atomic.Bool
+}
+
+func (p *qualificationProbeFailurePublisher) Publish(ctx context.Context, message broker.Message) error {
+	if message.ID == p.probe && p.failed.CompareAndSwap(false, true) {
+		return errors.New("qualification injected first-probe publish failure")
+	}
+	return p.Publisher.Publish(ctx, message)
 }
 
 // Spawned using this test binary: the parent kills us only after the ready
@@ -149,8 +179,8 @@ func TestQualificationProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready := func(eventID uuid.UUID) {
-		logger.Info("crash helper reached window", "mode", mode, "event_id", eventID)
-		data, err := json.Marshal(qualificationCrashWindow{Mode: mode, EventID: eventID})
+		logger.Info("crash helper reached window", "mode", mode, "event_id", eventID, "probe_id", probe)
+		data, err := json.Marshal(qualificationCrashWindow{Mode: mode, EventID: eventID, ProbeID: probe})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,6 +237,10 @@ func TestQualificationProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pub.Close()
+	var publisher broker.Publisher = pub
+	if mode == "relay_ack_crash" && os.Getenv("EMITLANE_QUALIFICATION_FAIL_PROBE_ONCE") == "1" {
+		publisher = &qualificationProbeFailurePublisher{Publisher: pub, probe: probe.String()}
+	}
 	hooks := relay.FailureHooks{}
 	hooks.AfterClaimCommit = func(_ context.Context, event relay.Event) error {
 		logger.Info("crash helper claim committed", "mode", mode, "event_id", event.ID,
@@ -220,9 +254,10 @@ func TestQualificationProcessHelper(t *testing.T) {
 	case "relay_claim_crash":
 	case "relay_ack_crash":
 		hooks.AfterPublishAck = func(_ context.Context, event relay.Event) error {
-			if event.ID == probe {
-				ready(event.ID)
-			}
+			// A transient publish error can reschedule the initial probe behind
+			// a backlog. Kill at the actual ACK-before-DB-ack window of the next
+			// committed event instead; the parent validates its exact ledger ID.
+			ready(event.ID)
 			return nil
 		}
 	default:
@@ -230,7 +265,7 @@ func TestQualificationProcessHelper(t *testing.T) {
 	}
 	c := qualificationRelayConfig("qualification-crash-child")
 	c.Concurrency = 1
-	r, err := relay.New(c, store, pub, relay.WithLogger(logger), relay.WithFailureHooks(hooks))
+	r, err := relay.New(c, store, publisher, relay.WithLogger(logger), relay.WithFailureHooks(hooks))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +369,7 @@ func TestQualificationCrashHelperFromFailureSnapshot(t *testing.T) {
 	rows.Close()
 	probe := killQualificationChild(t, e, qualificationConfig{output: output}, topic, "qualification-replay", consumer, "relay_ack_crash", 0)
 	var pendingAck bool
-	if err := e.pool.QueryRow(ctx, `SELECT status='inflight' AND attempts=1 AND delivered_at IS NULL FROM emitlane.outbox_events WHERE id=$1`, probe).Scan(&pendingAck); err != nil || !pendingAck {
+	if err := e.pool.QueryRow(ctx, `SELECT status='inflight' AND attempts>=1 AND delivered_at IS NULL FROM emitlane.outbox_events WHERE id=$1`, probe).Scan(&pendingAck); err != nil || !pendingAck {
 		t.Fatalf("probe not left in ACK-before-DB-ack window: %t %v", pendingAck, err)
 	}
 }

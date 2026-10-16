@@ -164,3 +164,21 @@ container with no network. Two committed marker records must survive. This
 small fixture does not qualify a failed endurance run, production restore/PITR
 or Kafka offset reconciliation. Corrupt gzip trailers, missing PostgreSQL control
 files, unsafe member paths and incomplete/running container states are rejected.
+
+### ACK crash-window selection
+
+The ACK crash helper stops inside the real Relay hook after Kafka acknowledges
+a committed event and before the database marks it delivered. The evidence
+records both the initial scheduling probe and the exact event that reached the
+ACK window. The parent verifies that selected event belongs to the expected
+ledger and remains inflight under the helper's ownership before resuming work.
+The claim-crash helper still requires its initial probe.
+
+A transient publish failure can reschedule the initial probe behind other ready
+events. Requiring that one probe to reach ACK can exhaust the helper's unchanged
+25-second budget while other events are being delivered. Selecting the actual
+ACKed ledger event avoids this scheduling assumption without changing Relay
+retry policy or any qualification timeout. The separately enabled
+`EMITLANE_QUALIFICATION_ACK_CHECK=1` regression injects one probe failure, checks
+an actual Kafka ACK and process kill on another event, then verifies recovery
+and the expected duplicate. Failed earlier runs remain failed and unaudited.
