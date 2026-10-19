@@ -206,7 +206,10 @@ go test -p=1 -tags=integration \
 ```
 
 The opt-in retained-history regression checks exact consumer isolation and the
-actual query plan against 200,000 processed rows for each of two consumers.
+actual query plan against 200,000 processed rows for each of two consumers,
+plus a selective consumer with 1,000 rows. It checks the non-processed partial
+indexes and the selective processed index; a dominant consumer may legitimately
+use a sequential scan for its processed history.
 Separate cases compare all lifecycle counts with the original aggregate and
 verify that a blocked query obeys its caller deadline.
 

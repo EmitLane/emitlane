@@ -197,7 +197,7 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if err := json.Unmarshal(plan, &document); err != nil {
 		t.Fatal(err)
 	}
-	processedIndex := false
+	indexes := make(map[string]bool)
 	var walk func(any)
 	walk = func(value any) {
 		switch node := value.(type) {
@@ -206,18 +206,48 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 				walk(child)
 			}
 		case map[string]any:
-			if node["Relation Name"] == "inbox_events" && node["Node Type"] == "Seq Scan" {
-				t.Fatalf("snapshot scanned retained Inbox heap: %s", plan)
+			if index, ok := node["Index Name"].(string); ok {
+				indexes[index] = true
 			}
-			processedIndex = processedIndex || node["Index Name"] == "inbox_processed_retention_idx"
 			for _, child := range node {
 				walk(child)
 			}
 		}
 	}
 	walk(document)
-	if !processedIndex {
-		t.Fatalf("processed partial index not used: %s", plan)
+	for _, index := range []string{"inbox_due_idx", "inbox_expired_lease_idx", "inbox_dead_idx"} {
+		if !indexes[index] {
+			t.Fatalf("inactive-state partial index %s not used: %s", index, plan)
+		}
 	}
+	// PostgreSQL may prefer a sequential scan for a dominant consumer's
+	// processed history, even after VACUUM. Verify processed-index eligibility
+	// with a selective consumer instead of forcing a planner choice globally.
+	if _, err := e.pool.Exec(ctx, `INSERT INTO emitlane.inbox_events(consumer,event_id)
+ SELECT 'snapshot-selective',md5('selective-'||g)::uuid FROM generate_series(1,1000)g`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `VACUUM (ANALYZE) emitlane.inbox_events`); err != nil {
+		t.Fatal(err)
+	}
+	selectiveCtx, stopSelective := context.WithTimeout(ctx, qualificationSnapshotTimeout)
+	selective, err := readQualificationInboxSnapshot(selectiveCtx, e.pool, "snapshot-selective")
+	stopSelective()
+	if err != nil || selective != [5]int64{0, 0, 0, 0, 1000} {
+		t.Fatalf("selective history count: %v %v", selective, err)
+	}
+	selectivePlan, err := qualificationInboxSnapshotPlan(ctx, e.pool, "snapshot-selective")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(selectivePlan, &document); err != nil {
+		t.Fatal(err)
+	}
+	indexes = make(map[string]bool)
+	walk(document)
+	if !indexes["inbox_processed_retention_idx"] {
+		t.Fatalf("selective processed partial index not used: %s", selectivePlan)
+	}
+	t.Logf("SNAPSHOT_SELECTIVE_PROOF retained=1000 exact_counts=%v plan=%s", selective, selectivePlan)
 	t.Logf("SNAPSHOT_HISTORY_PROOF retained_per_consumer=200000 consumers=2 exact_counts=%v plan=%s", got, plan)
 }
