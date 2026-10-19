@@ -182,3 +182,37 @@ retry policy or any qualification timeout. The separately enabled
 `EMITLANE_QUALIFICATION_ACK_CHECK=1` regression injects one probe failure, checks
 an actual Kafka ACK and process kill on another event, then verifies recovery
 and the expected duplicate. Failed earlier runs remain failed and unaudited.
+
+### Exact Inbox snapshot counts
+
+The periodic snapshot keeps one shared 10-second deadline for Inbox counts,
+database statistics, outbox counts and Kafka offsets. Its five Inbox counts run
+in one MVCC statement with explicit literal status predicates, making the
+released partial indexes eligible. A status condition inside `FILTER` alone
+requires fetching statuses from the entire retained consumer history. No
+released index, planner setting, SDK operation or business transaction changes.
+
+Counts remain exact, including the full processed history. They are not
+estimates or cached progress counters, and counting retained history still has
+work proportional to that history. Access-path checks on a short retained-row
+fixture do not prove a future endurance deadline under concurrent load.
+
+```sh
+EMITLANE_QUALIFICATION_SNAPSHOT_CHECK=1 \
+EMITLANE_QUALIFICATION_DURATION=2m \
+go test -p=1 -tags=integration \
+  -run '^TestQualification(InboxSnapshot.*|SnapshotFailureEvidence)$' \
+  -count=1 -v -timeout=3m ./internal/integration
+```
+
+The opt-in retained-history regression checks exact consumer isolation and the
+actual query plan against 200,000 processed rows for each of two consumers.
+Separate cases compare all lifecycle counts with the original aggregate and
+verify that a blocked query obeys its caller deadline.
+
+A snapshot error remains fatal. Before teardown, `snapshot-failure.json` records
+its stage, elapsed time, shared deadline and query shape. Existing failure capture
+also records the Inbox snapshot's non-executing `EXPLAIN`, separately from the
+recovery audit plan, within the existing failure-capture budget. It does not
+retry the failed snapshot. Final identity, payload/key/order, protected-effect,
+operator and full-integrity audits and their budgets remain unchanged.

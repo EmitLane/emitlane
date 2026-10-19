@@ -671,28 +671,30 @@ func (s *qualificationCommitSource) Commit(ctx context.Context, record managed.S
 
 func qualificationSnapshot(t *testing.T, e *env, topic, group, name string, cycles int, failures int64) map[string]any {
 	t.Helper()
-	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	started := time.Now()
+	ctx, stop := context.WithTimeout(context.Background(), qualificationSnapshotTimeout)
 	defer stop()
-	var pending, inflight, retry, dead, processed, dbBytes, connections, deadTuples, autovacuums int64
-	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FILTER(WHERE status='pending'),COUNT(*) FILTER(WHERE status='inflight'),COUNT(*) FILTER(WHERE status='retry_wait'),COUNT(*) FILTER(WHERE status='dead'),COUNT(*) FILTER(WHERE status='processed') FROM emitlane.inbox_events WHERE consumer=$1`, name).Scan(&pending, &inflight, &retry, &dead, &processed); err != nil {
-		t.Fatal(err)
+	counts, err := readQualificationInboxSnapshot(ctx, e.pool, name)
+	if err != nil {
+		failQualificationSnapshot(t, ctx, started, "inbox_counts", err)
 	}
+	var dbBytes, connections, deadTuples, autovacuums int64
 	if err := e.pool.QueryRow(ctx, `SELECT pg_database_size(current_database()),(SELECT COUNT(*) FROM pg_stat_activity WHERE datname=current_database()),COALESCE((SELECT SUM(n_dead_tup) FROM pg_stat_user_tables),0),COALESCE((SELECT SUM(autovacuum_count) FROM pg_stat_user_tables),0)`).Scan(&dbBytes, &connections, &deadTuples, &autovacuums); err != nil {
-		t.Fatal(err)
+		failQualificationSnapshot(t, ctx, started, "database_stats", err)
 	}
 	var outboxPending, outboxInflight, outboxDead int64
 	var oldest float64
 	if err := e.pool.QueryRow(ctx, `SELECT COUNT(*) FILTER(WHERE status='pending'),COUNT(*) FILTER(WHERE status='inflight'),COUNT(*) FILTER(WHERE status='dead'),COALESCE(MAX(EXTRACT(EPOCH FROM NOW()-created_at)) FILTER(WHERE status='pending'),0) FROM emitlane.outbox_events`).Scan(&outboxPending, &outboxInflight, &outboxDead, &oldest); err != nil {
-		t.Fatal(err)
+		failQualificationSnapshot(t, ctx, started, "outbox_counts", err)
 	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	kafka, err := qualificationKafkaSnapshot(ctx, e.brokers, topic, group)
 	if err != nil {
-		t.Fatal(err)
+		failQualificationSnapshot(t, ctx, started, "kafka_offsets", err)
 	}
 	return map[string]any{"kind": "snapshot", "time": time.Now().UTC(), "cycles": cycles, "producer_failures": failures,
-		"inbox_pending": pending, "inbox_inflight": inflight, "inbox_retry": retry, "inbox_dead": dead, "processed": processed,
+		"inbox_pending": counts[0], "inbox_inflight": counts[1], "inbox_retry": counts[2], "inbox_dead": counts[3], "processed": counts[4],
 		"go_heap_bytes": memory.HeapAlloc, "goroutines": runtime.NumGoroutine(), "pool_acquired": e.pool.Stat().AcquiredConns(), "pool_total": e.pool.Stat().TotalConns(),
 		"database_bytes": dbBytes, "database_connections": connections, "dead_tuples_estimate": deadTuples, "autovacuum_count": autovacuums,
 		"outbox_pending": outboxPending, "outbox_inflight": outboxInflight, "outbox_dead": outboxDead, "oldest_pending_seconds": oldest, "kafka": kafka}

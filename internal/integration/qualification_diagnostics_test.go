@@ -357,6 +357,19 @@ func (d *qualificationDiagnostics) failureDump(t *testing.T) {
 			t.Errorf("failure PostgreSQL capture %s: %v", key, value)
 		}
 	}
+	if raw, err := os.ReadFile(filepath.Join(d.output, "snapshot-failure.json")); err == nil {
+		proof["snapshot_failure"] = json.RawMessage(raw)
+	}
+	// Capture the actual diagnostic query's plan, not just the recovery audit's
+	// unrelated join plan. This does not execute the COUNT or retry a failed
+	// snapshot. The extra capture stays inside the existing failure-dump budget.
+	planCtx, cancelPlan := context.WithTimeout(ctx, 5*time.Second)
+	if snapshotPlan, err := qualificationInboxSnapshotPlan(planCtx, d.pool, "qualification-v1"); err != nil {
+		proof["snapshot_inbox_plan_error"] = err.Error()
+	} else {
+		proof["snapshot_inbox_plan"] = snapshotPlan
+	}
+	cancelPlan()
 	var plan []byte
 	if err := d.pool.QueryRow(ctx, `EXPLAIN (FORMAT JSON) SELECT COUNT(*) FROM public.soak_expected x LEFT JOIN emitlane.inbox_events i ON i.consumer='qualification-v1' AND i.event_id=x.event_id LEFT JOIN emitlane.outbox_events o ON o.id=x.event_id WHERE i.status IS DISTINCT FROM 'processed' OR (o.id IS NOT NULL AND o.status<>'delivered')`).Scan(&plan); err != nil {
 		proof["explain_error"] = err.Error()
