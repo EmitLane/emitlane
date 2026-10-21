@@ -20,14 +20,20 @@ const qualificationSnapshotTimeout = 10 * time.Second
 // Keep all five exact counts in one MVCC statement. Explicit, literal status
 // predicates make the released partial indexes eligible. A FILTER-only status
 // condition forces every retained row's status to be fetched from the heap.
-// Processed history is still counted in full: this is not an estimate, cached
-// counter, planner override or replacement for the independent final audits.
+// Read processed history in the order of the released retention index so a
+// dominant consumer need not scan the wider heap after a cold restart. This is
+// still an exact O(n) count in the same statement, without estimates, cached
+// counters, planner settings or changes to the independent final audits.
 const qualificationInboxSnapshotSQL = `SELECT
  (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='pending'),
  (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='inflight'),
  (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='retry_wait'),
  (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='dead'),
- (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='processed')`
+ (SELECT COUNT(*) FROM (
+   SELECT event_id FROM emitlane.inbox_events
+   WHERE consumer=$1 AND status='processed'
+   ORDER BY processed_at,event_id
+ ) processed_history)`
 
 func readQualificationInboxSnapshot(ctx context.Context, pool *pgxpool.Pool, name string) ([5]int64, error) {
 	var counts [5]int64
@@ -167,7 +173,7 @@ func TestQualificationSnapshotFailureEvidence(t *testing.T) {
 }
 
 // A small fresh fixture cannot detect accidental reintroduction of the
-// FILTER-only heap scan. This bounded opt-in checks the real query's access
+// heap scan of processed history. This bounded opt-in checks the real query's access
 // path with retained history, without changing any released index or planner.
 func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if os.Getenv("EMITLANE_QUALIFICATION_SNAPSHOT_CHECK") != "1" {
@@ -215,14 +221,40 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 		}
 	}
 	walk(document)
-	for _, index := range []string{"inbox_due_idx", "inbox_expired_lease_idx", "inbox_dead_idx"} {
+	for _, index := range []string{"inbox_due_idx", "inbox_expired_lease_idx", "inbox_dead_idx", "inbox_processed_retention_idx"} {
 		if !indexes[index] {
-			t.Fatalf("inactive-state partial index %s not used: %s", index, plan)
+			t.Fatalf("snapshot partial index %s not used: %s", index, plan)
 		}
 	}
-	// PostgreSQL may prefer a sequential scan for a dominant consumer's
-	// processed history, even after VACUUM. Verify processed-index eligibility
-	// with a selective consumer instead of forcing a planner choice globally.
+	// Recheck after this consumer becomes the entire retained history. The
+	// previous scalar COUNT could choose a parallel heap scan for this case.
+	if _, err := e.pool.Exec(ctx, `DELETE FROM emitlane.inbox_events WHERE consumer='snapshot-other'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `VACUUM (ANALYZE) emitlane.inbox_events`); err != nil {
+		t.Fatal(err)
+	}
+	dominantCtx, stopDominant := context.WithTimeout(ctx, qualificationSnapshotTimeout)
+	dominant, err := readQualificationInboxSnapshot(dominantCtx, e.pool, "snapshot-history")
+	stopDominant()
+	if err != nil || dominant != got {
+		t.Fatalf("dominant history count: %v %v", dominant, err)
+	}
+	dominantPlan, err := qualificationInboxSnapshotPlan(ctx, e.pool, "snapshot-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(dominantPlan, &document); err != nil {
+		t.Fatal(err)
+	}
+	indexes = make(map[string]bool)
+	walk(document)
+	if !indexes["inbox_processed_retention_idx"] {
+		t.Fatalf("dominant processed partial index not used: %s", dominantPlan)
+	}
+	t.Logf("SNAPSHOT_DOMINANT_PROOF retained=200000 exact_counts=%v plan=%s", dominant, dominantPlan)
+	// Also verify the exact count and access path for a selective consumer.
+	// No session planner settings or new indexes are used for either fixture.
 	if _, err := e.pool.Exec(ctx, `INSERT INTO emitlane.inbox_events(consumer,event_id)
  SELECT 'snapshot-selective',md5('selective-'||g)::uuid FROM generate_series(1,1000)g`); err != nil {
 		t.Fatal(err)

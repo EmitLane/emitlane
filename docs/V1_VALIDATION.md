@@ -189,7 +189,10 @@ The periodic snapshot keeps one shared 10-second deadline for Inbox counts,
 database statistics, outbox counts and Kafka offsets. Its five Inbox counts run
 in one MVCC statement with explicit literal status predicates, making the
 released partial indexes eligible. A status condition inside `FILTER` alone
-requires fetching statuses from the entire retained consumer history. No
+requires fetching statuses from the entire retained consumer history. The
+processed subquery reads in `(processed_at, event_id)` order to use the
+released retention index when a consumer owns most of the table, avoiding a
+parallel scan of the wider heap in the tested PostgreSQL configuration. No
 released index, planner setting, SDK operation or business transaction changes.
 
 Counts remain exact, including the full processed history. They are not
@@ -207,9 +210,11 @@ go test -p=1 -tags=integration \
 
 The opt-in retained-history regression checks exact consumer isolation and the
 actual query plan against 200,000 processed rows for each of two consumers,
+then rechecks after one consumer owns the entire retained history,
 plus a selective consumer with 1,000 rows. It checks the non-processed partial
-indexes and the selective processed index; a dominant consumer may legitimately
-use a sequential scan for its processed history.
+indexes and the processed retention index for both large and selective
+consumers. These access-path assertions detect a return to the wider heap scan;
+they do not establish a universal latency bound.
 Separate cases compare all lifecycle counts with the original aggregate and
 verify that a blocked query obeys its caller deadline.
 
