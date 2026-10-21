@@ -189,11 +189,23 @@ The periodic snapshot keeps one shared 10-second deadline for Inbox counts,
 database statistics, outbox counts and Kafka offsets. Its five Inbox counts run
 in one MVCC statement with explicit literal status predicates, making the
 released partial indexes eligible. A status condition inside `FILTER` alone
-requires fetching statuses from the entire retained consumer history. The
-processed subquery reads in `(processed_at, event_id)` order to use the
-released retention index when a consumer owns most of the table, avoiding a
-parallel scan of the wider heap in the tested PostgreSQL configuration. No
-released index, planner setting, SDK operation or business transaction changes.
+requires fetching statuses from the entire retained consumer history. The processed count splits the retention index into four disjoint timestamp
+ranges, each read in `(processed_at, event_id)` order. A preceding index-only
+minimum/maximum lookup supplies three external split parameters. Both lookup
+and count share the original deadline; the lookup does not create a separate
+time budget or retry. All five counts still use one MVCC statement. The first
+and last ranges are unbounded, so newer rows, stale bounds, equal bounds and
+infinite timestamps cannot exclude history or cause overlapping counts.
+No released index, planner setting, SDK operation or business transaction changes.
+
+The earlier single ordered scan exceeded 10 seconds twice on a cold 13.1-million
+row bloated fixture under concurrent load. It remains a failed capacity result.
+On a separate one-million-row synthetic plan experiment, external bounds allowed
+PostgreSQL 16 to use Parallel Append, including a generic prepared plan; computing
+bounds in a CTE did not. This plan evidence is not a cold-load capacity pass.
+Worker availability, range skew, equal timestamps and extremely wide timestamp
+histories can reduce the speedup. The timestamp arithmetic saturates safely for
+wide histories; unbounded ranges preserve exact coverage regardless of skew.
 
 Counts remain exact, including the full processed history. They are not
 estimates or cached progress counters, and counting retained history still has
@@ -216,10 +228,13 @@ indexes and the processed retention index for both large and selective
 consumers. These access-path assertions detect a return to the wider heap scan;
 they do not establish a universal latency bound.
 Separate cases compare all lifecycle counts with the original aggregate and
-verify that a blocked query obeys its caller deadline.
+verify that boundary equality and infinite timestamps retain exact coverage,
+and that a blocked boundary lookup obeys its caller deadline.
 
 A snapshot error remains fatal. Before teardown, `snapshot-failure.json` records
-its stage, elapsed time, shared deadline and query shape. Existing failure capture
+its stage, elapsed time, shared deadline and both query shapes. A count error
+also preserves the split parameters; a boundary lookup error is identified
+separately in the error message. Existing failure capture
 also records the Inbox snapshot's non-executing `EXPLAIN`, separately from the
 recovery audit plan, within the existing failure-capture budget. It does not
 retry the failed snapshot. Final identity, payload/key/order, protected-effect,
