@@ -275,7 +275,7 @@ func TestQualificationInboxSnapshotAccountingConcurrent(t *testing.T) {
 					results <- err
 					return
 				}
-				_, err = tx.Exec(ctx, `INSERT INTO emitlane.inbox_events(consumer,event_id,status,processed_at) VALUES ('accounting-concurrent',md5($1)::uuid,'pending',NULL)`, id)
+				_, err = tx.Exec(ctx, `INSERT INTO emitlane.inbox_events(consumer,event_id,status,processed_at,source_topic,source_partition,source_offset) VALUES ('accounting-concurrent',md5($1)::uuid,'pending',NULL,'accounting-concurrent',$2,$3)`, id, worker, i)
 				if err == nil {
 					_, err = tx.Exec(ctx, `UPDATE emitlane.inbox_events SET status='retry_wait' WHERE consumer='accounting-concurrent' AND event_id=md5($1)::uuid`, id)
 				}
