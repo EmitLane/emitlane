@@ -116,6 +116,7 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 			t.Error(err)
 		}
 	})
+	setupQualificationInboxAccounting(t, e.pool)
 	topic, group, name := "qualification-"+uuid.NewString(), "qualification-group-"+uuid.NewString(), "qualification-v1"
 	e.ensureTopicPartitions(t, topic, int32(c.partitions))
 	diagnostics.start(topic, group)
@@ -348,6 +349,9 @@ CREATE TABLE public.soak_observed (event_id UUID PRIMARY KEY, records BIGINT NOT
 		"pruned": pruned, "offset_failures": factory.injected.Load()})
 	kafkaRecords, duplicates := auditQualificationKafka(t, auditCtx, e, topic, c.seed, c.partitions)
 	total := auditQualificationDatabase(t, auditCtx, e, topic, name, retriedDead)
+	if err := reconcileQualificationInboxAccounting(auditCtx, e.pool); err != nil {
+		t.Fatal(err)
+	}
 	verifier, err := integrity.NewVerifier(e.pool, integrity.DefaultConfig())
 	if err != nil {
 		t.Fatal(err)

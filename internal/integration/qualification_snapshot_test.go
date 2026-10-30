@@ -12,95 +12,37 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const qualificationSnapshotTimeout = 10 * time.Second
 
-// All five exact counts use one MVCC statement. Range boundaries only split
-// work; they never filter history out. The first/last ranges are unbounded, so
-// inserts between the boundary lookup and COUNT remain visible to the COUNT's
-// snapshot. Both queries use the caller's original deadline, without retries.
-// External bounds permit Parallel Append of ordered retention-index scans;
-// CTE/InitPlan bounds inhibited this plan in the measured PostgreSQL 16 fixture.
-// This remains O(n), with no guarantee of parallel workers or a universal 10s
-// capacity bound. Equal timestamps and extreme history can leave skewed ranges.
-const qualificationInboxBoundsSQL = `SELECT min(processed_at),max(processed_at)
- FROM emitlane.inbox_events WHERE consumer=$1 AND status='processed'`
-
+// All five exact counts come from transactionally maintained fixture shards.
+// Their cost is bounded by 256 rows per consumer, not retained Inbox history.
+// The guard fails closed if accounting triggers have been disabled or removed.
 const qualificationInboxSnapshotSQL = `SELECT
- (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='pending'),
- (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='inflight'),
- (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='retry_wait'),
- (SELECT COUNT(*) FROM emitlane.inbox_events WHERE consumer=$1 AND status='dead'),
- (SELECT SUM(n)::bigint FROM (
-   SELECT COUNT(*) AS n FROM (SELECT event_id FROM emitlane.inbox_events
-     WHERE consumer=$1 AND status='processed' AND processed_at < $2::timestamptz
-     ORDER BY processed_at,event_id) h0
-   UNION ALL
-   SELECT COUNT(*) AS n FROM (SELECT event_id FROM emitlane.inbox_events
-     WHERE consumer=$1 AND status='processed' AND processed_at >= $2::timestamptz AND processed_at < $3::timestamptz
-     ORDER BY processed_at,event_id) h1
-   UNION ALL
-   SELECT COUNT(*) AS n FROM (SELECT event_id FROM emitlane.inbox_events
-     WHERE consumer=$1 AND status='processed' AND processed_at >= $3::timestamptz AND processed_at < $4::timestamptz
-     ORDER BY processed_at,event_id) h2
-   UNION ALL
-   SELECT COUNT(*) AS n FROM (SELECT event_id FROM emitlane.inbox_events
-     WHERE consumer=$1 AND status='processed' AND processed_at >= $4::timestamptz
-     ORDER BY processed_at,event_id) h3
- ) processed_history)`
-
-func qualificationInboxBounds(ctx context.Context, conn *pgxpool.Conn, name string) ([3]time.Time, error) {
-	var lo, hi pgtype.Timestamptz
-	bounds := [3]time.Time{time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC()}
-	if err := conn.QueryRow(ctx, qualificationInboxBoundsSQL, name).Scan(&lo, &hi); err != nil {
-		return bounds, fmt.Errorf("processed history boundaries: %w", err)
-	}
-	// NULL (empty history) and infinities use equal finite split points. All
-	// values still belong to exactly one range, including +/-infinity. time.Sub
-	// saturates for very wide finite histories; the unbounded tail still covers
-	// every row, although this can reduce parallel speedup.
-	if lo.Valid && hi.Valid && lo.InfinityModifier == pgtype.Finite && hi.InfinityModifier == pgtype.Finite {
-		step := hi.Time.Sub(lo.Time) / 4
-		for i := range bounds {
-			bounds[i] = lo.Time.Add(time.Duration(i+1) * step)
-		}
-	}
-	return bounds, nil
-}
+ (SELECT COUNT(*)=2 FROM pg_trigger WHERE tgrelid='emitlane.inbox_events'::regclass
+  AND tgname IN ('qualification_inbox_count_change','qualification_inbox_count_no_truncate') AND tgenabled='O'),
+ COALESCE(SUM(pending),0)::bigint,COALESCE(SUM(inflight),0)::bigint,
+ COALESCE(SUM(retry_wait),0)::bigint,COALESCE(SUM(dead),0)::bigint,COALESCE(SUM(processed),0)::bigint
+ FROM public.qualification_inbox_counts WHERE consumer=$1`
 
 func readQualificationInboxSnapshot(ctx context.Context, pool *pgxpool.Pool, name string) ([5]int64, error) {
 	var counts [5]int64
-	conn, err := pool.Acquire(ctx)
+	var enabled bool
+	err := pool.QueryRow(ctx, qualificationInboxSnapshotSQL, name).Scan(&enabled, &counts[0], &counts[1], &counts[2], &counts[3], &counts[4])
 	if err != nil {
 		return counts, err
 	}
-	defer conn.Release()
-	bounds, err := qualificationInboxBounds(ctx, conn, name)
-	if err != nil {
-		return counts, err
-	}
-	err = conn.QueryRow(ctx, qualificationInboxSnapshotSQL, name, bounds[0], bounds[1], bounds[2]).Scan(&counts[0], &counts[1], &counts[2], &counts[3], &counts[4])
-	if err != nil {
-		return counts, fmt.Errorf("processed history range count bounds=%v: %w", bounds, err)
+	if !enabled {
+		return counts, fmt.Errorf("qualification Inbox accounting triggers missing or disabled")
 	}
 	return counts, nil
 }
 
 func qualificationInboxSnapshotPlan(ctx context.Context, pool *pgxpool.Pool, name string) (json.RawMessage, error) {
 	var plan json.RawMessage
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-	bounds, err := qualificationInboxBounds(ctx, conn, name)
-	if err != nil {
-		return nil, err
-	}
-	err = conn.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+qualificationInboxSnapshotSQL, name, bounds[0], bounds[1], bounds[2]).Scan(&plan)
+	err := pool.QueryRow(ctx, `EXPLAIN (FORMAT JSON) `+qualificationInboxSnapshotSQL, name).Scan(&plan)
 	return plan, err
 }
 
@@ -115,7 +57,6 @@ func recordQualificationSnapshotFailure(output, phase string, elapsed time.Durat
 	}
 	if phase == "inbox_counts" {
 		proof["query"] = qualificationInboxSnapshotSQL
-		proof["bounds_query"] = qualificationInboxBoundsSQL
 	}
 	name := filepath.Join(output, "snapshot-failure.json")
 	if _, err := os.Stat(name); err == nil {
@@ -150,6 +91,7 @@ func failQualificationSnapshot(t *testing.T, ctx context.Context, started time.T
 
 func TestQualificationInboxSnapshotCounts(t *testing.T) {
 	e := startEnv(t)
+	setupQualificationInboxAccounting(t, e.pool)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	consumer := "snapshot-counts"
@@ -186,31 +128,19 @@ func TestQualificationInboxSnapshotCounts(t *testing.T) {
 			t.Fatalf("unexpected fixture counts: %v", got)
 		}
 	}
-	// Boundary equality, absent consumers, infinities and values outside an older
-	// boundary lookup must remain exact. Boundaries are optimization inputs, not
-	// constraints on which history is eligible for counting.
+	// Processed timestamps do not control eligibility for accounting. Include
+	// infinities, equal values and dates outside the run's ordinary time range.
 	if _, err := e.pool.Exec(ctx, `INSERT INTO emitlane.inbox_events(consumer,event_id,processed_at)
  SELECT $1,md5('edge-'||g)::uuid,stamp FROM (VALUES
  (1,'-infinity'::timestamptz),(2,'infinity'::timestamptz),
  (3,'1970-01-01'::timestamptz),(4,'2000-01-01'::timestamptz),
- (5,'2000-01-02'::timestamptz),(6,'2000-01-03'::timestamptz),
+ (5,'2000-01-01'::timestamptz),(6,'2000-01-01'::timestamptz),
  (7,'1900-01-01'::timestamptz),(8,'2200-01-01'::timestamptz))v(g,stamp)`, consumer); err != nil {
 		t.Fatal(err)
 	}
-	expectedEdges := [5]int64{2, 1, 1, 1, 10}
 	gotEdges, err := readQualificationInboxSnapshot(ctx, e.pool, consumer)
-	if err != nil || gotEdges != expectedEdges {
-		t.Fatalf("infinite history counts: %v %v", gotEdges, err)
-	}
-	for _, bounds := range [][3]time.Time{
-		{time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 3, 0, 0, 0, 0, time.UTC)},
-		{time.Unix(0, 0), time.Unix(0, 0), time.Unix(0, 0)},
-	} {
-		var got [5]int64
-		err := e.pool.QueryRow(ctx, qualificationInboxSnapshotSQL, consumer, bounds[0], bounds[1], bounds[2]).Scan(&got[0], &got[1], &got[2], &got[3], &got[4])
-		if err != nil || got != expectedEdges {
-			t.Fatalf("range boundary counts: %v %v", got, err)
-		}
+	if err != nil || gotEdges != [5]int64{2, 1, 1, 1, 10} {
+		t.Fatalf("timestamp history counts: %v %v", gotEdges, err)
 	}
 
 	// A caller deadline must still cancel a blocked count; no internal retry or
@@ -220,7 +150,7 @@ func TestQualificationInboxSnapshotCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := tx.Exec(ctx, `LOCK TABLE emitlane.inbox_events IN ACCESS EXCLUSIVE MODE`); err != nil {
+	if _, err := tx.Exec(ctx, `LOCK TABLE public.qualification_inbox_counts IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
 	blocked, stop := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -245,12 +175,11 @@ func TestQualificationSnapshotFailureEvidence(t *testing.T) {
 		Query        string  `json:"query"`
 		Deadline     float64 `json:"shared_deadline_seconds"`
 		ContextError string  `json:"context_error"`
-		BoundsQuery  string  `json:"bounds_query"`
 	}
 	if err := json.Unmarshal(raw, &proof); err != nil {
 		t.Fatal(err)
 	}
-	if proof.Phase != "inbox_counts" || proof.Query != qualificationInboxSnapshotSQL || proof.BoundsQuery != qualificationInboxBoundsSQL || proof.Deadline != 10 || proof.ContextError != context.DeadlineExceeded.Error() {
+	if proof.Phase != "inbox_counts" || proof.Query != qualificationInboxSnapshotSQL || proof.Deadline != 10 || proof.ContextError != context.DeadlineExceeded.Error() {
 		t.Fatalf("incomplete snapshot failure evidence: %+v", proof)
 	}
 	if err := recordQualificationSnapshotFailure(output, "later", time.Second, nil, errors.New("later failure")); err == nil {
@@ -259,7 +188,7 @@ func TestQualificationSnapshotFailureEvidence(t *testing.T) {
 }
 
 // A small fresh fixture cannot detect accidental reintroduction of the
-// heap scan of processed history. This bounded opt-in checks the real query's access
+// full scan of processed history. This bounded opt-in checks the real query's access
 // path with retained history, without changing any released index or planner.
 func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if os.Getenv("EMITLANE_QUALIFICATION_SNAPSHOT_CHECK") != "1" {
@@ -272,6 +201,7 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
  SELECT c,md5(c||g)::uuid,NOW()-g*INTERVAL '1 second' FROM generate_series(1,200000)g CROSS JOIN (VALUES ('snapshot-history'),('snapshot-other'))v(c)`); err != nil {
 		t.Fatal(err)
 	}
+	setupQualificationInboxAccounting(t, e.pool)
 	if _, err := e.pool.Exec(ctx, `VACUUM (ANALYZE) emitlane.inbox_events`); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +219,7 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if err := json.Unmarshal(plan, &document); err != nil {
 		t.Fatal(err)
 	}
-	indexes := make(map[string]bool)
+	relations := make(map[string]bool)
 	var walk func(any)
 	walk = func(value any) {
 		switch node := value.(type) {
@@ -298,8 +228,8 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 				walk(child)
 			}
 		case map[string]any:
-			if index, ok := node["Index Name"].(string); ok {
-				indexes[index] = true
+			if relation, ok := node["Relation Name"].(string); ok {
+				relations[relation] = true
 			}
 			for _, child := range node {
 				walk(child)
@@ -307,13 +237,11 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 		}
 	}
 	walk(document)
-	for _, index := range []string{"inbox_due_idx", "inbox_expired_lease_idx", "inbox_dead_idx", "inbox_processed_retention_idx"} {
-		if !indexes[index] {
-			t.Fatalf("snapshot partial index %s not used: %s", index, plan)
-		}
+	if !relations["qualification_inbox_counts"] || relations["inbox_events"] {
+		t.Fatalf("snapshot scanned history instead of bounded accounting: %s", plan)
 	}
-	// Recheck after this consumer becomes the entire retained history. The
-	// previous scalar COUNT could choose a parallel heap scan for this case.
+	// Recheck after this consumer becomes the entire retained history. No diagnostic scan
+	// may depend on how much processed history belongs to the consumer.
 	if _, err := e.pool.Exec(ctx, `DELETE FROM emitlane.inbox_events WHERE consumer='snapshot-other'`); err != nil {
 		t.Fatal(err)
 	}
@@ -333,10 +261,10 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if err := json.Unmarshal(dominantPlan, &document); err != nil {
 		t.Fatal(err)
 	}
-	indexes = make(map[string]bool)
+	relations = make(map[string]bool)
 	walk(document)
-	if !indexes["inbox_processed_retention_idx"] {
-		t.Fatalf("dominant processed partial index not used: %s", dominantPlan)
+	if !relations["qualification_inbox_counts"] || relations["inbox_events"] {
+		t.Fatalf("dominant snapshot did not retain bounded access: %s", dominantPlan)
 	}
 	t.Logf("SNAPSHOT_DOMINANT_PROOF retained=200000 exact_counts=%v plan=%s", dominant, dominantPlan)
 	// Also verify the exact count and access path for a selective consumer.
@@ -361,10 +289,10 @@ func TestQualificationInboxSnapshotRetainedHistory(t *testing.T) {
 	if err := json.Unmarshal(selectivePlan, &document); err != nil {
 		t.Fatal(err)
 	}
-	indexes = make(map[string]bool)
+	relations = make(map[string]bool)
 	walk(document)
-	if !indexes["inbox_processed_retention_idx"] {
-		t.Fatalf("selective processed partial index not used: %s", selectivePlan)
+	if !relations["qualification_inbox_counts"] || relations["inbox_events"] {
+		t.Fatalf("selective snapshot did not retain bounded access: %s", selectivePlan)
 	}
 	t.Logf("SNAPSHOT_SELECTIVE_PROOF retained=1000 exact_counts=%v plan=%s", selective, selectivePlan)
 	t.Logf("SNAPSHOT_HISTORY_PROOF retained_per_consumer=200000 consumers=2 exact_counts=%v plan=%s", got, plan)

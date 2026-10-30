@@ -189,28 +189,42 @@ The periodic snapshot keeps one shared 10-second deadline for Inbox counts,
 database statistics, outbox counts and Kafka offsets. Its five Inbox counts run
 in one MVCC statement with explicit literal status predicates, making the
 released partial indexes eligible. A status condition inside `FILTER` alone
-requires fetching statuses from the entire retained consumer history. The processed count splits the retention index into four disjoint timestamp
-ranges, each read in `(processed_at, event_id)` order. A preceding index-only
-minimum/maximum lookup supplies three external split parameters. Both lookup
-and count share the original deadline; the lookup does not create a separate
-time budget or retry. All five counts still use one MVCC statement. The first
-and last ranges are unbounded, so newer rows, stale bounds, equal bounds and
-infinite timestamps cannot exclude history or cause overlapping counts.
-No released index, planner setting, SDK operation or business transaction changes.
+The four-range exact history COUNT also exceeded the unchanged 10-second
+snapshot deadline in a 66.5-hour run with about 11.4 million processed rows.
+PostgreSQL was SQL-ready after the injected restart. The preserved non-executing
+plan still used four retention-index scans and planned two parallel workers;
+it does not prove which workers ran or isolate the precise I/O/JIT cause.
+The 72-hour attempt remains FAILED, without recovery or final audit evidence.
 
-The earlier single ordered scan exceeded 10 seconds twice on a cold 13.1-million
-row bloated fixture under concurrent load. It remains a failed capacity result.
-On a separate one-million-row synthetic plan experiment, external bounds allowed
-PostgreSQL 16 to use Parallel Append, including a generic prepared plan; computing
-bounds in a CTE did not. This plan evidence is not a cold-load capacity pass.
-Worker availability, range skew, equal timestamps and extremely wide timestamp
-histories can reduce the speedup. The timestamp arithmetic saturates safely for
-wide histories; unbounded ranges preserve exact coverage regardless of skew.
+Qualification progress now uses a fixture-only, exact transactional aggregate:
+`public.qualification_inbox_counts` has at most 256 shards per consumer, with
+one five-status vector per shard. An AFTER-row trigger applies old/new status
+deltas in the same transaction as each Inbox change. It covers inserts, updates,
+identity moves and deletes; aborted or killed transactions roll back both rows
+and counters. A missing shard or a negative count fails the write instead of
+silently repairing accounting. The snapshot reads all five totals in one MVCC
+statement and fails closed if its tracking triggers are disabled or missing.
+TRUNCATE is explicitly refused while this fixture is installed. Cleanup removes
+accounting before the shared test environment's ordinary TRUNCATE reset.
 
-Counts remain exact, including the full processed history. They are not
-estimates or cached progress counters, and counting retained history still has
-work proportional to that history. Access-path checks on a short retained-row
-fixture do not prove a future endurance deadline under concurrent load.
+Initial seeding takes a write-conflicting lock while creating the aggregate and
+triggers, so no write can fall between initialization and delta tracking. It is
+fixture preparation, before measured load; there is no periodic rescan, estimate,
+asynchronous cache or retry fallback. Diagnostic work is bounded by shard count,
+not retained Inbox history. The complete snapshot still shares its original
+10 seconds across Inbox totals, DB statistics, Outbox totals and Kafka offsets.
+
+This adds real transactional write overhead to the qualification fixture and
+must be measured as a changed harness. It is not a released SDK, schema migration,
+consumer policy or production performance change. Previous source/capacity
+results do not certify this fixture or a future 72-hour run.
+
+All existing Kafka identity/payload/key/order, PostgreSQL identity/protected-effect,
+operator and full-integrity audits retain their original queries and budgets.
+An additional independent full scan of original Inbox rows reconciles every
+consumer/status total against accounting after workload quiescence, inside the
+same final-audit context. A mismatch fails the test; counters never substitute
+for the original full audits or supply their expected results.
 
 ```sh
 EMITLANE_QUALIFICATION_SNAPSHOT_CHECK=1 \
@@ -220,22 +234,17 @@ go test -p=1 -tags=integration \
   -count=1 -v -timeout=3m ./internal/integration
 ```
 
-The opt-in retained-history regression checks exact consumer isolation and the
-actual query plan against 200,000 processed rows for each of two consumers,
-then rechecks after one consumer owns the entire retained history,
-plus a selective consumer with 1,000 rows. It checks the non-processed partial
-indexes and the processed retention index for both large and selective
-consumers. These access-path assertions detect a return to the wider heap scan;
-they do not establish a universal latency bound.
-Separate cases compare all lifecycle counts with the original aggregate and
-verify that boundary equality and infinite timestamps retain exact coverage,
-and that a blocked boundary lookup obeys its caller deadline.
+Regressions compare all lifecycle states and isolated consumers with independent
+source-row scans; include infinite/equal processed timestamps, rollback and real
+backend termination before COMMIT; compare single-statement MVCC views during
+four concurrent writers; and reject corruption, disabled triggers and TRUNCATE.
+The retained-history case seeds two consumers with 200,000 rows each and checks
+bounded aggregate-index access for dominant and selective consumers. A blocked
+aggregate read must obey the caller's original deadline. These short checks do
+not establish an endurance pass or sustained admission of 50 events per second.
 
-A snapshot error remains fatal. Before teardown, `snapshot-failure.json` records
-its stage, elapsed time, shared deadline and both query shapes. A count error
-also preserves the split parameters; a boundary lookup error is identified
-separately in the error message. Existing failure capture
-also records the Inbox snapshot's non-executing `EXPLAIN`, separately from the
-recovery audit plan, within the existing failure-capture budget. It does not
-retry the failed snapshot. Final identity, payload/key/order, protected-effect,
-operator and full-integrity audits and their budgets remain unchanged.
+Snapshot errors remain fatal and preserve the actual query/stage/shared deadline
+before teardown. Failure capture retains a non-executing snapshot plan within
+its existing budget, without retrying the failed diagnostic. The load profile,
+PostgreSQL stop/start/SQL-readiness budgets, rebalance wait, recovery and final
+identity/effect/operator/integrity audit budgets are unchanged.
