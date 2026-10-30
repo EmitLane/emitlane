@@ -186,9 +186,10 @@ and the expected duplicate. Failed earlier runs remain failed and unaudited.
 ### Exact Inbox snapshot counts
 
 The periodic snapshot keeps one shared 10-second deadline for Inbox counts,
-database statistics, outbox counts and Kafka offsets. Its five Inbox counts run
-in one MVCC statement with explicit literal status predicates, making the
-released partial indexes eligible. A status condition inside `FILTER` alone
+database statistics, outbox counts and Kafka offsets. Earlier versions made
+released partial indexes eligible with explicit status predicates, but still
+recounted the complete processed history at every snapshot.
+
 The four-range exact history COUNT also exceeded the unchanged 10-second
 snapshot deadline in a 66.5-hour run with about 11.4 million processed rows.
 PostgreSQL was SQL-ready after the injected restart. The preserved non-executing
