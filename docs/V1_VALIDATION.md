@@ -249,3 +249,21 @@ before teardown. Failure capture retains a non-executing snapshot plan within
 its existing budget, without retrying the failed diagnostic. The load profile,
 PostgreSQL stop/start/SQL-readiness budgets, rebalance wait, recovery and final
 identity/effect/operator/integrity audit budgets are unchanged.
+
+### Full Inbox integrity on retained history
+
+The full Inbox verifier must fit its existing 30-second statement timeout
+without sorting and transferring every valid processed row. Exact lifecycle
+totals and conservative candidate selection run in one statement; every
+candidate receives the original Go checks, and all rows remain covered. The
+read-only repeatable-read snapshot, warning/violation counts, finding ordering
+and truncation semantics remain unchanged. This optimization uses source rows,
+not the qualification snapshot counters.
+
+`TestCheckInboxMatchesLegacy` compares the SQL implementation with the previous
+row-by-row verifier, including lifecycle corruption, Unicode whitespace,
+truncation, scan errors, concurrent changes and cancellation. Run it with
+`go test -p=1 -tags=integration -run '^TestCheckInboxMatchesLegacy$' ./integrity`
+on the authorized test server. Retained-history performance also needs short
+cold-cache measurements with the actual full verifier under concurrent load;
+small semantic regressions alone do not establish endurance qualification.

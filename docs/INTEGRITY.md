@@ -39,6 +39,15 @@ checks with regard to database load. Finding details are bounded while summary
 counters cover the complete checked scope. Queries never select event payloads
 or headers.
 
+Inbox verification counts all retained rows and checks all lifecycle and source
+metadata invariants in the same snapshot. One SQL statement computes exact
+totals and returns rows that might produce findings for validation in Go. It
+does not sort and transfer ordinary valid processed history. The candidate
+filter is conservative, including ambiguous whitespace for the original Go
+validation; it is not sampling and does not stop at the finding-detail limit.
+The statement timeout still applies to the complete operation. Large numbers
+of candidate rows or slow storage can still cause an operational failure.
+
 ## Severity
 
 - `violation` means durable state that should be impossible when EmitLane's
