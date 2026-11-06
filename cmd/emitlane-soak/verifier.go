@@ -23,12 +23,20 @@ type expectedEvent struct {
 	verifyPayload bool
 }
 
+type unexpectedKafkaRecord struct {
+	EventID   uuid.UUID `json:"event_id"`
+	Topic     string    `json:"topic"`
+	Partition int32     `json:"partition"`
+	Offset    int64     `json:"offset"`
+}
+
 type verifier struct {
 	mu                 sync.Mutex
 	expected           map[uuid.UUID]expectedEvent
 	observed           map[uuid.UUID]time.Time
 	lastSequence       map[string]int64
 	auditPartitions    map[string]int32
+	unexpectedRecords  []unexpectedKafkaRecord
 	latencies          []float64
 	orderedCommitted   int64
 	unorderedCommitted int64
@@ -90,6 +98,12 @@ func (v *verifier) observeRecord(record *kgo.Record, now time.Time, recordLatenc
 	// Only the independent final scan has a frozen expected set. Validate every
 	// record, including duplicates: a repeated ID must not hide corrupted data.
 	if !recordLatency {
+		meta, expected := v.expected[id]
+		if !expected {
+			v.unexpectedRecords = append(v.unexpectedRecords, unexpectedKafkaRecord{
+				EventID: id, Topic: record.Topic, Partition: record.Partition, Offset: record.Offset,
+			})
+		}
 		key := record.Topic + "/" + header(record, broker.HeaderOrderingKey)
 		if header(record, broker.HeaderOrderingKey) != "" {
 			if v.auditPartitions == nil {
@@ -101,7 +115,7 @@ func (v *verifier) observeRecord(record *kgo.Record, now time.Time, recordLatenc
 			}
 			v.auditPartitions[key] = record.Partition
 		}
-		if meta, ok := v.expected[id]; ok && meta.verifyPayload {
+		if expected && meta.verifyPayload {
 			sequence := ""
 			if meta.ordered {
 				sequence = strconv.FormatInt(meta.sequence, 10)

@@ -34,13 +34,12 @@ type soakEnvironment struct {
 	fixture         map[string]any
 }
 
-func startEnvironment(ctx context.Context, runID string) (*soakEnvironment, error) {
-	labels := map[string]string{"com.emitlane.soak.run_id": runID, "com.emitlane.soak.owned": "true"}
+func startSoakPostgres(ctx context.Context, labels map[string]string) (*tcpostgres.PostgresContainer, error) {
 	postgresPort, err := reservePort()
 	if err != nil {
 		return nil, err
 	}
-	pgContainer, err := tcpostgres.Run(ctx, postgresImage,
+	return tcpostgres.Run(ctx, postgresImage,
 		tcpostgres.WithDatabase("emitlane"), tcpostgres.WithUsername("emitlane"), tcpostgres.WithPassword("emitlane"),
 		tcpostgres.BasicWaitStrategies(), testcontainers.WithLabels(labels),
 		testcontainers.WithCmd("postgres", "-c", "fsync=on", "-c", "synchronous_commit=on", "-c", "full_page_writes=on"),
@@ -52,6 +51,11 @@ func startEnvironment(ctx context.Context, runID string) (*soakEnvironment, erro
 			c.PortBindings[containernetwork.MustParsePort("5432/tcp")] = []containernetwork.PortBinding{{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: strconv.Itoa(postgresPort)}}
 		}),
 	)
+}
+
+func startEnvironment(ctx context.Context, runID string) (*soakEnvironment, error) {
+	labels := map[string]string{"com.emitlane.soak.run_id": runID, "com.emitlane.soak.owned": "true"}
+	pgContainer, err := startSoakPostgres(ctx, labels)
 	if err != nil {
 		return nil, fmt.Errorf("start PostgreSQL: %w", err)
 	}

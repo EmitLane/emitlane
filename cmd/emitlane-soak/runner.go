@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -173,10 +174,21 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		r.faults.infrastructure.Add(1)
 		log.Printf("producer error: %v", producerErr)
 	}
+	var uncertain *uncertainCommit
+	errors.As(producerErr, &uncertain)
 
 	r.setPhase("recovering")
 	recoveryStart := time.Now()
-	recoveryErr := r.recover(ctx)
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, r.cfg.RecoveryTimeout)
+	var reconcileErr error
+	if uncertain != nil {
+		reconcileErr = r.reconcileCommit(recoveryCtx, uncertain)
+		if reconcileErr != nil {
+			r.faults.infrastructure.Add(1)
+		}
+	}
+	recoveryErr := errors.Join(reconcileErr, r.recover(recoveryCtx))
+	cancelRecovery()
 	base.BacklogRecoverySecs = time.Since(recoveryStart).Seconds()
 	if ctx.Err() != nil {
 		return r.finish(base, "aborted", errors.New("stopped by operator during recovery"), 130)
@@ -199,13 +211,24 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		auditErr = fmt.Errorf("final Kafka audit: %w", auditErr)
 		log.Printf("%v", auditErr)
 		recoveryErr = errors.Join(recoveryErr, auditErr)
-	} else {
+	}
+	if audit != nil {
 		auditSnapshot := audit.snapshot()
-		log.Printf("final Kafka audit completed records=%d observed=%d lost=%d regressions=%d skips=%d",
-			auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
-			auditSnapshot.regressions, auditSnapshot.skips)
-		r.verifier.adoptAudit(audit)
-		if err := writeJSON(filepath.Join(runDir, "kafka-audit.json"), map[string]any{"records": auditSnapshot.records, "expected": auditSnapshot.committed, "observed": auditSnapshot.observed, "lost": auditSnapshot.lost, "duplicates": auditSnapshot.duplicates, "regressions": auditSnapshot.regressions, "skips": auditSnapshot.skips, "errors": auditSnapshot.errors, "independent_offset_zero_scan": true}); err != nil {
+		report := map[string]any{
+			"records": auditSnapshot.records, "expected": auditSnapshot.committed, "observed": auditSnapshot.observed,
+			"lost": auditSnapshot.lost, "duplicates": auditSnapshot.duplicates, "regressions": auditSnapshot.regressions,
+			"skips": auditSnapshot.skips, "errors": auditSnapshot.errors, "independent_offset_zero_scan": auditErr == nil,
+			"unexpected_records": audit.unexpectedRecords, "expected_set_reconciled": reconcileErr == nil,
+		}
+		if auditErr == nil {
+			log.Printf("final Kafka audit completed records=%d observed=%d lost=%d regressions=%d skips=%d",
+				auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
+				auditSnapshot.regressions, auditSnapshot.skips)
+			r.verifier.adoptAudit(audit)
+		} else {
+			report["scan_error"] = auditErr.Error()
+		}
+		if err := writeJSON(filepath.Join(runDir, "kafka-audit.json"), report); err != nil {
 			recoveryErr = errors.Join(recoveryErr, err)
 		}
 	}
@@ -395,11 +418,7 @@ func (r *soakRuntime) enqueueOrdered(ctx context.Context, writer *outbox.Writer,
 	if _, err := writer.Enqueue(ctx, tx, outbox.Event{ID: id.String(), Destination: r.orderedTopic, Type: "soak.ordered", Payload: payload, OrderingKey: stream, Sequence: sequence}); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	r.verifier.committed(id, expectedEvent{ordered: true, stream: r.orderedTopic + "/" + stream, sequence: sequence, committedAt: committedAt, topic: r.orderedTopic, key: stream, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
-	return nil
+	return r.commitEvent(ctx, tx, id, expectedEvent{ordered: true, stream: r.orderedTopic + "/" + stream, sequence: sequence, committedAt: committedAt, topic: r.orderedTopic, key: stream, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
 }
 
 func (r *soakRuntime) enqueueUnordered(ctx context.Context, writer *outbox.Writer, payload []byte) error {
@@ -413,10 +432,67 @@ func (r *soakRuntime) enqueueUnordered(ctx context.Context, writer *outbox.Write
 	if _, err := writer.Enqueue(ctx, tx, outbox.Event{ID: id.String(), Destination: r.unorderedTopic, Type: "soak.unordered", Payload: payload}); err != nil {
 		return err
 	}
+	return r.commitEvent(ctx, tx, id, expectedEvent{committedAt: committedAt, topic: r.unorderedTopic, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
+}
+
+type uncertainCommit struct {
+	id         uuid.UUID
+	event      expectedEvent
+	backendPID uint32
+	err        error
+}
+
+func (c *uncertainCommit) Error() string {
+	return fmt.Sprintf("commit event %s: %v", c.id, c.err)
+}
+
+func (c *uncertainCommit) Unwrap() error { return c.err }
+
+func (r *soakRuntime) commitEvent(ctx context.Context, tx pgx.Tx, id uuid.UUID, event expectedEvent) error {
+	// Commit can release or close the pool connection even when it returns an error.
+	pid := tx.Conn().PgConn().PID()
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		if errors.Is(err, pgx.ErrTxCommitRollback) {
+			return err
+		}
+		return &uncertainCommit{id: id, event: event, backendPID: pid, err: err}
 	}
-	r.verifier.committed(id, expectedEvent{committedAt: committedAt, topic: r.unorderedTopic, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
+	r.verifier.committed(id, event)
+	return nil
+}
+
+func (r *soakRuntime) reconcileCommit(ctx context.Context, c *uncertainCommit) error {
+	// A canceled COMMIT can still be running on the server. Wait for the
+	// session to leave its transaction before checking with a fresh snapshot.
+	for {
+		var busy bool
+		err := r.env.pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT FROM pg_stat_activity
+    WHERE pid = $1 AND pid <> pg_backend_pid() AND state IS DISTINCT FROM 'idle'
+)`, int32(c.backendPID)).Scan(&busy)
+		if err != nil {
+			return fmt.Errorf("check PostgreSQL session for event %s: %w", c.id, err)
+		}
+		if !busy {
+			break
+		}
+		if !waitContext(ctx, 250*time.Millisecond) {
+			return fmt.Errorf("wait for PostgreSQL commit of event %s: %w", c.id, ctx.Err())
+		}
+	}
+
+	var exists bool
+	err := r.env.pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT FROM emitlane.outbox_events WHERE id = $1)
+`, c.id).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("reconcile PostgreSQL commit of event %s: %w", c.id, err)
+	}
+	if exists {
+		r.verifier.committed(c.id, c.event)
+	}
+	log.Printf("producer commit reconciled event_id=%s present_in_postgres=%t", c.id, exists)
 	return nil
 }
 
@@ -596,9 +672,7 @@ func (r *soakRuntime) setPaused(ctx context.Context, paused bool) error {
 	return nil
 }
 
-func (r *soakRuntime) recover(ctx context.Context) error {
-	recoveryCtx, cancel := context.WithTimeout(ctx, r.cfg.RecoveryTimeout)
-	defer cancel()
+func (r *soakRuntime) recover(recoveryCtx context.Context) error {
 	if err := r.env.restoreKafka(recoveryCtx); err != nil {
 		r.faults.infrastructure.Add(1)
 		return fmt.Errorf("restore Kafka: %w", err)

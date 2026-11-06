@@ -126,6 +126,33 @@ func TestVerifierAdoptsIndependentKafkaAudit(t *testing.T) {
 	}
 }
 
+func TestIndependentKafkaAuditRecordsUnexpectedOffsets(t *testing.T) {
+	v := newVerifier()
+	expected, unexpected := uuid.New(), uuid.New()
+	// The live observer can see a commit before the producer registers it.
+	committedAt := time.Now()
+	v.observe(record("topic", expected.String(), "", 0), time.Now())
+	v.committed(expected, expectedEvent{topic: "topic", committedAt: committedAt})
+	audit := v.auditClone()
+	audit.observeForAudit(record("topic", expected.String(), "", 0))
+	extra := record("topic", unexpected.String(), "", 0)
+	audit.observeForAudit(extra)
+	extra.Partition, extra.Offset = 1, 7
+	audit.observeForAudit(extra)
+
+	want := []unexpectedKafkaRecord{
+		{EventID: unexpected, Topic: "topic", Partition: 0, Offset: 0},
+		{EventID: unexpected, Topic: "topic", Partition: 1, Offset: 7},
+	}
+	if !reflect.DeepEqual(audit.unexpectedRecords, want) {
+		t.Fatalf("unexpected record details = %+v, want %+v", audit.unexpectedRecords, want)
+	}
+	snap := audit.finalSnapshot()
+	if snap.observed != 1 || snap.lost != 0 || snap.errors != 1 || snap.duplicates != 1 {
+		t.Fatalf("unexpected audit counts: %+v", snap)
+	}
+}
+
 func TestVerifierDetectsSkipAndLostEvents(t *testing.T) {
 	v := newVerifier()
 	now := time.Now()

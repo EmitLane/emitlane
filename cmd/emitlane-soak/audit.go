@@ -71,7 +71,7 @@ func auditKafka(ctx context.Context, brokers, topics []string, live *verifier) (
 		fetches := consumer.PollFetches(ctx)
 		if errs := fetches.Errors(); len(errs) > 0 {
 			first := errs[0]
-			return nil, fmt.Errorf("kafka audit fetch %s[%d]: %w", first.Topic, first.Partition, first.Err)
+			return audit, fmt.Errorf("kafka audit fetch %s[%d]: %w", first.Topic, first.Partition, first.Err)
 		}
 		fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
 			topicTargets, ok := targets[partition.Topic]
