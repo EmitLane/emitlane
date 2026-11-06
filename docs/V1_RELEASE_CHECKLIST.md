@@ -89,10 +89,12 @@ limitations for each item.
   objectives on aged data. Record lifecycle transition plans and costs under
   the chosen retention and churn policy. Sustained 50/s remains unverified.
 - [ ] Complete a production-representative restore/PITR and Kafka offset
-  reconciliation drill. Record the recovery point, recovery time, and
-  reconciliation after resumption. See [Backup and restore](BACKUP_RESTORE.md).
-- [ ] Complete an [independent application pilot](V1_PILOT.md) and record the
-  application owner's sign-off against the agreed operating objectives.
+  reconciliation drill. The [drill procedure](V1_PITR_DRILL.md) is ready for
+  staging. Record the recovery point, recovery time, partition offset
+  read-back and reconciliation after resumption.
+- [ ] Complete the planned [independent application pilot](V1_PILOT.md).
+  Record the selected application, its pre-agreed operating objectives and
+  the application owner's sign-off on the measured results.
 - [ ] Review the final version, changelog, upgrade instructions, support policy
   and Release Please settings. Verify exact-candidate archive contents and
   checksums and Linux/amd64 and Linux/arm64 image builds and startup.
