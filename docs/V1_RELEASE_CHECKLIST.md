@@ -1,99 +1,100 @@
 # v1 release acceptance
 
-This is the acceptance record for a future public v1.0.0, not a declaration that
-v1 has shipped or that all checks have passed. Existing v0.9.1 releases remain
-pre-1.0. Keep this record tied to the final candidate's source, dependencies,
-configuration and built artifacts. Do not change an uncompleted item to pass
-because a test exists or a previous version passed it.
+The qualified base is `d0d19d3662fc78a5318a3ed2732b443391aca725`.
+Public v1.0.0 acceptance is pending. Record the final release SHA, configuration and
+artifact digests before accepting the release. The
+[v1 contract and support matrix](V1_CONTRACT.md) define the initial scope.
 
-## Current evidence
+## Reviewed evidence
 
-The clean candidate `4ad7e12a09b8428699c5456d53c32b6e6342daf5` completed a 24-hour
-managed-consumer qualification on 2026-10-15. The test and supervisor exited zero,
-with unchanged clean source, a final PASS, independent full Kafka and PostgreSQL
-identity/effect/operator audits and an untruncated full integrity report.
+### Managed 72-hour qualification on the base
 
-- 3,978,967 committed events and protected database effects; no missing or
-  substituted audited identities/effects, repeated protected effects, order
-  regressions or stale Inbox leases.
-- 3,979,433 Kafka records, including 466 allowed at-least-once duplicates.
-- 288 full cycles with all eight fault categories each; 288 actual rebalance
-  assignment proofs, maximum 8.352 seconds within the one-minute test budget.
-- Load-end lag 6,291; recovery reached zero in 353.752 seconds within three hours.
-- Integrity had one expected `RELAY_PRESENCE_STALE` warning for a killed helper.
-- Aggregate sampled memory peaked at 6,113,878,016 bytes, mainly file cache;
-  swap peaked at 8,847,360 bytes. No new hard-limit/OOM/kill events were observed.
+Run `v1-soak-72h-20261103-051438-d0d19d3`, completed 2026-11-06. The
+terminal review (`review.json`) reconciled the clean start/end SHA, zero exit
+codes from the test, supervisor and service, and the final harness PASS.
+All 2,682 result files were verified against SHA-256 checksums.
 
-This evidence covers one Linux host, PostgreSQL 16, one Kafka 4.3.1 JVM broker,
-eight Kafka partitions and eight ordered streams. Durable PostgreSQL writes
-were enabled. The measured configuration used four consumer workers, a workload
-pool of eight and a 3 GiB Kafka limit without a CPU ceiling. It also used a
-simulated operator that repaired exhausted poison events every 100 ms. These
-are measured test conditions, not production defaults or hardware requirements.
+- Completed 864 cycles, each with all eight faults, and recovered to zero lag
+  in 32.05 s from a load-end lag of 78.
+- Independent Kafka and PostgreSQL audits matched 12,668,755 event identities
+  and protected effects. No audited events were lost, no protected effects
+  were repeated, and ordering checks passed. Kafka recorded 1,312 permitted
+  duplicate records.
+- Operator audit and counter reconciliation passed. The untruncated full
+  integrity report found zero violations, stale event leases or stale Inbox
+  leases. Its one warning was `RELAY_PRESENCE_STALE` for a killed helper.
+- The fixture ran on Linux/amd64 with durable PostgreSQL 16 and one Kafka
+  4.3.1 broker. It used eight topic partitions, four consumers, a pool of
+  eight, a 3 GiB Kafka memory limit, and a simulated operator polling every
+  100 ms. Memory and storage samples cover this profile, with no new
+  hard-memory-limit or OOM events.
+- At a configured target of 50/s, the generator measured 48.87 successful
+  writes/s across load and 49.78/s in complete producer windows outside faults.
+  The measured rates and recovery time apply to this fixture.
 
-The actual admitted rate, including fault probes, was 46.05 events/second at a
-configured target of 50. Healthy lag grew and later partly drained during load.
-Client MarkProcessed cost rose from 1.20 to 4.68 ms between the first and last
-load hour; MarkRetry rose from 4.09 to 6.62 ms. The test is **not** a sustained
-50 events/second capacity certificate. Protected effects are transaction-local
-PostgreSQL effects; external effects still require idempotency. No end-to-end
-exactly-once guarantee is made.
+### Aged Inbox and short load evidence
 
-Focused, opt-in [validation profiles](V1_VALIDATION.md) cover retained Inbox
-access paths and replicated Kafka faults. Their existence is not a passing result.
+- The integrity fix review (`v1-integrity-fix-review.json`) ties the changed
+  verifier to differential semantics, race and integration checks, and an
+  all-fault rehearsal with full audits. Four full-verifier trials on a logical
+  replay of about 12.72 million Inbox rows with update churn took 7.78–14.40 s.
+  This measures the full verifier. Lifecycle transition costs and production
+  restore remain separate checks.
+- Run `v1-checks-queued50-20261106-102323-172c4a5` (`queued-measurement.json`
+  and `scheduler-trace-targeted.json`) used a test-only descendant of the base.
+  The 15-minute workload used two million synthetic historical events, one
+  million churn updates, and a queue of 100. It offered all 45,000 slots with
+  zero scheduler misses or overflows. The 810 s of complete windows outside
+  faults yielded 40,500 commits at 50/s. Full audits passed. This is a short
+  measurement with tracing enabled.
+- The earlier `b0d19ac` run's four clean-window misses occurred in the
+  generator before enqueue, outside the delivery contract for committed
+  events. The traced run recorded zero misses. Linux timer investigation
+  remains diagnostic work.
 
-## Security toolchain update
+### Historical and inherited evidence
 
-The subsequent candidate check on2026-10-15 stopped at vulnerability scanning:
-Go1.27.0 had nine reachable standard-library vulnerabilities, with fixes reported
-in Go1.27.2. Passing correctness/race tests do not override that failure. The
-candidate now requires Go1.27.2, pins Docker build images to that patch and adds
-a reachable-vulnerability scan before release publication. A fresh passing scan
-and rebuilt artifacts are still required; the old24-hour result is correctness
-evidence, not current security qualification.
+- `4ad7e12` passed the 24-hour managed profile. The earlier 72-hour
+  `2c049cc` attempt remains failed because its full Inbox audit timed out.
+- The focused aged-Inbox, replicated Kafka and standalone rolling steps
+  passed on `299dda4`. The enclosing run
+  `v1-checks-20261015-064142-299dda4` failed at Staticcheck. Later source
+  maps carry forward the completed steps as historical evidence.
+- The standalone multi-Relay release soak and source security scan on
+  `41ae6b7` and artifact checks on `4e211a7` apply to those sources and
+  fixtures. Preserve their source maps when assessing the final SHA.
 
 ## Acceptance items
 
-Every item needs a result, exact candidate identity, configuration, evidence
-location and limitations. A failure must remain visible; do not automatically
-extend or restart a failed endurance run and overwrite its result.
+Record a result, source identity, configuration, evidence location and
+limitations for each item.
 
-- [ ] Freeze the final runtime, dependency and migration source and review all
-  changes since the qualified candidate, including batched ordering lease renewal.
-  Record how merge/release metadata commits map to the qualified runtime source.
-- [ ] Pass formatting, vet, Staticcheck, unit, race, integration, monitoring,
-  vulnerability and build checks on the final candidate. Existing green main CI
-  does not qualify a different local candidate.
-- [ ] Record the separate multi-relay release soak and its independent Kafka and
-  full integrity audits, as required by [Releasing](RELEASING.md).
-- [x] Review the 24-hour managed qualification above for its exact source and profile.
-- [ ] Complete longer-duration memory/storage observations for the chosen final
-  candidate and retention policy. The 24-hour run does not establish 72-hour results.
-- [ ] Diagnose and bound Inbox transition costs with millions of retained rows,
-  realistic update churn and recorded query plans. Preserve lease fencing and
-  transaction rollback behavior in any optimization.
-- [ ] Define and verify supported load, latency/lag and recovery objectives on aged
-  data. State actual admitted rate and resource conditions. Do not invent a safe
-  capacity by scaling down one measured average.
-- [ ] Exercise multi-broker leader/ISR and network failures for the intended Kafka
-  deployment, and database failover if HA is in the supported deployment contract.
-- [ ] Test the explicitly supported infrastructure-version and mixed-version
-  upgrade/rollback matrix. List untested combinations as unqualified.
-- [ ] Perform production-representative backup/restore/PITR and offset reconciliation
-  drills; record the recovery point and time. A small logical restore fixture or
-  readable archive is not this drill.
-- [ ] Complete an independent application pilot, following [Pilot](V1_PILOT.md).
-  A repetition of the synthetic qualification cannot stand in for this evidence.
-- [ ] Approve the v1 source/configuration/wire/migration compatibility boundaries,
-  supported environments and security-fix/support policy, using the prepared
-  [v1 contract](V1_CONTRACT.md). Remove conflicting
-  pre-1.0 claims only when those decisions have actually been made.
-- [ ] Intentionally prepare the v1 version/changelog and release automation settings.
-  The pre-major Release Please configuration does not itself request v1.0.0.
-- [ ] Verify exact-candidate release archives/checksums and Linux amd64/arm64 image
-  contents and startup. Confirm published tags/digests and access after publication.
-
-The remaining infrastructure, restore, longer-duration and independent-pilot items
-continue the v1 qualification boundary recorded in [v0.9](V0_9.md). If the product
-support scope is deliberately narrowed, document the decision and resulting
-limits before accepting a release; do not silently relabel an untested case as passed.
+- [x] Select the qualified base and document the initial contract and support
+  matrix. Confirm the final release notes against these boundaries at sign-off.
+- [x] Review the 72-hour managed qualification, memory/storage observations
+  and final audits for `d0d19d3` and the recorded fixture.
+- [x] Record the aged full-Inbox verifier evidence and the short queued
+  diagnostic with their separate source and workload scopes.
+- [ ] Freeze the final runtime, dependencies, migrations and build inputs.
+  Record how the final merge and release commits map to the qualified source.
+  Review any delta and qualify the affected guarantees.
+- [ ] Pass the required GitHub CI, reachable-vulnerability scan and builds on
+  the final candidate. Record the separate multi-Relay release soak and its
+  independent Kafka and full integrity audits for the selected release source.
+  See [Releasing](RELEASING.md).
+- [ ] Verify the initial deployment matrix, including the production Kafka
+  transport and authentication mode and the v0.9.1 upgrade and binary rollback
+  path. Qualify additional topologies only if they will be listed as supported.
+- [ ] Define and verify workload-specific load, queue age, lag and recovery
+  objectives on aged data. Record lifecycle transition plans and costs under
+  the chosen retention and churn policy. Sustained 50/s remains unverified.
+- [ ] Complete a production-representative restore/PITR and Kafka offset
+  reconciliation drill. Record the recovery point, recovery time, and
+  reconciliation after resumption. See [Backup and restore](BACKUP_RESTORE.md).
+- [ ] Complete an [independent application pilot](V1_PILOT.md) and record the
+  application owner's sign-off against the agreed operating objectives.
+- [ ] Review the final version, changelog, upgrade instructions, support policy
+  and Release Please settings. Verify exact-candidate archive contents and
+  checksums and Linux/amd64 and Linux/arm64 image builds and startup.
+- [ ] Approve publication after the release gates above are closed. After
+  publication, verify the tag, release assets, image digests and access.

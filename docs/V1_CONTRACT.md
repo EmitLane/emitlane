@@ -1,9 +1,9 @@
-# Contract to accept with v1.0.0
+# EmitLane v1.0.0 contract
 
-This document prepares the stable-release contract. It takes effect only with an
-accepted, qualified v1.0.0 release; it does not relabel current v0.9.1 artifacts
-or pending candidate checks as stable. [Acceptance](V1_RELEASE_CHECKLIST.md)
-remains incomplete until its evidence has been reviewed.
+This contract defines the initial v1 support scope for the candidate based on
+`d0d19d3662fc78a5318a3ed2732b443391aca725`. It takes effect with the accepted
+v1.0.0 release. Published v0.x artifacts retain their pre-1.0 policy. See the
+[acceptance record](V1_RELEASE_CHECKLIST.md) for the evidence and open gates.
 
 ## Stable application surfaces
 
@@ -30,45 +30,69 @@ Do not promise compatibility with struct layout, exact prose error messages,
 internal goroutine arrangements, undocumented ordering, or arbitrary custom storage
 implementations that do not implement a requested optional capability.
 
+The wire and operator contract includes documented Kafka metadata, Admin HTTP
+`/v1` routes, fields, statuses and error codes, CLI flags and machine-readable
+output, documented environment settings, and documented metric names, types,
+labels and units. See the [Admin OpenAPI](openapi/admin-v1.yaml) and
+[compatibility policy](COMPATIBILITY.md) for the specific boundaries. Clients
+must tolerate additive fields and headers. Trace propagation uses the documented
+W3C headers. Span names, logs and human-readable error text are diagnostic.
+
 ## Durable and delivery contracts
 
-- The caller owns the Writer transaction. Enqueue success is not transaction commit.
+- The caller commits the business write and the Outbox insert in the same
+  PostgreSQL transaction. A successful enqueue reports the insert.
 - PostgreSQL is authoritative. LISTEN/NOTIFY is a wake-up optimization.
 - Relay delivery is at least once. An ambiguous or acknowledged publish can be
-  redelivered after a crash. Kafka producer idempotence is not a substitute for
-  downstream event identity and deduplication.
+  redelivered with the same event ID after a crash. Claims commit before Kafka
+  I/O. Relay records delivery after broker acknowledgement.
 - Managed business effects and Inbox processed state commit together in one local
-  PostgreSQL transaction. External side effects need application idempotency or
-  another transactional Outbox. No end-to-end exactly-once guarantee is offered.
-- Ordering is opt-in, per documented stream. Gaps/dead expected events block a
-  stream and require visible recovery; no global ordering guarantee is made.
+  PostgreSQL transaction. The managed consumer commits Kafka offsets after that
+  transaction. External side effects need application idempotency or another
+  transactional Outbox.
+- Ordering is opt-in per `(destination, ordering_key)`, subject to the documented
+  publish and handoff bounds. The next sequence waits for durable delivery of
+  the current one. Gaps and dead expected events require visible recovery.
 - Lease tokens/epochs fence stale transitions. Expiry and durable retry recover
   interrupted work; exhausted poison work remains visible for operator repair.
-- Published migration bytes remain immutable. Schema, HTTP API, event schema and
-  Go module versions are distinct. Upgrade order and guarded downgrade behavior
-  remain documented and tested; binary rollback is not schema downgrade.
+- The initial release uses schema 4 and keeps the published migration bytes
+  immutable. Schema, HTTP API, event schema and Go module versions are distinct.
+  The planned binary rollback to v0.9.1 keeps schema 4. Validate the exact
+  binaries before approving that path. A schema downgrade is a separate
+  guarded operation.
 - Kafka and Inbox retention must cover supported redelivery/replay/restore windows.
   Deleting deduplication state shortens that guarantee.
 
-Retain the detailed [compatibility](COMPATIBILITY.md), [delivery](DELIVERY_GUARANTEES.md),
-[ordering](ORDERED_DELIVERY.md) and [consumer](CONSUMER_RELIABILITY.md) contracts.
-Before publication reconcile their pre-1.0 version-policy text with this accepted
-v1 policy; do not leave conflicting current guarantees.
+See the detailed [delivery](DELIVERY_GUARANTEES.md),
+[ordering](ORDERED_DELIVERY.md) and [consumer](CONSUMER_RELIABILITY.md)
+contracts. At-least-once delivery permits Kafka redelivery. Transactional Inbox
+deduplication applies to local database effects. Global ordering and end-to-end
+exactly-once delivery are outside the contract.
 
-## Operational and support boundaries
+## Initial support matrix
 
-The release notes must list the infrastructure versions, topology, architecture
-and security configuration actually qualified for the candidate. Current
-qualification evidence covers PostgreSQL16 and Kafka4.3.1 on Linux/amd64; it does
-not qualify every supported upstream release, every operating system with a
-compiled binary, HA configuration, credential rotation or managed cloud service.
-Unsupported/unqualified combinations must be explicit, not inferred from a
-successful constructor or build.
+The initial runtime scope is Linux/amd64, a single writable PostgreSQL 16
+instance, and one Apache Kafka 4.3.1 KRaft broker. This is the target for
+release acceptance. The 72-hour result covers the isolated fixture below.
+Production deployment requires evidence for the selected security settings,
+recovery procedures and application workload.
 
-Capacity is deployment-dependent. Publish admitted rates, lag/recovery behavior,
-retained-row sizes, resource limits, retry policy and operator response assumptions
-with evidence. No global50events/second promise follows from the24-hour test.
-Latency/lag and recovery objectives belong to a tested operating profile.
+| Surface | Initial v1 scope | Evidence and remaining qualification |
+| --- | --- | --- |
+| Platform and compiler | Linux/amd64 runtime. Go 1.27.2 is the candidate build toolchain and the module's minimum Go version. | The managed 72-hour fixture ran on Linux/amd64 with Go 1.27.2. Other runtime platforms need separate evidence. |
+| PostgreSQL | PostgreSQL 16, one writable instance, schema 4, durable writes. | The 72-hour fixture used `postgres:16-alpine` with `fsync`, `synchronous_commit` and `full_page_writes` enabled. PostgreSQL HA, managed services and other major versions are outside the initial scope. |
+| Kafka | Apache Kafka 4.3.1, one KRaft broker. | The 72-hour fixture exercised actual broker restart with eight topic partitions. Multi-broker deployment, other Kafka versions and managed services are outside the initial scope. |
+| Kafka transport | Production Kafka connections use TLS with broker identity verification. Qualify the exact listener and authentication mode before listing it in the release notes. | The 72-hour fixture used plaintext on loopback. TLS, mTLS, SASL over TLS and credential rotation need separate evidence for any advertised deployment. See [Kafka connection security](KAFKA_SECURITY.md). |
+| Upgrade and rollback | Initial path is v0.9.1 to v1.0.0 and binary rollback to v0.9.1 on schema 4. | Published migrations are unchanged. Earlier standalone Relay rolling tests are historical. Validate the final binaries and the planned application rollout before accepting the path. |
+| Recovery | Operator-led PostgreSQL restore/PITR, with Kafka retention and group offset reconciliation before resumption. | The 72-hour run demonstrated recovery from faults in a live fixture. Production-representative restore and resumption remain open. See [Backup and restore](BACKUP_RESTORE.md). |
+| Release artifacts | Verify the release archives and Linux/amd64 and Linux/arm64 image builds and startup. | Exact-release artifact checks are open. An arm64 image smoke test covers image startup. Runtime support requires its own deployment evidence. |
+
+Publish workload and resource conditions with the results, including admitted
+rate, queue age and lag, recovery time, retained rows and operator response.
+Capacity and recovery objectives apply to the profile that measured them.
+The initial contract sets no universal events-per-second or per-slot guarantee.
+
+## Maintenance policy
 
 For the initial v1 line, security and correctness fixes target the latest supported
 v1 minor release. Older v1 minors may require an upgrade; no LTS/backport window is
@@ -76,5 +100,5 @@ promised. Disclose any exceptional backport explicitly. Keep the private securit
 reporting channel and identify affected versions when reporting a vulnerability.
 This policy does not promise an unstaffed response-time or availability SLA.
 
-The publication decision must confirm that these boundaries, upgrade instructions,
-release notes and package/image metadata agree for the exact candidate.
+The publication decision must confirm that the support matrix, upgrade
+instructions, release notes and package/image metadata agree for the final SHA.
