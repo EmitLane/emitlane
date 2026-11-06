@@ -54,7 +54,7 @@ docs: clarify delivery semantics
 
 ## Local verification
 
-Requires Go 1.27.x. Integration tests require Docker (real PostgreSQL and Kafka
+Requires Go 1.27.2 or newer in the1.27 line (see `go.mod`). Integration tests require Docker (real PostgreSQL and Kafka
 via Testcontainers).
 
 ```bash

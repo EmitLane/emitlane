@@ -558,9 +558,9 @@ type runningManaged struct {
 	stopped atomic.Bool
 }
 
-func launchManaged(t *testing.T, e *env, config managed.Config, store *pgstore.InboxStore, factory managed.SourceFactory, handler managed.Handler) *runningManaged {
+func launchManaged(t *testing.T, e *env, config managed.Config, store *pgstore.InboxStore, factory managed.SourceFactory, handler managed.Handler, options ...managed.Option) *runningManaged {
 	t.Helper()
-	runtime, err := managed.New(config, e.pool, store, factory, handler, managed.WithLogger(e.log))
+	runtime, err := managed.New(config, e.pool, store, factory, handler, append([]managed.Option{managed.WithLogger(e.log)}, options...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

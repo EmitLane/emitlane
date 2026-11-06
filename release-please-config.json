@@ -7,7 +7,7 @@
       "component": "EmitLane",
       "changelog-path": "CHANGELOG.md",
       "initial-version": "0.1.0",
-      "bump-minor-pre-major": true,
+      "bump-minor-pre-major": false,
       "include-component-in-tag": false,
       "include-v-in-tag": true,
       "include-v-in-release-name": true,

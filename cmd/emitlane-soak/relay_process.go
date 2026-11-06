@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -132,6 +133,7 @@ func (g *relayGroup) start() (*relayChild, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	log.Printf("relay started instance=%s pid=%d", instance, cmd.Process.Pid)
 	child := &relayChild{cmd: cmd}
 	g.children = append(g.children, child)
 	return child, nil
@@ -160,7 +162,17 @@ func (g *relayGroup) stopIndex(index int, graceful bool) error {
 	done := make(chan error, 1)
 	go func() { done <- child.cmd.Wait() }()
 	select {
-	case <-done:
+	case err := <-done:
+		if graceful && err != nil {
+			return fmt.Errorf("relay graceful shutdown: %w", err)
+		}
+		if !graceful {
+			exit, ok := err.(*exec.ExitError)
+			if !ok || !exit.ProcessState.Sys().(syscall.WaitStatus).Signaled() || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+				return fmt.Errorf("relay crash did not confirm SIGKILL: %v", err)
+			}
+		}
+		log.Printf("relay stopped pid=%d graceful=%t exit=%v", child.cmd.Process.Pid, graceful, err)
 		return nil
 	case <-time.After(8 * time.Second):
 		_ = child.cmd.Process.Kill()

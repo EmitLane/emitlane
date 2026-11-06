@@ -236,18 +236,75 @@ WHERE table_schema='emitlane'`)
 }
 
 func checkInbox(ctx context.Context, tx pgx.Tx, acc *accumulator, now time.Time, _ Config, _ Mode) error {
+	// Count every row, but sort and transfer only rows that might produce a
+	// finding (or a scan error). Sorting all processed history by event_id::TEXT
+	// spills to disk on large Inboxes; streaming that history also spends the
+	// statement budget on decoding rows that cannot produce findings.
+	//
+	// The filter is deliberately conservative. A string starting with printable
+	// ASCII cannot be TrimSpace-empty. Other prefixes, including all Unicode,
+	// are checked by the unchanged Go predicates below. Do not replace this
+	// with BTRIM: its whitespace rules differ from strings.TrimSpace.
+	// Totals and candidates share one statement, snapshot and statement timeout.
 	rows, err := tx.Query(ctx, `
-SELECT consumer, event_id::TEXT, status, attempts, processed_at,
-       lease_owner, lease_token::TEXT, lease_until,
-       source_topic, source_partition, source_offset, source_timestamp,
-       available_at
-FROM emitlane.inbox_events
-ORDER BY consumer, event_id`)
+WITH totals AS (
+    SELECT COUNT(*) FILTER (WHERE status='pending') AS pending,
+           COUNT(*) FILTER (WHERE status='inflight') AS inflight,
+           COUNT(*) FILTER (WHERE status='retry_wait') AS retry_wait,
+           COUNT(*) FILTER (WHERE status='processed') AS processed,
+           COUNT(*) FILTER (WHERE status='dead') AS dead,
+           COUNT(*) FILTER (WHERE status='inflight' AND lease_until <= $1) AS stale
+    FROM emitlane.inbox_events
+), candidates AS (
+    SELECT TRUE AS has_row, consumer, event_id::TEXT AS event_id, status,
+           attempts, processed_at, lease_owner, lease_token::TEXT AS lease_token,
+           lease_until, source_topic, source_partition, source_offset,
+           source_timestamp, available_at
+    FROM emitlane.inbox_events
+    WHERE consumer IS NULL OR event_id IS NULL OR status IS NULL
+       OR attempts IS NULL OR available_at IS NULL
+       OR NOT isfinite(processed_at) OR NOT isfinite(lease_until)
+       OR NOT isfinite(source_timestamp) OR NOT isfinite(available_at)
+       OR status NOT IN ('pending', 'inflight', 'processed') OR attempts < 0
+       OR (status='inflight' AND (
+           lease_owner IS NULL OR lease_token IS NULL OR lease_until IS NULL
+           OR ascii(lease_owner) NOT BETWEEN 33 AND 126
+           OR lease_until <= $1))
+       OR (status<>'inflight' AND (
+           lease_owner IS NOT NULL OR lease_token IS NOT NULL OR lease_until IS NOT NULL))
+       OR ((status='processed') <> (processed_at IS NOT NULL))
+       OR ((source_topic IS NULL) <> (source_partition IS NULL))
+       OR ((source_topic IS NULL) <> (source_offset IS NULL))
+       OR source_partition < 0 OR source_offset < 0
+       OR (source_topic IS NOT NULL AND ascii(source_topic) NOT BETWEEN 33 AND 126)
+       OR (source_timestamp IS NOT NULL AND (
+           source_topic IS NULL OR source_partition IS NULL OR source_offset IS NULL))
+       OR (status<>'processed' AND (
+           source_topic IS NULL OR source_partition IS NULL OR source_offset IS NULL))
+)
+SELECT COALESCE(c.has_row, FALSE), t.pending, t.inflight, t.retry_wait,
+       t.processed, t.dead, t.stale,
+       c.consumer, c.event_id, c.status, c.attempts, c.processed_at,
+       c.lease_owner, c.lease_token, c.lease_until, c.source_topic,
+       c.source_partition, c.source_offset, c.source_timestamp, c.available_at
+FROM totals AS t LEFT JOIN candidates AS c ON TRUE
+ORDER BY c.consumer, c.event_id`, now)
 	if err != nil {
 		return fmt.Errorf("integrity: inspect Inbox lifecycle: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
+		var hasRow bool
+		summary := &acc.report.Summary
+		if err := rows.Scan(&hasRow, &summary.InboxPending, &summary.InboxInflight,
+			&summary.InboxRetryWait, &summary.InboxProcessed, &summary.InboxDead,
+			&summary.InboxStaleLeases,
+			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("integrity: scan Inbox totals: %w", err)
+		}
+		if !hasRow {
+			continue
+		}
 		var consumer, eventID, status string
 		var attempts int
 		var processedAt, leaseUntil, sourceTimestamp *time.Time
@@ -255,25 +312,19 @@ ORDER BY consumer, event_id`)
 		var sourcePartition *int32
 		var sourceOffset *int64
 		var availableAt time.Time
-		if err := rows.Scan(&consumer, &eventID, &status, &attempts, &processedAt,
+		if err := rows.Scan(nil, nil, nil, nil, nil, nil, nil,
+			&consumer, &eventID, &status, &attempts, &processedAt,
 			&leaseOwner, &leaseToken, &leaseUntil, &sourceTopic, &sourcePartition,
 			&sourceOffset, &sourceTimestamp, &availableAt); err != nil {
 			return fmt.Errorf("integrity: scan Inbox lifecycle: %w", err)
 		}
 		switch status {
-		case "pending":
-			acc.report.Summary.InboxPending++
-		case "inflight":
-			acc.report.Summary.InboxInflight++
+		case "pending", "inflight", "processed":
 		case "retry_wait":
-			acc.report.Summary.InboxRetryWait++
 			acc.add(Finding{Code: CodeInboxRetryWait, Severity: SeverityWarning,
 				Message: "Inbox event is waiting for retry", Consumer: consumer, EventID: eventID,
 				SourcePartition: sourcePartition, Observed: availableAt.UTC()})
-		case "processed":
-			acc.report.Summary.InboxProcessed++
 		case "dead":
-			acc.report.Summary.InboxDead++
 			acc.add(Finding{Code: CodeInboxDeadBlocked, Severity: SeverityWarning,
 				Message: "dead Inbox event blocks its Kafka partition", Consumer: consumer,
 				EventID: eventID, SourcePartition: sourcePartition})
@@ -302,7 +353,6 @@ ORDER BY consumer, event_id`)
 				Message: "Inbox lease fields form an invalid shape", Consumer: consumer, EventID: eventID})
 		}
 		if status == "inflight" && leaseUntil != nil && !leaseUntil.After(now) {
-			acc.report.Summary.InboxStaleLeases++
 			acc.add(Finding{Code: CodeInboxStaleLease, Severity: SeverityWarning,
 				Message: "Inbox lease expired and is reclaimable", Consumer: consumer,
 				EventID: eventID, SourcePartition: sourcePartition, Observed: leaseUntil.UTC()})

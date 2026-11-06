@@ -78,6 +78,11 @@ func reserveLocalPort() (int, error) {
 func startEnv(t *testing.T) *env {
 	t.Helper()
 	sharedOnce.Do(func() {
+		capacity, err := readQualificationCapacity()
+		if err != nil {
+			sharedErr = err
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		postgresPort, err := reserveLocalPort()
@@ -92,6 +97,7 @@ func startEnv(t *testing.T) *env {
 			postgres.WithUsername("emitlane"),
 			postgres.WithPassword("emitlane"),
 			postgres.BasicWaitStrategies(),
+			qualificationPostgresOptions(),
 			testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
 				if hostConfig.PortBindings == nil {
 					hostConfig.PortBindings = containernetwork.PortMap{}
@@ -114,9 +120,13 @@ func startEnv(t *testing.T) *env {
 		}
 		kafkaPortString := strconv.Itoa(kafkaPort)
 		kafkaC, err := testcontainers.Run(ctx,
-			"apache/kafka-native:4.3.1",
+			// Use the JVM image: the native runtime can segfault during repeated
+			// container startup, before the broker reaches its recovery path.
+			"apache/kafka:4.3.1",
+			qualificationKafkaOptions(),
 			testcontainers.WithExposedPorts("9092/tcp"),
 			testcontainers.WithEnv(map[string]string{
+				"KAFKA_HEAP_OPTS":                                "-Xms256m -Xmx512m",
 				"CLUSTER_ID":                                     "MkU3OEVBNTcwNTJENDM2Qk",
 				"KAFKA_NODE_ID":                                  "1",
 				"KAFKA_PROCESS_ROLES":                            "broker,controller",
@@ -139,6 +149,8 @@ func startEnv(t *testing.T) *env {
 					HostIP:   netip.MustParseAddr("127.0.0.1"),
 					HostPort: kafkaPortString,
 				}}
+				hostConfig.Memory = capacity.KafkaMemoryMiB * 1024 * 1024
+				hostConfig.NanoCPUs = capacity.KafkaCPUs * 1_000_000_000
 			}),
 			testcontainers.WithWaitStrategy(
 				wait.ForListeningPort("9092/tcp").WithStartupTimeout(2*time.Minute),
@@ -218,6 +230,11 @@ func startEnv(t *testing.T) *env {
 	reset := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Migration tests may intentionally leave an older released schema. Row
+		// cleanup alone does not restore managed Inbox columns for the next test.
+		if err := pgstore.MigrateUp(ctx, shared.pool); err != nil {
+			return fmt.Errorf("restore current integration schema: %w", err)
+		}
 		_, err := shared.pool.Exec(ctx, `
 TRUNCATE public.business_orders, public.business_payments, emitlane.outbox_events,
          emitlane.inbox_events, emitlane.admin_audit_log, emitlane.relay_instances,
@@ -239,6 +256,37 @@ SET lease_owner = NULL, lease_until = NULL, epoch = 0,
 		}
 	})
 	return shared
+}
+
+func TestSharedIntegrationEnvironmentRestoresCurrentSchema(t *testing.T) {
+	t.Run("released schema", func(t *testing.T) {
+		e := startEnv(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+			t.Fatal(err)
+		}
+		version, err := pgstore.SchemaVersion(ctx, e.pool)
+		if err != nil || version != 3 {
+			t.Fatalf("released schema=%d: %v", version, err)
+		}
+		var managedColumn bool
+		if err := e.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='emitlane' AND table_name='inbox_events' AND column_name='status')`).Scan(&managedColumn); err != nil || managedColumn {
+			t.Fatalf("expected released Inbox without managed status: present=%t error=%v", managedColumn, err)
+		}
+	})
+	t.Run("next fixture", func(t *testing.T) {
+		e := startEnv(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		version, err := pgstore.SchemaVersion(ctx, e.pool)
+		if err != nil || version != pgstore.CurrentSchemaVersion() {
+			t.Fatalf("current schema was not restored: version=%d error=%v", version, err)
+		}
+		if _, err := e.pool.Exec(ctx, `SELECT status,lease_owner,lease_token FROM emitlane.inbox_events LIMIT 0`); err != nil {
+			t.Fatalf("managed Inbox unavailable after preceding downgrade: %v", err)
+		}
+	})
 }
 
 func (e *env) publisher(t *testing.T) *kafkapub.Publisher {

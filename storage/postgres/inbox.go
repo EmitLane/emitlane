@@ -119,10 +119,13 @@ func (s *InboxStore) Renew(ctx context.Context, consumer string, eventID, token 
 	if lease <= 0 {
 		return fmt.Errorf("%w: positive lease duration is required", inbox.ErrInvalidRequest)
 	}
-	tag, err := s.pool.Exec(ctx, `
-UPDATE emitlane.inbox_events
+	tag, err := s.pool.Exec(ctx, inboxLeaseTarget+`
+UPDATE emitlane.inbox_events AS event
 SET lease_until=NOW()+($4*INTERVAL '1 millisecond'), updated_at=NOW()
-WHERE consumer=$1 AND event_id=$2 AND status='inflight' AND lease_token=$3`,
+FROM target
+WHERE event.consumer=target.consumer AND event.event_id=target.event_id
+  AND target.status='inflight' AND target.lease_token=$3
+  AND event.lease_token=$3`,
 		consumer, eventID, token, intervalMS(lease))
 	if err != nil {
 		return fmt.Errorf("inbox renew: %w", err)
@@ -134,12 +137,15 @@ func (s *InboxStore) MarkProcessed(ctx context.Context, tx pgx.Tx, consumer stri
 	if tx == nil {
 		return fmt.Errorf("%w: transaction is required", inbox.ErrInvalidRequest)
 	}
-	tag, err := tx.Exec(ctx, `
-UPDATE emitlane.inbox_events
+	tag, err := tx.Exec(ctx, inboxLeaseTarget+`
+UPDATE emitlane.inbox_events AS event
 SET status='processed', processed_at=NOW(), available_at=NOW(),
     lease_owner=NULL, lease_token=NULL, lease_until=NULL,
     last_error=NULL, updated_at=NOW()
-WHERE consumer=$1 AND event_id=$2 AND status='inflight' AND lease_token=$3`,
+FROM target
+WHERE event.consumer=target.consumer AND event.event_id=target.event_id
+  AND target.status='inflight' AND target.lease_token=$3
+  AND event.lease_token=$3`,
 		consumer, eventID, token)
 	if err != nil {
 		return fmt.Errorf("inbox mark processed: %w", err)
@@ -151,13 +157,16 @@ func (s *InboxStore) MarkRetry(ctx context.Context, consumer string, eventID, to
 	if delay < 0 {
 		return fmt.Errorf("%w: retry delay must not be negative", inbox.ErrInvalidRequest)
 	}
-	tag, err := s.pool.Exec(ctx, `
-UPDATE emitlane.inbox_events
+	tag, err := s.pool.Exec(ctx, inboxLeaseTarget+`
+UPDATE emitlane.inbox_events AS event
 SET status='retry_wait', processed_at=NULL,
     available_at=NOW()+($4*INTERVAL '1 millisecond'),
     lease_owner=NULL, lease_token=NULL, lease_until=NULL,
     last_error=$5, updated_at=NOW()
-WHERE consumer=$1 AND event_id=$2 AND status='inflight' AND lease_token=$3`,
+FROM target
+WHERE event.consumer=target.consumer AND event.event_id=target.event_id
+  AND target.status='inflight' AND target.lease_token=$3
+  AND event.lease_token=$3`,
 		consumer, eventID, token, intervalMS(delay), sanitizeError(lastError))
 	if err != nil {
 		return fmt.Errorf("inbox mark retry: %w", err)
@@ -166,12 +175,15 @@ WHERE consumer=$1 AND event_id=$2 AND status='inflight' AND lease_token=$3`,
 }
 
 func (s *InboxStore) MarkDead(ctx context.Context, consumer string, eventID, token uuid.UUID, lastError string) error {
-	tag, err := s.pool.Exec(ctx, `
-UPDATE emitlane.inbox_events
+	tag, err := s.pool.Exec(ctx, inboxLeaseTarget+`
+UPDATE emitlane.inbox_events AS event
 SET status='dead', processed_at=NULL, available_at=NOW(),
     lease_owner=NULL, lease_token=NULL, lease_until=NULL,
     last_error=$4, updated_at=NOW()
-WHERE consumer=$1 AND event_id=$2 AND status='inflight' AND lease_token=$3`,
+FROM target
+WHERE event.consumer=target.consumer AND event.event_id=target.event_id
+  AND target.status='inflight' AND target.lease_token=$3
+  AND event.lease_token=$3`,
 		consumer, eventID, token, sanitizeError(lastError))
 	if err != nil {
 		return fmt.Errorf("inbox mark dead: %w", err)
@@ -244,6 +256,19 @@ INSERT INTO emitlane.admin_audit_log (
 	}
 	return nil
 }
+
+// Lock by logical identity before inspecting lifecycle state. Keeping the status
+// predicate on the materialized row prevents an identity transition from scanning
+// the partial lease-expiry index as retained rows and dead index entries grow.
+// No physical tuple ID escapes the statement; the winning token is checked under
+// the row lock and again by the UPDATE. Both operations use the same transaction.
+const inboxLeaseTarget = `
+WITH target AS MATERIALIZED (
+    SELECT consumer, event_id, status, lease_token
+    FROM emitlane.inbox_events
+    WHERE consumer=$1 AND event_id=$2
+    FOR UPDATE
+)`
 
 func requireInboxLease(rows int64) error {
 	if rows != 1 {

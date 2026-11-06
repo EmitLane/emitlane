@@ -1,5 +1,66 @@
 # Upgrading EmitLane
 
+## v0.9.1 to v1.0.0
+
+Use this path after the exact release artifacts and deployment have been
+accepted. The [v1 support matrix](V1_CONTRACT.md#initial-support-matrix) defines
+the initial scope. Both releases use schema 4 and the published migration
+files are unchanged. SDK applications and source builds require Go 1.27.2
+or later as declared in `go.mod`. The module path stays
+`github.com/emitlane/emitlane`.
+
+### Before rollout
+
+1. Pin the accepted v1 binary checksum or image digest. Keep the exact tested
+   v0.9.1 binary and previous application build available for rollback. Record
+   both deployment configurations and artifact identities.
+2. Verify schema 4 with `emitlane doctor` and preserve the migration history.
+   A database already on schema 4 can roll forward with a binary change.
+   Investigate incompatible history before deploying.
+3. Verify the current backup and restore procedure. Capture Outbox and Inbox
+   state, ordered stream cursors and ownership, consumer offsets and lag, and
+   representative committed event IDs. Record the rollout and rollback limits
+   for queue age, lag, and error rate. See [backup and restore](BACKUP_RESTORE.md).
+4. Check Kafka TLS, broker hostname verification, authentication and topic and
+   group permissions for the accepted configuration. Retain the group IDs,
+   logical Inbox consumer names, event ID rules, partition topology and Kafka
+   and Inbox retention used by the deployment.
+
+### Roll out and verify
+
+1. Roll the standalone Relays one at a time on the qualified mixed-version path.
+   Send SIGTERM and let the instance drain within its configured shutdown
+   window. Start the replacement, run `emitlane doctor`, and check `/readyz`,
+   `emitlane relay status` and `emitlane ordering partitions`. Confirm
+   ownership and backlog progress before replacing the next instance.
+2. Rebuild SDK applications with the pinned v1 module. For each managed
+   consumer deployment, stop old group members before starting the replacement
+   deployment. Use the same group ID and logical Inbox consumer name. Confirm
+   assignment, protected effects, and offset progress before moving to the
+   next deployment.
+3. Verify an ordered and an unordered business transaction end to end.
+   Compare event IDs and effects with the baseline, observe queue age, retry
+   and dead states and per-partition lag, and check full integrity within the
+   planned window. Capture any findings and the resulting state. See
+   [operations](OPERATIONS.md).
+
+### Binary rollback
+
+Stop the rollout on incompatible schema, persistent readiness or authorization
+failure, lost ordering progress, repeated protected effects, or lag outside the
+agreed limits. Preserve logs, durable state and offsets. If correctness is
+uncertain, fence the affected writers and consumers while reconciling evidence.
+
+Return the affected processes to the tested v0.9.1 binary or previous
+application build. Drain Relay instances during the reverse rollout and stop
+the managed consumers being replaced before starting the previous ones.
+Keep schema 4, Kafka group offsets and Inbox state. Verify readiness,
+ownership, progress and protected effects after the rollback.
+
+A binary rollback changes deployed artifacts. If recovery requires restoring
+PostgreSQL, follow the separate [PITR and Kafka offset procedure](V1_PITR_DRILL.md)
+and reconcile before resuming processing.
+
 ## v0.7 to v0.8 development: compatibility guards
 
 v0.8 retains schema 4 and existing public function signatures. Deploying this

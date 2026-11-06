@@ -144,6 +144,7 @@ type Result struct {
 	LatencyP95Millis      float64            `json:"latency_p95_ms"`
 	LatencyP99Millis      float64            `json:"latency_p99_ms"`
 	BacklogRecoverySecs   float64            `json:"backlog_recovery_seconds"`
+	FaultCounts           map[string]int64   `json:"fault_counts"`
 	FaultDurations        map[string]float64 `json:"fault_durations_seconds"`
 	Diagnostics           []Diagnostic       `json:"diagnostics,omitempty"`
 	ExitCode              int                `json:"exit_code"`
@@ -201,6 +202,14 @@ func newRunID(now time.Time, seed uint64) string {
 }
 
 func verdict(r Result) error {
+	if r.Profile == "release" && r.Configuration.Faults {
+		for _, name := range []string{"relay_graceful_restart", "relay_crash_takeover", "kafka_outage", "cluster_pause", "relay_membership_change", "kafka_restart"} {
+			if r.FaultCounts[name] == 0 {
+				return fmt.Errorf("missing completed release fault: %s", name)
+			}
+		}
+	}
+
 	checks := []struct {
 		name  string
 		value int64

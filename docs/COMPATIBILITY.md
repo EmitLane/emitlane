@@ -1,8 +1,9 @@
 # Compatibility contract
 
-This document records the application-facing boundaries reviewed for v0.8.
-EmitLane remains **pre-1.0**. This is a compatibility baseline, not a promise
-that every exported identifier or every pair of releases is interchangeable.
+This document describes the application-facing boundaries established for v0.8
+and carried forward into the [v1.0.0 contract](V1_CONTRACT.md). The v0.x policy
+applies to published v0.x artifacts. The v1 policy and its support matrix take
+effect with the accepted v1.0.0 release.
 
 ## Version policy
 
@@ -14,6 +15,9 @@ that every exported identifier or every pair of releases is interchangeable.
 - Minor releases may change pre-1.0 APIs, defaults, configuration, or schemas.
   Such changes need explicit release notes and upgrade instructions. Additive
   changes are preferred where they preserve the delivery guarantees.
+- Within v1, minor and patch releases preserve documented application-facing
+  source, wire and operator contracts. Use the v1 support matrix to determine
+  which deployment and upgrade combinations are covered.
 - A database schema version, the Admin API `/v1` prefix, event
   `SchemaVersion`, and the Go module version are separate version domains.
   Event schema versions belong to the application, not to EmitLane releases.

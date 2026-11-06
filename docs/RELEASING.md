@@ -1,14 +1,12 @@
 # Releasing EmitLane
 
-Release Please prepares versions and changelogs; GoReleaser publishes artifacts.
-Automation is the default, and a normal merge to `main` never publishes a release.
+Release Please prepares versions and changelogs. GoReleaser publishes artifacts.
+With publication enabled, merging a generated Release PR can trigger publication.
 
 ## Current readiness gate
 
-Do not enable releases until a maintainer is ready to publish. The product now
-has a Go module, `cmd/emitlane`, Dockerfile, integration tests, and failure-injection
-coverage. A tag is still a human decision: do not create `v0.1.0` just because
-the code exists.
+Keep the publication gate closed until a maintainer has reviewed and approved
+the release evidence for the exact candidate.
 
 Release automation is guarded by the repository Actions variable
 `RELEASES_ENABLED`. It must equal the lowercase string `true`; an absent variable
@@ -51,6 +49,19 @@ recovery, and Outbox-to-Inbox composition. Final managed Inbox pending,
 inflight, retry_wait, dead, and stale-lease counts must all be zero; lost input,
 duplicate protected database effects, partition-order regressions, and
 integrity violations must be zero. Kafka redeliveries remain allowed.
+
+## Public v1 acceptance
+
+Before selecting a stable v1.0.0 tag, complete the candidate-specific
+[acceptance record](V1_RELEASE_CHECKLIST.md), including the documented remaining
+infrastructure, restore, endurance and independent application-pilot evidence.
+Use the [final candidate plan](V1_FINAL_SHA_CHECKS.md) for exact-SHA CI, scans,
+the standalone multi-Relay soak and unpublished artifact verification.
+The [v1 Release PR draft](V1_RELEASE_PR.md) describes the preparation-only
+path and the publication approval boundary for the first stable release.
+A passing managed qualification is one input to that record. It does not qualify
+a different runtime commit, a sustained capacity target, or untested deployment
+topologies. Keep explicit failures and untested items visible.
 
 ## Normal release flow
 
@@ -110,19 +121,13 @@ v1.0.0
 v0.2.0-rc.1
 ```
 
-Do not use names such as `release-1`, `prod`, `latest`, `stable`, or date tags for
-Go module releases. The initial tracked Release Please version is `0.0.0`; that is
-automation state, not a published release. The current coherent vertical slice
-targets `v0.1.0`. Use an alpha, beta, or release-candidate suffix only when
-intentionally publishing a prerelease for early feedback. Do not tag an
-initialization or CI-only commit.
-
-While the project is on `v0.x`, Release Please is configured to turn a breaking
-commit into the next minor version instead of accidentally declaring `v1.0.0`.
-Before an intentional stable v1 release, maintainers must deliberately revisit
-that pre-major setting and review the chosen stable version. Generated changelog
-sections retain user-visible features, fixes, performance, documentation,
-dependencies, and other changes; routine CI, test, and chore commits are omitted.
+Use an alpha, beta or release-candidate suffix for an intentional prerelease.
+The first stable release uses the one-time `Release-As: 1.0.0` trailer and
+a reviewed Release Please manifest update. Later releases use the ordinary
+version policy.
+Generated changelogs retain user-visible features, fixes, performance,
+documentation, dependencies and other changes. Routine CI, test and chore
+commits are omitted.
 
 Versions `v0` and `v1` use the current module path:
 
