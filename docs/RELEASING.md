@@ -57,6 +57,8 @@ integrity violations must be zero. Kafka redeliveries remain allowed.
 Before selecting a stable v1.0.0 tag, complete the candidate-specific
 [acceptance record](V1_RELEASE_CHECKLIST.md), including the documented remaining
 infrastructure, restore, endurance and independent application-pilot evidence.
+Use the [final candidate plan](V1_FINAL_SHA_CHECKS.md) for exact-SHA CI, scans,
+the standalone multi-Relay soak and unpublished artifact verification.
 A passing managed qualification is one input to that record. It does not qualify
 a different runtime commit, a sustained capacity target, or untested deployment
 topologies. Keep explicit failures and untested items visible.

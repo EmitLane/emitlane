@@ -78,10 +78,13 @@ limitations for each item.
 - [ ] Freeze the final runtime, dependencies, migrations and build inputs.
   Record how the final merge and release commits map to the qualified source.
   Review any delta and qualify the affected guarantees.
-- [ ] Pass the required GitHub CI, reachable-vulnerability scan and builds on
-  the final candidate. Record the separate multi-Relay release soak and its
-  independent Kafka and full integrity audits for the selected release source.
-  See [Releasing](RELEASING.md).
+- [ ] Pass the required GitHub CI and release container smoke on the final
+  checkout SHA. Record the runs and actual toolchains. See the
+  [final candidate plan](V1_FINAL_SHA_CHECKS.md).
+- [ ] Complete source and packaged-binary vulnerability scans on the final
+  candidate. Record scanner inputs, findings and binary checksums.
+- [ ] Pass the standalone multi-Relay release soak on the selected release
+  SHA, with independent Kafka and full integrity audits.
 - [ ] Verify the initial deployment matrix, including the production Kafka
   transport and authentication mode and the v0.9.1 upgrade and binary rollback
   path. Qualify additional topologies only if they will be listed as supported.
@@ -95,8 +98,10 @@ limitations for each item.
 - [ ] Complete the planned [independent application pilot](V1_PILOT.md).
   Record the selected application, its pre-agreed operating objectives and
   the application owner's sign-off on the measured results.
+- [ ] Verify the final candidate's private GoReleaser snapshot, archive
+  contents and checksums and Linux/amd64 and Linux/arm64 image builds and
+  smoke results. Record the supported runtime startup result.
 - [ ] Review the final version, changelog, upgrade instructions, support policy
-  and Release Please settings. Verify exact-candidate archive contents and
-  checksums and Linux/amd64 and Linux/arm64 image builds and startup.
+  and Release Please settings.
 - [ ] Approve publication after the release gates above are closed. After
   publication, verify the tag, release assets, image digests and access.
