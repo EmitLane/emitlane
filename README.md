@@ -260,14 +260,16 @@ project's core invariants; see [CONTRIBUTING.md](CONTRIBUTING.md) and
 
 ## Project status
 
-[v0.8.0](https://github.com/EmitLane/emitlane/releases/tag/v0.8.0) is the released
-baseline, including Kafka TLS/SASL, compatibility contracts, migration safety and
+[v0.8.0](https://github.com/EmitLane/emitlane/releases/tag/v0.8.0) established the
+baseline for Kafka TLS/SASL, compatibility contracts, migration safety and
 unambiguous event metadata. [v0.9 development](docs/V0_9.md) focuses on operational
 readiness: tested monitoring configuration, snapshot freshness and stronger
-backup/restore and managed consumer audit evidence, without a new schema migration. Managed processing is duplicate-safe
-for PostgreSQL effects committed with the Inbox transition, while Kafka and the
-relay remain at least once. As a pre-1.0 project, APIs and operational defaults
-may still change during the `v0.x` series.
+backup/restore and managed consumer audit evidence, without a new schema
+migration. Managed processing is duplicate-safe for PostgreSQL effects
+committed with the Inbox transition, while Kafka and the Relay remain at least
+once. Published `v0.x` versions follow the pre-1.0 compatibility policy.
+The [v1 contract](docs/V1_CONTRACT.md) defines the stable interfaces and
+initial support scope for `v1.0.0`.
 
 ## License
 

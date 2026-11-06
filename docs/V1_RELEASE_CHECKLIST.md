@@ -102,6 +102,7 @@ limitations for each item.
   contents and checksums and Linux/amd64 and Linux/arm64 image builds and
   smoke results. Record the supported runtime startup result.
 - [ ] Review the final version, changelog, upgrade instructions, support policy
-  and Release Please settings.
+  and Release Please settings. The [v1 Release PR draft](V1_RELEASE_PR.md)
+  is prepared for review.
 - [ ] Approve publication after the release gates above are closed. After
   publication, verify the tag, release assets, image digests and access.

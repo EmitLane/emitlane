@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+Planned first stable release, v1.0.0. See the [v1 contract and support matrix](docs/V1_CONTRACT.md)
+and the [release acceptance record](docs/V1_RELEASE_CHECKLIST.md).
+
+### Compatibility and upgrade
+
+* Adopt a stable policy for the documented Go SDK, Kafka metadata, Admin API
+  `/v1`, CLI and configuration, and documented metrics. Relay delivery remains
+  at least once. Inbox deduplication covers effects committed with the Inbox
+  transition in the same PostgreSQL transaction.
+* Keep the Go module path `github.com/emitlane/emitlane` and PostgreSQL schema 4.
+  The minimum Go toolchain for SDK consumers and source builds is now 1.27.2.
+  See [upgrade and binary rollback from v0.9.1](docs/UPGRADING.md#v091-to-v100).
+
+### Performance and reliability
+
+* Batch ordered partition lease renewals while retaining owner and epoch fences.
+* Target Inbox lifecycle transitions by the locked event identity while retaining
+  lease-token checks and transactional rollback.
+* Count all retained Inbox rows during full integrity verification. Sort and
+  decode only rows that may require a finding. Large installations should
+  continue to budget full scans.
+
+### Qualification scope
+
+* The `d0d19d3` base completed the 72-hour managed workload, recovery and final
+  Kafka and PostgreSQL audits on the recorded single-broker Linux/amd64 fixture.
+  Release approval and the supported production deployment are tracked
+  separately in the acceptance record.
+
 ## [0.9.1](https://github.com/EmitLane/emitlane/compare/v0.9.0...v0.9.1) (2026-10-05)
 
 
