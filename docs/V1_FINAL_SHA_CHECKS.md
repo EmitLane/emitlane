@@ -6,6 +6,11 @@ the final SHA and the execution environment have been agreed.
 
 ## 1. Freeze the candidate
 
+Use at least Go 1.27.3 for candidate builds and SDK consumers; Go 1.27.2
+contains the reachable crypto/x509 issue
+[GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). A passing scan built with
+a different patch does not qualify packaged binaries.
+
 Record the full candidate commit `S` and its diff from the qualified base
 `d0d19d3662fc78a5318a3ed2732b443391aca725`. Identify the runtime, dependencies,
 migrations, test harnesses, workflow definitions and artifact inputs in that

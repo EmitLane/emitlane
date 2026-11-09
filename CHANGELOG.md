@@ -15,7 +15,7 @@ and the [release acceptance record](docs/V1_RELEASE_CHECKLIST.md).
   for the pending-unordered claim index; published migrations 1–4 are unchanged.
   Installation needs a write maintenance window. Returning to v0.9.1 requires
   removing only migration 5 before starting the previous binaries.
-  The minimum Go toolchain for SDK consumers and source builds is now 1.27.2.
+  The minimum Go toolchain for SDK consumers and source builds is now 1.27.3.
   See [upgrade and binary rollback from v0.9.1](docs/UPGRADING.md#v091-to-v100).
 
 ### Performance and reliability

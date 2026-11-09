@@ -6,7 +6,7 @@ Use this path after the exact release artifacts and deployment have been
 accepted. The [v1 support matrix](V1_CONTRACT.md#initial-support-matrix) defines
 the initial scope. v0.9.1 uses schema 4; this candidate requires schema 5.
 Migration 5 adds a partial pending-unordered index. Published migrations 1–4
-are unchanged. SDK applications and source builds require Go 1.27.2
+are unchanged. SDK applications and source builds require Go 1.27.3
 or later as declared in `go.mod`. The module path stays
 `github.com/emitlane/emitlane`.
 

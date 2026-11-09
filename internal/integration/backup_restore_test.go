@@ -25,7 +25,7 @@ func TestLogicalBackupRestorePreservesDeliveryState(t *testing.T) {
 	defer cancel()
 	source := migrationCompatibilityDatabase(t, ctx, e)
 	restored := migrationCompatibilityDatabase(t, ctx, e)
-	migrationCompatibilityPrefix(t, ctx, source, 4)
+	migrationCompatibilityPrefix(t, ctx, source, pgstore.CurrentSchemaVersion())
 	migrationCompatibilitySeed(t, ctx, source)
 	if _, err := source.Exec(ctx, `CREATE TABLE public.restore_orders (id UUID PRIMARY KEY, amount INTEGER NOT NULL)`); err != nil {
 		t.Fatal(err)

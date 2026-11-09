@@ -108,6 +108,34 @@ multi-Relay recovery, sustained input-rate, PITR or independent-pilot PASS is
 inferred from these focused runs. A previous failed migration attempt stays
 recorded separately; it is not relabelled as a pass.
 
+
+### First frozen candidate checks — 9 November 2026
+
+Candidate `6bf52ea` was pushed to draft PR #39. Its PR CI run
+[42597636552](https://github.com/EmitLane/emitlane/actions/runs/42597636552)
+and exact-SHA CI run
+[42598601811](https://github.com/EmitLane/emitlane/actions/runs/42598601811)
+passed eight jobs but failed `TestLogicalBackupRestorePreservesDeliveryState`.
+The test seeded schema 4, then incorrectly treated the new schema-5 migration
+as a repeated no-op. The correction seeds the current schema before the
+logical backup and keeps its full retained-state equality assertions. Separate
+upgrade/rollback tests retain the schema-4-to-5 coverage.
+
+The exact-SHA private packaging run
+[42598303321](https://github.com/EmitLane/emitlane/actions/runs/42598303321)
+built its snapshot archives and local images but stopped at the source scan:
+Go 1.27.2 was affected by
+[GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). Go 1.27.3 contains the
+fix. The candidate module minimum and Docker build compiler now require
+1.27.3. The ordinary CI scanner used 1.27.3; its success did not cover the
+1.27.2 snapshot binaries. No completed packaged-binary or runtime-startup
+verification is inferred from the failed packaging job.
+
+The one authorized four-Relay hour remains pinned to `6bf52ea` and its
+Go 1.27.2 binary. It must finish and be reviewed under that identity. A later
+candidate or changed build compiler needs its own final-SHA qualification;
+this source update does not authorize another server soak.
+
 - [x] Select the qualified base and document the initial contract and support
   matrix. Confirm the final release notes against these boundaries at sign-off.
 - [x] Review the 72-hour managed qualification, memory/storage observations

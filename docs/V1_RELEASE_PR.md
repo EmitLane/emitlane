@@ -11,7 +11,7 @@ wire and operator interfaces. The module path remains
 `github.com/emitlane/emitlane`. Schema migration 5 adds the partial
 pending-unordered claim index, preserving published migrations 1–4.
 [Release notes](../CHANGELOG.md) cover fenced lease renewal and
-Inbox changes, full integrity verification and the Go 1.27.2 minimum.
+Inbox changes, full integrity verification and the Go 1.27.3 minimum.
 The [upgrade guide](UPGRADING.md#v091-to-v100) covers maintenance installation,
 updating managed consumers and removing only migration 5 before rolling back
 to v0.9.1 on schema 4. This path still requires candidate qualification.

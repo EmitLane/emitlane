@@ -80,7 +80,7 @@ recovery procedures and application workload.
 
 | Surface | Initial v1 scope | Evidence and remaining qualification |
 | --- | --- | --- |
-| Platform and compiler | Linux/amd64 runtime. Go 1.27.2 is the candidate build toolchain and the module's minimum Go version. | The managed 72-hour fixture ran on Linux/amd64 with Go 1.27.2. Other runtime platforms need separate evidence. |
+| Platform and compiler | Linux/amd64 runtime. Go 1.27.3 is the candidate build toolchain and the module's minimum Go version. | The managed 72-hour fixture ran on Linux/amd64 with Go 1.27.2. Other runtime platforms need separate evidence. |
 | PostgreSQL | PostgreSQL 16, one writable instance, schema 5, durable writes. | The 72-hour fixture used schema 4 with `postgres:16-alpine`, `fsync`, `synchronous_commit` and `full_page_writes` enabled. Migration 5 and its query plans require candidate qualification. PostgreSQL HA, managed services and other major versions are outside the initial scope. |
 | Kafka | Apache Kafka 4.3.1, one KRaft broker. | The 72-hour fixture exercised actual broker restart with eight topic partitions. Multi-broker deployment, other Kafka versions and managed services are outside the initial scope. |
 | Kafka transport | Production Kafka connections use TLS with broker identity verification. Qualify the exact listener and authentication mode before listing it in the release notes. | The 72-hour fixture used plaintext on loopback. TLS, mTLS, SASL over TLS and credential rotation need separate evidence for any advertised deployment. See [Kafka connection security](KAFKA_SECURITY.md). |
