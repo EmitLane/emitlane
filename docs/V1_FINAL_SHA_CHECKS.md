@@ -11,6 +11,19 @@ contains the reachable crypto/x509 issue
 [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). A passing scan built with
 a different patch does not qualify packaged binaries.
 
+The Docker build inputs are pinned to official multi-platform indexes resolved
+9 November 2026. Main and ecommerce source builds share the Go 1.27.3 pin.
+
+- Runtime: `gcr.io/distroless/static-debian12:nonroot`, index `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab`.
+  linux/amd64 resolves to `sha256:52dcfbabb7457ea47c82f6e13af8c8a4a1d9f7b0145142b3ecab20f2b888411d`.
+  linux/arm64 resolves to `sha256:06c3c14b7fa252d9f4285242d2d665ce3b51f74b02d3c529464f220f2912aecb`.
+- Source builder: `golang:1.27.3-bookworm`, index `sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0`.
+  linux/amd64 resolves to `sha256:025eefc1e8dbe63201734a72aaa0a55d7a077f2d8410432f8ae2f3e939f32871`.
+  linux/arm64 resolves to `sha256:bc8d7053145982971b2c25138ba67b259d9a2df739a7a715d45ca6368c25c1e0`.
+
+Record the resolved inputs with each check; compiler or base-image changes
+require qualification of the affected artifacts.
+
 Record the full candidate commit `S` and its diff from the qualified base
 `d0d19d3662fc78a5318a3ed2732b443391aca725`. Identify the runtime, dependencies,
 migrations, test harnesses, workflow definitions and artifact inputs in that
