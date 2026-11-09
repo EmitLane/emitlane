@@ -14,7 +14,7 @@ import (
 	"github.com/emitlane/emitlane/migrations"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // ErrSchemaIncompatible identifies an unknown or inconsistent migration history.
 // Do not repair migration records automatically in response to this error.
@@ -269,6 +269,7 @@ func downMigrationName(version int) (string, error) {
 func RequiredIndexes() []string {
 	return []string{
 		"outbox_pending_idx",
+		"outbox_unordered_pending_idx",
 		"outbox_inflight_lease_idx",
 		"outbox_dead_idx",
 		"outbox_created_idx",

@@ -104,32 +104,42 @@ func (e *env) restoreKafka(t *testing.T) {
 
 func (e *env) stopPostgres(t *testing.T) {
 	t.Helper()
+	started := time.Now()
+	recordQualificationPostgresRestart(t, e, "before_stop", started, nil, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	timeout := 10 * time.Second
 	if err := e.postgres.Stop(ctx, &timeout); err != nil {
+		recordQualificationPostgresRestart(t, e, "stop_failed", started, err, true)
 		t.Fatalf("stop PostgreSQL: %v", err)
 	}
+	recordQualificationPostgresRestart(t, e, "after_stop", started, nil, true)
 }
 
 func (e *env) startPostgres(t *testing.T) {
 	t.Helper()
+	started := time.Now()
+	recordQualificationPostgresRestart(t, e, "before_start", started, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := e.postgres.Start(ctx); err != nil {
+		recordQualificationPostgresRestart(t, e, "start_failed", started, err, true)
 		t.Fatalf("start PostgreSQL: %v", err)
 	}
 	deadline := time.Now().Add(60 * time.Second)
+	recordQualificationPostgresRestart(t, e, "sql_readiness_begin", started, nil, false)
 	var last error
 	for time.Now().Before(deadline) {
 		pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		last = e.pool.Ping(pingCtx)
 		pingCancel()
 		if last == nil {
+			recordQualificationPostgresRestart(t, e, "sql_ready", started, nil, false)
 			return
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	recordQualificationPostgresRestart(t, e, "sql_readiness_failed", started, last, true)
 	t.Fatalf("PostgreSQL did not become ready: %v", last)
 }
 

@@ -31,6 +31,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
 
       - name: Detect extended test suites

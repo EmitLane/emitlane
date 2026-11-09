@@ -37,13 +37,22 @@ queue until every relay refreshes. Per-process counters can be summed when a
 combined rate is useful. Consumer lag observations can repeat across group
 members; inspect their maximum, not their sum.
 
-`emitlane_stats_last_success_timestamp_seconds` advances after a complete
-successful Relay database snapshot. Zero means none has completed yet.
+`emitlane_stats_last_success_timestamp_seconds` records the source capture time
+after a complete successful Relay statistics read. Zero means none has completed
+yet. PostgreSQL automatic polling reuses exact queue/stream counts for a
+30-second window per Store; a cache hit keeps that timestamp. A slow refresh
+also remains visible in snapshot age. Pause, presence and partition ownership
+are read live on each poll. Explicit operator statistics reads bypass the cache.
 `emitlane_stats_interval_seconds` is zero when collection is disabled or the
 registry has no Relay. `emitlane_stats_snapshot_failures_total` counts failed
 reads. Failures preserve the last successful gauges and timestamp; they do not
 reset the queue to zero. A fresh scrape therefore does not prove a fresh database
 snapshot. Keep clocks synchronized when comparing Unix timestamps.
+
+The configured statistics interval remains the polling interval, not a promise
+that every poll recounts the database. Existing stale-snapshot alerts retain
+their thresholds. Do not use gauges or cache age to declare recovery complete:
+recovery and final audits use independent exact database reconciliation.
 
 Inbox `consumer_dead_events` is a runtime observation, not a durable total.
 Use `emitlane inbox stats` for durable state. Missing consumer series means

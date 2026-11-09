@@ -95,6 +95,11 @@ Acquisition and release are short PostgreSQL transactions. Every ownership
 change increments `epoch`. Delivery does not require a long-lived database
 transaction and no transaction is held during Kafka I/O.
 
+Within reconciliation, valid leases belonging to the caller are renewed in
+one SQL statement using their locked partition IDs, owners and epochs. A
+partial renewal rolls back the reconciliation; renewal does not change epochs
+or handoff barriers and does not extend another owner's leases.
+
 Schema v3 marks Relay presence rows as ordering-capable. A database claim guard
 prevents a v0.2 Relay from moving an ordered row to inflight, even though its
 released query does not know about ordering columns. This keeps an ordered row
@@ -192,6 +197,15 @@ An ordered row is eligible only when it is pending and due, or safely
 recoverable inflight; its sequence equals `ordering_streams.next_sequence`; its
 partition is owned by the Relay at a valid epoch; the handoff barrier has
 passed; and durable pause is false. Claim commits before broker I/O.
+
+Claim first resolves the exact `next_sequence` event for each stream in an
+owned, eligible partition, using the existing unique sequence index. A
+materialized set of head IDs separates those lookups from batch selection, so
+future sequences do not expand the candidate set. The locking query rechecks
+event eligibility and ownership, orders by `available_at`, `created_at`, then
+event ID, and applies `FOR UPDATE SKIP LOCKED` before filling the batch limit.
+Heads are neither locked nor batch-limited during discovery. The existing
+begin-attempt and result-transition fences remain authoritative.
 
 The Relay adds authoritative broker headers:
 

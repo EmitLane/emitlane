@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -35,13 +38,15 @@ type faultStats struct {
 	infrastructure atomic.Int64
 	mu             sync.Mutex
 	durations      map[string]float64
+	counts         map[string]int64
 }
 
 func newFaultStats() *faultStats {
-	return &faultStats{durations: map[string]float64{
+	return &faultStats{counts: map[string]int64{}, durations: map[string]float64{
 		"relay_graceful_restart":  0,
 		"relay_crash_takeover":    0,
 		"kafka_outage":            0,
+		"kafka_restart":           0,
 		"cluster_pause":           0,
 		"relay_membership_change": 0,
 	}}
@@ -111,6 +116,10 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		return r.finish(base, "failed", fmt.Errorf("initialize local infrastructure: %w", err), 1)
 	}
 	r.env = env
+	if err := writeJSON(filepath.Join(runDir, "fixture.json"), env.fixture); err != nil {
+		env.close(context.Background())
+		return r.finish(base, "failed", err, 1)
+	}
 	base.PostgreSQLVersion = env.postgresVersion
 	_ = writeJSON(filepath.Join(runDir, "metadata.json"), base)
 	cleanupCtx := context.Background()
@@ -165,10 +174,21 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		r.faults.infrastructure.Add(1)
 		log.Printf("producer error: %v", producerErr)
 	}
+	var uncertain *uncertainCommit
+	errors.As(producerErr, &uncertain)
 
 	r.setPhase("recovering")
 	recoveryStart := time.Now()
-	recoveryErr := r.recover(ctx)
+	recoveryCtx, cancelRecovery := context.WithTimeout(ctx, r.cfg.RecoveryTimeout)
+	var reconcileErr error
+	if uncertain != nil {
+		reconcileErr = r.reconcileCommit(recoveryCtx, uncertain)
+		if reconcileErr != nil {
+			r.faults.infrastructure.Add(1)
+		}
+	}
+	recoveryErr := errors.Join(reconcileErr, r.recover(recoveryCtx))
+	cancelRecovery()
 	base.BacklogRecoverySecs = time.Since(recoveryStart).Seconds()
 	if ctx.Err() != nil {
 		return r.finish(base, "aborted", errors.New("stopped by operator during recovery"), 130)
@@ -191,12 +211,26 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		auditErr = fmt.Errorf("final Kafka audit: %w", auditErr)
 		log.Printf("%v", auditErr)
 		recoveryErr = errors.Join(recoveryErr, auditErr)
-	} else {
+	}
+	if audit != nil {
 		auditSnapshot := audit.snapshot()
-		log.Printf("final Kafka audit completed records=%d observed=%d lost=%d regressions=%d skips=%d",
-			auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
-			auditSnapshot.regressions, auditSnapshot.skips)
-		r.verifier.adoptAudit(audit)
+		report := map[string]any{
+			"records": auditSnapshot.records, "expected": auditSnapshot.committed, "observed": auditSnapshot.observed,
+			"lost": auditSnapshot.lost, "duplicates": auditSnapshot.duplicates, "regressions": auditSnapshot.regressions,
+			"skips": auditSnapshot.skips, "errors": auditSnapshot.errors, "independent_offset_zero_scan": auditErr == nil,
+			"unexpected_records": audit.unexpectedRecords, "expected_set_reconciled": reconcileErr == nil,
+		}
+		if auditErr == nil {
+			log.Printf("final Kafka audit completed records=%d observed=%d lost=%d regressions=%d skips=%d",
+				auditSnapshot.records, auditSnapshot.observed, auditSnapshot.lost,
+				auditSnapshot.regressions, auditSnapshot.skips)
+			r.verifier.adoptAudit(audit)
+		} else {
+			report["scan_error"] = auditErr.Error()
+		}
+		if err := writeJSON(filepath.Join(runDir, "kafka-audit.json"), report); err != nil {
+			recoveryErr = errors.Join(recoveryErr, err)
+		}
 	}
 	integrityConfig := integritycheck.DefaultConfig()
 	integrityConfig.StatementTimeout = 2 * time.Minute
@@ -208,6 +242,12 @@ func runSoak(ctx context.Context, runDir string, cfg Config) error {
 		integrityReport, integrityErr = integrityVerifier.Check(integrityCtx, integritycheck.ModeFull)
 		cancelIntegrity()
 		if integrityErr == nil {
+			if err := writeJSON(filepath.Join(runDir, "integrity.json"), integrityReport); err != nil {
+				recoveryErr = errors.Join(recoveryErr, err)
+			}
+			if integrityReport.FindingsTruncated || !integrityReport.Clean {
+				recoveryErr = errors.Join(recoveryErr, fmt.Errorf("incomplete or unclean full integrity report"))
+			}
 			r.integrityViolations = integrityReport.Summary.Violations
 			r.integrityWarnings = integrityReport.Summary.Warnings
 			log.Printf("final full integrity check completed violations=%d warnings=%d",
@@ -378,11 +418,7 @@ func (r *soakRuntime) enqueueOrdered(ctx context.Context, writer *outbox.Writer,
 	if _, err := writer.Enqueue(ctx, tx, outbox.Event{ID: id.String(), Destination: r.orderedTopic, Type: "soak.ordered", Payload: payload, OrderingKey: stream, Sequence: sequence}); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	r.verifier.committed(id, expectedEvent{ordered: true, stream: r.orderedTopic + "/" + stream, sequence: sequence, committedAt: committedAt})
-	return nil
+	return r.commitEvent(ctx, tx, id, expectedEvent{ordered: true, stream: r.orderedTopic + "/" + stream, sequence: sequence, committedAt: committedAt, topic: r.orderedTopic, key: stream, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
 }
 
 func (r *soakRuntime) enqueueUnordered(ctx context.Context, writer *outbox.Writer, payload []byte) error {
@@ -396,10 +432,67 @@ func (r *soakRuntime) enqueueUnordered(ctx context.Context, writer *outbox.Write
 	if _, err := writer.Enqueue(ctx, tx, outbox.Event{ID: id.String(), Destination: r.unorderedTopic, Type: "soak.unordered", Payload: payload}); err != nil {
 		return err
 	}
+	return r.commitEvent(ctx, tx, id, expectedEvent{committedAt: committedAt, topic: r.unorderedTopic, payloadSHA: sha256.Sum256(payload), verifyPayload: true})
+}
+
+type uncertainCommit struct {
+	id         uuid.UUID
+	event      expectedEvent
+	backendPID uint32
+	err        error
+}
+
+func (c *uncertainCommit) Error() string {
+	return fmt.Sprintf("commit event %s: %v", c.id, c.err)
+}
+
+func (c *uncertainCommit) Unwrap() error { return c.err }
+
+func (r *soakRuntime) commitEvent(ctx context.Context, tx pgx.Tx, id uuid.UUID, event expectedEvent) error {
+	// Commit can release or close the pool connection even when it returns an error.
+	pid := tx.Conn().PgConn().PID()
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		if errors.Is(err, pgx.ErrTxCommitRollback) {
+			return err
+		}
+		return &uncertainCommit{id: id, event: event, backendPID: pid, err: err}
 	}
-	r.verifier.committed(id, expectedEvent{committedAt: committedAt})
+	r.verifier.committed(id, event)
+	return nil
+}
+
+func (r *soakRuntime) reconcileCommit(ctx context.Context, c *uncertainCommit) error {
+	// A canceled COMMIT can still be running on the server. Wait for the
+	// session to leave its transaction before checking with a fresh snapshot.
+	for {
+		var busy bool
+		err := r.env.pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT FROM pg_stat_activity
+    WHERE pid = $1 AND pid <> pg_backend_pid() AND state IS DISTINCT FROM 'idle'
+)`, int32(c.backendPID)).Scan(&busy)
+		if err != nil {
+			return fmt.Errorf("check PostgreSQL session for event %s: %w", c.id, err)
+		}
+		if !busy {
+			break
+		}
+		if !waitContext(ctx, 250*time.Millisecond) {
+			return fmt.Errorf("wait for PostgreSQL commit of event %s: %w", c.id, ctx.Err())
+		}
+	}
+
+	var exists bool
+	err := r.env.pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT FROM emitlane.outbox_events WHERE id = $1)
+`, c.id).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("reconcile PostgreSQL commit of event %s: %w", c.id, err)
+	}
+	if exists {
+		r.verifier.committed(c.id, c.event)
+	}
+	log.Printf("producer commit reconciled event_id=%s present_in_postgres=%t", c.id, exists)
 	return nil
 }
 
@@ -413,7 +506,7 @@ func (r *soakRuntime) injectFaults(ctx context.Context, random *mathrand.Rand) {
 	}
 	timer := time.NewTimer(min(5*time.Second, interval))
 	defer timer.Stop()
-	order := random.Perm(5)
+	order := random.Perm(6)
 	index := 0
 	for {
 		select {
@@ -424,10 +517,11 @@ func (r *soakRuntime) injectFaults(ctx context.Context, random *mathrand.Rand) {
 		fault := order[index%len(order)]
 		index++
 		if index%len(order) == 0 {
-			order = random.Perm(5)
+			order = random.Perm(6)
 		}
 		started := time.Now()
 		beforeEpoch := r.partitionEpoch(ctx)
+		beforeOwners := r.partitionOwners(ctx)
 		var err error
 		switch fault {
 		case 0:
@@ -473,6 +567,11 @@ func (r *soakRuntime) injectFaults(ctx context.Context, random *mathrand.Rand) {
 				}
 			}
 			r.faults.addDuration("cluster_pause", time.Since(started))
+		case 5:
+			d := time.Duration(1+random.IntN(3)) * time.Second
+			log.Printf("fault=kafka_restart duration=%s begin", d)
+			err = r.env.kafkaRestart(ctx, d)
+			r.faults.addDuration("kafka_restart", time.Since(started))
 		case 4:
 			log.Print("fault=relay_membership_change begin")
 			_, err = r.relays.start()
@@ -503,6 +602,24 @@ func (r *soakRuntime) injectFaults(ctx context.Context, random *mathrand.Rand) {
 				r.faults.handoffs.Add(delta / 2)
 			}
 		}
+		names := []string{"relay_graceful_restart", "relay_crash_takeover", "kafka_outage", "cluster_pause", "relay_membership_change", "kafka_restart"}
+		proof := map[string]any{"kind": "fault_end", "fault": names[fault], "time": time.Now().UTC(), "started_at": started.UTC(), "elapsed_seconds": time.Since(started).Seconds(), "completed": err == nil && ctx.Err() == nil, "owners_before": beforeOwners, "owners_after": r.partitionOwners(ctx), "epoch_before": beforeEpoch, "epoch_after": r.partitionEpoch(ctx), "relay_count": r.relays.count()}
+		if err != nil {
+			proof["error"] = err.Error()
+		}
+		if proof["completed"] == true {
+			r.faults.mu.Lock()
+			r.faults.counts[names[fault]]++
+			r.faults.mu.Unlock()
+		}
+		f, writeErr := os.OpenFile(filepath.Join(r.runDir, "faults.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if writeErr == nil {
+			writeErr = json.NewEncoder(f).Encode(proof)
+			_ = f.Close()
+		}
+		if writeErr != nil {
+			r.faults.infrastructure.Add(1)
+		}
 		timer.Reset(interval)
 	}
 }
@@ -515,14 +632,47 @@ func (r *soakRuntime) partitionEpoch(ctx context.Context) int64 {
 	return epoch
 }
 
-func (r *soakRuntime) setPaused(ctx context.Context, paused bool) error {
-	_, err := r.env.store.SetPaused(ctx, paused, adminapi.Mutation{Actor: "local-soak", Reason: "seeded local soak fault"})
-	return err
+func (r *soakRuntime) partitionOwners(ctx context.Context) map[string]int64 {
+	out := map[string]int64{}
+	rows, err := r.env.pool.Query(ctx, "SELECT lease_owner,COUNT(*) FROM emitlane.ordering_partitions WHERE lease_owner IS NOT NULL GROUP BY lease_owner")
+	if err != nil {
+		if ctx.Err() == nil {
+			r.faults.infrastructure.Add(1)
+		}
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var owner string
+		var count int64
+		if err := rows.Scan(&owner, &count); err != nil {
+			r.faults.infrastructure.Add(1)
+			return out
+		}
+		out[owner] = count
+	}
+	if rows.Err() != nil && ctx.Err() == nil {
+		r.faults.infrastructure.Add(1)
+	}
+	return out
 }
 
-func (r *soakRuntime) recover(ctx context.Context) error {
-	recoveryCtx, cancel := context.WithTimeout(ctx, r.cfg.RecoveryTimeout)
-	defer cancel()
+func (r *soakRuntime) setPaused(ctx context.Context, paused bool) error {
+	_, err := r.env.store.SetPaused(ctx, paused, adminapi.Mutation{Actor: "local-soak", Reason: "seeded local soak fault"})
+	if err != nil {
+		return err
+	}
+	actual, err := r.env.store.RelayPaused(ctx)
+	if err != nil {
+		return err
+	}
+	if actual != paused {
+		return fmt.Errorf("cluster pause state differs")
+	}
+	return nil
+}
+
+func (r *soakRuntime) recover(recoveryCtx context.Context) error {
 	if err := r.env.restoreKafka(recoveryCtx); err != nil {
 		r.faults.infrastructure.Add(1)
 		return fmt.Errorf("restore Kafka: %w", err)
@@ -547,11 +697,23 @@ func (r *soakRuntime) recover(ctx context.Context) error {
 	defer ticker.Stop()
 	var last string
 	for {
-		pending, inflight, dead, blocked, gaps, err := queueState(recoveryCtx, r.env.pool)
-		if err == nil {
-			last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d", pending, inflight, dead, blocked, gaps)
-			if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 {
-				return nil
+		unfinished, err := queueHasUnfinishedWork(recoveryCtx, r.env.pool)
+		if err != nil {
+			last = fmt.Sprintf("queue probe failed: %v", err)
+		} else if unfinished {
+			last = "unfinished queue or ordered gap remains"
+		} else {
+			// The probe only avoids repeated counts while work remains. It is
+			// never the completion proof: retain the exact reconciliation and
+			// use the same recovery context/deadline for both queries.
+			pending, inflight, dead, blocked, gaps, err := queueState(recoveryCtx, r.env.pool)
+			if err != nil {
+				last = fmt.Sprintf("queue reconciliation failed: %v", err)
+			} else {
+				last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d", pending, inflight, dead, blocked, gaps)
+				if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 {
+					return nil
+				}
 			}
 		}
 		select {
@@ -560,6 +722,45 @@ func (r *soakRuntime) recover(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// queueHasUnfinishedWork is the recovery wait predicate, not an audit count.
+// Materialized, ordered one-row probes expose the existing status/created/id
+// index path even when planner statistics still describe a large backlog.
+// Stream gaps can outlive active work and must also prevent the empty fast path.
+type queueProbeSource interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func queueHasUnfinishedWork(ctx context.Context, source queueProbeSource) (bool, error) {
+	var unfinished bool
+	err := source.QueryRow(ctx, `
+WITH pending AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='pending'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+), inflight AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='inflight'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+), dead AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='dead'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+)
+SELECT CASE WHEN
+ EXISTS (SELECT 1 FROM pending)
+ OR EXISTS (SELECT 1 FROM inflight)
+ OR EXISTS (SELECT 1 FROM dead)
+THEN TRUE ELSE EXISTS (
+ SELECT 1 FROM emitlane.ordering_streams s
+ WHERE NOT EXISTS (
+  SELECT 1 FROM emitlane.outbox_events e
+  WHERE e.destination=s.destination AND e.ordering_key=s.ordering_key
+    AND e.ordering_key IS NOT NULL AND e.ordering_sequence=s.next_sequence)
+ AND EXISTS (
+  SELECT 1 FROM emitlane.outbox_events e
+  WHERE e.destination=s.destination AND e.ordering_key=s.ordering_key
+    AND e.ordering_key IS NOT NULL AND e.ordering_sequence>s.next_sequence)
+) END`).Scan(&unfinished)
+	return unfinished, err
 }
 
 func queueState(ctx context.Context, pool *pgxpool.Pool) (pending, inflight, dead, blocked, gaps int64, err error) {
@@ -603,8 +804,20 @@ func (r *soakRuntime) finish(result Result, requestedState string, prior error, 
 	result.PauseCycles = r.faults.pauses.Load()
 	result.InfrastructureErrors = r.faults.infrastructure.Load() + snap.errors
 	result.FaultDurations = r.faults.durationSnapshot()
+	r.faults.mu.Lock()
+	result.FaultCounts = make(map[string]int64)
+	for k, v := range r.faults.counts {
+		result.FaultCounts[k] = v
+	}
+	r.faults.mu.Unlock()
 	if r.env != nil && r.env.pool != nil {
-		result.PendingFinal, result.InflightFinal, result.DeadFinal, result.BlockedStreamsFinal, result.GapStreamsFinal, _ = queueState(context.Background(), r.env.pool)
+		finalCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		var err error
+		result.PendingFinal, result.InflightFinal, result.DeadFinal, result.BlockedStreamsFinal, result.GapStreamsFinal, err = queueState(finalCtx, r.env.pool)
+		cancel()
+		if err != nil {
+			prior = errors.Join(prior, fmt.Errorf("final database state: %w", err))
+		}
 	}
 	result.PartitionAcquisitions = r.faults.acquisitions.Load()
 	result.PartitionHandoffs = r.faults.handoffs.Load()

@@ -1,5 +1,82 @@
 # Upgrading EmitLane
 
+## v0.9.1 to v1.0.0
+
+Use this path after the exact release artifacts and deployment have been
+accepted. The [v1 support matrix](V1_CONTRACT.md#initial-support-matrix) defines
+the initial scope. v0.9.1 uses schema 4; this candidate requires schema 5.
+Migration 5 adds a partial pending-unordered index. Published migrations 1–4
+are unchanged. SDK applications and source builds require Go 1.27.3
+or later as declared in `go.mod`. The module path stays
+`github.com/emitlane/emitlane`.
+
+### Before rollout
+
+1. Pin the accepted v1 binary checksum or image digest. Keep the exact tested
+   v0.9.1 binary and previous application build available for rollback. Record
+   both deployment configurations and artifact identities.
+2. Verify the schema-4 baseline with the previous version's `emitlane doctor`
+   and preserve the migration history. Plan a write maintenance window for
+   migration 5, which builds its index inside a transaction and blocks table
+   writes. The CLI's existing two-minute migration deadline is unchanged;
+   an incomplete build leaves the transaction unapplied. Qualify installation
+   time on representative retained data before scheduling the rollout.
+   Investigate incompatible history before deploying.
+3. Verify the current backup and restore procedure. Capture Outbox and Inbox
+   state, ordered stream cursors and ownership, consumer offsets and lag, and
+   representative committed event IDs. Record the rollout and rollback limits
+   for queue age, lag, and error rate. See [backup and restore](BACKUP_RESTORE.md).
+4. Check Kafka TLS, broker hostname verification, authentication and topic and
+   group permissions for the accepted configuration. Retain the group IDs,
+   logical Inbox consumer names, event ID rules, partition topology and Kafka
+   and Inbox retention used by the deployment.
+
+### Roll out and verify
+
+1. Stop producers, Relays and managed consumers for the agreed maintenance
+   window. Send SIGTERM and let each process drain within its configured
+   shutdown window. Apply `emitlane migrate up` with the candidate binary,
+   then require schema 5 and all indexes with the candidate's `emitlane doctor`.
+   Start the new Relays, check `/readyz`, `emitlane relay status` and
+   `emitlane ordering partitions`, and confirm ownership and backlog progress.
+   This schema change requires qualification of the maintenance rollout;
+   earlier schema-4 rolling evidence does not validate a mixed-version path.
+2. Rebuild SDK applications with the pinned v1 module. For each managed
+   consumer deployment, stop old group members before starting the replacement
+   deployment. Use the same group ID and logical Inbox consumer name. Confirm
+   assignment, protected effects, and offset progress before moving to the
+   next deployment.
+3. Verify an ordered and an unordered business transaction end to end.
+   Compare event IDs and effects with the baseline, observe queue age, retry
+   and dead states and per-partition lag, and check full integrity within the
+   planned window. Capture any findings and the resulting state. See
+   [operations](OPERATIONS.md).
+
+### Binary rollback
+
+Stop the rollout on incompatible schema, persistent readiness or authorization
+failure, lost ordering progress, repeated protected effects, or lag outside the
+agreed limits. Preserve logs, durable state and offsets. If correctness is
+uncertain, fence the affected writers and consumers while reconciling evidence.
+
+Stop candidate producers, Relays and managed consumers. With the candidate
+binary, verify schema 5 and run `emitlane migrate down` exactly once to remove
+only migration 5's index and return to schema 4. Verify the version before
+continuing; never run additional down migrations as part of this rollback.
+v0.9.1 binaries reject schema 5, so starting them before this step is not a
+binary-only rollback path. If migration 5 never committed, verify schema 4
+and omit the down command.
+
+Return the processes to the tested v0.9.1 binary or previous application
+build. Keep Kafka group offsets, Inbox state, Outbox rows, cursors and leases.
+Use the previous version's doctor and verify readiness, ownership, progress
+and protected effects after the rollback. Qualify this exact schema-5-to-4
+procedure with the selected artifacts before accepting the release.
+
+A binary rollback changes deployed artifacts. If recovery requires restoring
+PostgreSQL, follow the separate [PITR and Kafka offset procedure](V1_PITR_DRILL.md)
+and reconcile before resuming processing.
+
 ## v0.7 to v0.8 development: compatibility guards
 
 v0.8 retains schema 4 and existing public function signatures. Deploying this

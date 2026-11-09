@@ -28,7 +28,7 @@ func TestMigrationRejectsIncompatibleHistoryWithoutMutation(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"future-version", `INSERT INTO emitlane.schema_migrations (version) VALUES (5)`},
+		{"future-version", `INSERT INTO emitlane.schema_migrations (version) VALUES (6)`},
 		{"missing-version", `DELETE FROM emitlane.schema_migrations WHERE version = 2`},
 		{"zero-version", `INSERT INTO emitlane.schema_migrations (version) VALUES (0)`},
 	} {
@@ -36,7 +36,7 @@ func TestMigrationRejectsIncompatibleHistoryWithoutMutation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			pool := migrationCompatibilityDatabase(t, ctx, e)
-			migrationCompatibilityPrefix(t, ctx, pool, 4)
+			migrationCompatibilityPrefix(t, ctx, pool, pgstore.CurrentSchemaVersion())
 			migrationCompatibilitySeed(t, ctx, pool)
 			if _, err := pool.Exec(ctx, tc.sql); err != nil {
 				t.Fatal(err)
@@ -63,7 +63,7 @@ func TestMigrationRejectsIncompatibleHistoryWithoutMutation(t *testing.T) {
 
 func TestMigrationUpgradePreservesReleasedSchemaData(t *testing.T) {
 	e := startEnv(t)
-	for prefix := 1; prefix <= 4; prefix++ {
+	for prefix := 1; prefix <= pgstore.CurrentSchemaVersion(); prefix++ {
 		t.Run(fmt.Sprintf("schema-%d", prefix), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -329,6 +329,26 @@ func migrationCompatibilityDatabase(t *testing.T, ctx context.Context, e *env) *
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// Target historical schemas explicitly as new additive migrations are added.
+func migrationCompatibilityDownTo(t *testing.T, ctx context.Context, pool *pgxpool.Pool, target int) {
+	t.Helper()
+	for {
+		version, err := pgstore.SchemaVersion(ctx, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version == target {
+			return
+		}
+		if version < target {
+			t.Fatalf("cannot downgrade schema %d to higher version %d", version, target)
+		}
+		if err := pgstore.MigrateDown(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // Reconstruct a released schema from the published SQL, independently of the

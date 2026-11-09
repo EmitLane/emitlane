@@ -82,7 +82,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          check-latest: true
           cache: ${{ hashFiles('go.sum') != '' }}
+
+      - name: Check release source for reachable vulnerabilities
+        run: |
+          go version
+          GOBIN="$RUNNER_TEMP/emitlane-release-tools" go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          "$RUNNER_TEMP/emitlane-release-tools/govulncheck" ./...
 
       - name: Verify releasable CLI
         run: |

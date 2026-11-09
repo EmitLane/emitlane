@@ -160,3 +160,89 @@ FROM emitlane.ordering_partitions WHERE partition_id=0`).Scan(&owner, &handoffDe
 		t.Fatalf("owner=%q handoff delay=%.2fms want >= %.2fms", owner, handoffDelayMS, minimum)
 	}
 }
+
+func TestOrderingPartitionRenewalPreservesPeerLeasesAndEpochs(t *testing.T) {
+	e := startEnv(t)
+	owners := []string{"renew-a", "renew-b"}
+	for _, owner := range owners {
+		registerOrderingRelay(t, e, owner)
+	}
+	for _, owner := range owners {
+		reconcileOrdering(t, e, owner)
+	}
+	before := reconcileOrdering(t, e, owners[0])
+	after, err := e.store.ReconcileOrderingPartitions(context.Background(), owners[0],
+		testPartitionLease, 2*testPublishWindow, testPresenceStale, testOrderingSafety)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, peers := 0, 0
+	for i, got := range after {
+		prior := before[i]
+		if got.PartitionID != prior.PartitionID || got.LeaseOwner != prior.LeaseOwner || got.Epoch != prior.Epoch ||
+			!sameOrderingTime(got.HandoffNotBefore, prior.HandoffNotBefore) {
+			t.Fatalf("renewal changed ownership/fence: before=%+v after=%+v", prior, got)
+		}
+		var until time.Time
+		var publishMS int64
+		if err := e.pool.QueryRow(context.Background(), `SELECT lease_until, publish_timeout_ms
+ FROM emitlane.ordering_partitions WHERE partition_id=$1`, got.PartitionID).Scan(&until, &publishMS); err != nil {
+			t.Fatal(err)
+		}
+		if got.LeaseOwner == owners[0] {
+			owned++
+			if !until.After(*prior.LeaseUntil) || !until.Equal(*got.LeaseUntil) || publishMS != 200 {
+				t.Fatalf("owned lease not durably renewed: partition=%d until=%s publish_ms=%d", got.PartitionID, until, publishMS)
+			}
+		} else {
+			peers++
+			if !until.Equal(*prior.LeaseUntil) || !sameOrderingTime(got.LeaseUntil, prior.LeaseUntil) || publishMS != 100 {
+				t.Fatalf("peer lease changed: partition=%d until=%s publish_ms=%d", got.PartitionID, until, publishMS)
+			}
+		}
+	}
+	if owned == 0 || peers == 0 || owned+peers != internalordering.PartitionCount {
+		t.Fatalf("incomplete lease coverage: owned=%d peers=%d", owned, peers)
+	}
+}
+
+func sameOrderingTime(a, b *time.Time) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && a.Equal(*b))
+}
+
+func TestOrderingPartitionRenewalRollsBackIncompleteUpdate(t *testing.T) {
+	e := startEnv(t)
+	registerOrderingRelay(t, e, "renew-rollback")
+	before := reconcileOrdering(t, e, "renew-rollback")
+	ctx := context.Background()
+	// Simulate a database-side rejection of one renewal. The store must not
+	// return a successful snapshot or leave the other 63 leases extended.
+	if _, err := e.pool.Exec(ctx, `CREATE FUNCTION public.reject_one_renewal() RETURNS trigger LANGUAGE plpgsql AS $$
+ BEGIN IF NEW.partition_id=31 THEN RETURN NULL; END IF; RETURN NEW; END $$;
+ CREATE TRIGGER reject_one_renewal BEFORE UPDATE ON emitlane.ordering_partitions
+ FOR EACH ROW EXECUTE FUNCTION public.reject_one_renewal()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := e.pool.Exec(context.Background(), `DROP TRIGGER reject_one_renewal ON emitlane.ordering_partitions;
+ DROP FUNCTION public.reject_one_renewal()`); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := e.store.ReconcileOrderingPartitions(ctx, "renew-rollback", testPartitionLease,
+		2*testPublishWindow, testPresenceStale, testOrderingSafety); err == nil {
+		t.Fatal("incomplete renewal reported success")
+	}
+	for _, prior := range before {
+		var until time.Time
+		var epoch int64
+		var publishMS int64
+		if err := e.pool.QueryRow(ctx, `SELECT lease_until, epoch, publish_timeout_ms
+ FROM emitlane.ordering_partitions WHERE partition_id=$1`, prior.PartitionID).Scan(&until, &epoch, &publishMS); err != nil {
+			t.Fatal(err)
+		}
+		if !until.Equal(*prior.LeaseUntil) || epoch != prior.Epoch || publishMS != 100 {
+			t.Fatalf("partial renewal escaped rollback: partition=%d until=%s epoch=%d publish_ms=%d", prior.PartitionID, until, epoch, publishMS)
+		}
+	}
+}

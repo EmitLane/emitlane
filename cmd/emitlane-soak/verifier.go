@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"sort"
 	"strconv"
 	"sync"
@@ -13,10 +14,20 @@ import (
 )
 
 type expectedEvent struct {
-	ordered     bool
-	stream      string
-	sequence    int64
-	committedAt time.Time
+	ordered       bool
+	stream        string
+	sequence      int64
+	committedAt   time.Time
+	topic, key    string
+	payloadSHA    [32]byte
+	verifyPayload bool
+}
+
+type unexpectedKafkaRecord struct {
+	EventID   uuid.UUID `json:"event_id"`
+	Topic     string    `json:"topic"`
+	Partition int32     `json:"partition"`
+	Offset    int64     `json:"offset"`
 }
 
 type verifier struct {
@@ -24,6 +35,8 @@ type verifier struct {
 	expected           map[uuid.UUID]expectedEvent
 	observed           map[uuid.UUID]time.Time
 	lastSequence       map[string]int64
+	auditPartitions    map[string]int32
+	unexpectedRecords  []unexpectedKafkaRecord
 	latencies          []float64
 	orderedCommitted   int64
 	unorderedCommitted int64
@@ -82,6 +95,37 @@ func (v *verifier) observeRecord(record *kgo.Record, now time.Time, recordLatenc
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.brokerRecords++
+	// Only the independent final scan has a frozen expected set. Validate every
+	// record, including duplicates: a repeated ID must not hide corrupted data.
+	if !recordLatency {
+		meta, expected := v.expected[id]
+		if !expected {
+			v.unexpectedRecords = append(v.unexpectedRecords, unexpectedKafkaRecord{
+				EventID: id, Topic: record.Topic, Partition: record.Partition, Offset: record.Offset,
+			})
+		}
+		key := record.Topic + "/" + header(record, broker.HeaderOrderingKey)
+		if header(record, broker.HeaderOrderingKey) != "" {
+			if v.auditPartitions == nil {
+				v.auditPartitions = map[string]int32{}
+			}
+			if old, ok := v.auditPartitions[key]; ok && old != record.Partition {
+				v.errors++
+				v.addDiagnostic(Diagnostic{Kind: "ordered_partition_changed", EventID: id.String(), Stream: key})
+			}
+			v.auditPartitions[key] = record.Partition
+		}
+		if expected && meta.verifyPayload {
+			sequence := ""
+			if meta.ordered {
+				sequence = strconv.FormatInt(meta.sequence, 10)
+			}
+			if record.Topic != meta.topic || string(record.Key) != meta.key || sha256.Sum256(record.Value) != meta.payloadSHA || header(record, broker.HeaderOrderingKey) != meta.key || header(record, broker.HeaderSequence) != sequence {
+				v.errors++
+				v.addDiagnostic(Diagnostic{Kind: "identity_payload_key_mismatch", EventID: id.String()})
+			}
+		}
+	}
 	if _, duplicate := v.observed[id]; duplicate {
 		return
 	}

@@ -37,6 +37,9 @@ roles, extensions and restore privileges as part of the drill.
 
 ## Isolated restore drill
 
+The [v1 PITR drill](V1_PITR_DRILL.md) defines the physical recovery procedure,
+per-partition Kafka offset plan and resumption checks for release acceptance.
+
 1. Restore into a **new isolated database**, leaving the source intact. Prevent
    restored relays, producers and consumers from contacting production Kafka.
    Inspect credentials and destinations before starting any process.

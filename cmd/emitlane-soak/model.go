@@ -15,7 +15,7 @@ import (
 const (
 	soakRoot       = ".emitlane/soak"
 	postgresImage  = "postgres:16-alpine"
-	kafkaImage     = "apache/kafka-native:4.3.1"
+	kafkaImage     = "apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
 	progressPeriod = 5 * time.Second
 
 	soakRelayMaxAttempts = 100
@@ -144,6 +144,7 @@ type Result struct {
 	LatencyP95Millis      float64            `json:"latency_p95_ms"`
 	LatencyP99Millis      float64            `json:"latency_p99_ms"`
 	BacklogRecoverySecs   float64            `json:"backlog_recovery_seconds"`
+	FaultCounts           map[string]int64   `json:"fault_counts"`
 	FaultDurations        map[string]float64 `json:"fault_durations_seconds"`
 	Diagnostics           []Diagnostic       `json:"diagnostics,omitempty"`
 	ExitCode              int                `json:"exit_code"`
@@ -201,6 +202,14 @@ func newRunID(now time.Time, seed uint64) string {
 }
 
 func verdict(r Result) error {
+	if r.Profile == "release" && r.Configuration.Faults {
+		for _, name := range []string{"relay_graceful_restart", "relay_crash_takeover", "kafka_outage", "cluster_pause", "relay_membership_change", "kafka_restart"} {
+			if r.FaultCounts[name] == 0 {
+				return fmt.Errorf("missing completed release fault: %s", name)
+			}
+		}
+	}
+
 	checks := []struct {
 		name  string
 		value int64
