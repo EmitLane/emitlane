@@ -44,6 +44,8 @@ def main():
     try:
         metadata = json.loads((dist / 'metadata.json').read_text())
         version = metadata['version']
+        if metadata['commit'] != sha:
+            raise RuntimeError('Snapshot metadata source mismatch')
         report['metadata'] = metadata
         checksums = {}
         for line in (dist / 'checksums.txt').read_text().splitlines():
@@ -105,13 +107,24 @@ def main():
             path.chmod(0o700)
             build = command(['go', 'version', '-m', str(path)])
             (out / (target_os + '-' + arch + '-build.txt')).write_text(build)
-            if 'GOOS=' + target_os not in build or 'GOARCH=' + arch not in build or sha not in build or version not in build:
+            settings = dict(line.removeprefix('\tbuild\t').split('=', 1)
+                            for line in build.splitlines()
+                            if line.startswith('\tbuild\t') and '=' in line)
+            if (settings.get('GOOS') != target_os or settings.get('GOARCH') != arch
+                    or settings.get('vcs.revision') != sha or settings.get('vcs.modified') != 'false'
+                    or settings.get('CGO_ENABLED') != '0'):
                 raise RuntimeError('Packaged build identity/target mismatch')
+            # With -trimpath, Go omits the ldflags string from build settings.
+            # Check injected version bytes separately; Linux image execution
+            # below must also return the exact version and full commit.
+            if version.encode() not in binary or sha.encode() not in binary:
+                raise RuntimeError('Packaged version/commit bytes missing')
             scan = subprocess.run([args.govulncheck, '-mode=binary', str(path)],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
             (out / (target_os + '-' + arch + '-vulnerability.txt')).write_text(scan.stdout)
             report['archives'].append({'file': archive.name, 'target': key, 'archive_sha256': digest(data),
-                                       'binary_sha256': digest(binary), 'members': contents, 'scan_exit': scan.returncode})
+                                       'binary_sha256': digest(binary), 'members': contents, 'scan_exit': scan.returncode,
+                                       'build_settings': settings, 'embedded_version': version})
             if scan.returncode:
                 raise RuntimeError('Packaged binary vulnerability scan failed: ' + key)
             binaries[key] = path

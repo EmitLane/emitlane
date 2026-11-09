@@ -136,6 +136,20 @@ Go 1.27.2 binary. It must finish and be reviewed under that identity. A later
 candidate or changed build compiler needs its own final-SHA qualification;
 this source update does not authorize another server soak.
 
+
+Candidate `12f7438` passed all nine jobs in exact-SHA CI
+[42600103887](https://github.com/EmitLane/emitlane/actions/runs/42600103887)
+with Go 1.27.3. Its packaging run
+[42600190560](https://github.com/EmitLane/emitlane/actions/runs/42600190560)
+passed the source vulnerability scan but exposed an error in the new verifier:
+it searched for the injected release version in `go version -m` output, which
+omits the ldflags string under `-trimpath`. The downloaded artifact's full ZIP
+CRC and SHA-256, all six archive checksums, target build metadata, clean full
+VCS revision and embedded version bytes were independently checked offline.
+The verifier now checks build settings and embedded version bytes separately;
+Linux image execution must also return the exact version and commit. The
+failed job remains a failure, with its binary scans and runtime checks open.
+
 - [x] Select the qualified base and document the initial contract and support
   matrix. Confirm the final release notes against these boundaries at sign-off.
 - [x] Review the 72-hour managed qualification, memory/storage observations
