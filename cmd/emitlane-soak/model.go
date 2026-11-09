@@ -15,7 +15,7 @@ import (
 const (
 	soakRoot       = ".emitlane/soak"
 	postgresImage  = "postgres:16-alpine"
-	kafkaImage     = "apache/kafka-native:4.3.1"
+	kafkaImage     = "apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837"
 	progressPeriod = 5 * time.Second
 
 	soakRelayMaxAttempts = 100

@@ -697,11 +697,23 @@ func (r *soakRuntime) recover(recoveryCtx context.Context) error {
 	defer ticker.Stop()
 	var last string
 	for {
-		pending, inflight, dead, blocked, gaps, err := queueState(recoveryCtx, r.env.pool)
-		if err == nil {
-			last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d", pending, inflight, dead, blocked, gaps)
-			if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 {
-				return nil
+		unfinished, err := queueHasUnfinishedWork(recoveryCtx, r.env.pool)
+		if err != nil {
+			last = fmt.Sprintf("queue probe failed: %v", err)
+		} else if unfinished {
+			last = "unfinished queue or ordered gap remains"
+		} else {
+			// The probe only avoids repeated counts while work remains. It is
+			// never the completion proof: retain the exact reconciliation and
+			// use the same recovery context/deadline for both queries.
+			pending, inflight, dead, blocked, gaps, err := queueState(recoveryCtx, r.env.pool)
+			if err != nil {
+				last = fmt.Sprintf("queue reconciliation failed: %v", err)
+			} else {
+				last = fmt.Sprintf("pending=%d inflight=%d dead=%d blocked=%d gaps=%d", pending, inflight, dead, blocked, gaps)
+				if pending == 0 && inflight == 0 && dead == 0 && blocked == 0 && gaps == 0 {
+					return nil
+				}
 			}
 		}
 		select {
@@ -710,6 +722,45 @@ func (r *soakRuntime) recover(recoveryCtx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// queueHasUnfinishedWork is the recovery wait predicate, not an audit count.
+// Materialized, ordered one-row probes expose the existing status/created/id
+// index path even when planner statistics still describe a large backlog.
+// Stream gaps can outlive active work and must also prevent the empty fast path.
+type queueProbeSource interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func queueHasUnfinishedWork(ctx context.Context, source queueProbeSource) (bool, error) {
+	var unfinished bool
+	err := source.QueryRow(ctx, `
+WITH pending AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='pending'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+), inflight AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='inflight'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+), dead AS MATERIALIZED (
+ SELECT 1 FROM emitlane.outbox_events WHERE status='dead'
+ ORDER BY created_at DESC,id DESC LIMIT 1
+)
+SELECT CASE WHEN
+ EXISTS (SELECT 1 FROM pending)
+ OR EXISTS (SELECT 1 FROM inflight)
+ OR EXISTS (SELECT 1 FROM dead)
+THEN TRUE ELSE EXISTS (
+ SELECT 1 FROM emitlane.ordering_streams s
+ WHERE NOT EXISTS (
+  SELECT 1 FROM emitlane.outbox_events e
+  WHERE e.destination=s.destination AND e.ordering_key=s.ordering_key
+    AND e.ordering_key IS NOT NULL AND e.ordering_sequence=s.next_sequence)
+ AND EXISTS (
+  SELECT 1 FROM emitlane.outbox_events e
+  WHERE e.destination=s.destination AND e.ordering_key=s.ordering_key
+    AND e.ordering_key IS NOT NULL AND e.ordering_sequence>s.next_sequence)
+) END`).Scan(&unfinished)
+	return unfinished, err
 }
 
 func queueState(ctx context.Context, pool *pgxpool.Pool) (pending, inflight, dead, blocked, gaps int64, err error) {

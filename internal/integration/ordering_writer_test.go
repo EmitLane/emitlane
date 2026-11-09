@@ -182,9 +182,7 @@ func TestSchemaV3SeedsPartitionsAndRefusesUnsafeDown(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatalf("v4 down migration: %v", err)
-	}
+	migrationCompatibilityDownTo(t, ctx, e.pool, 3)
 	if err := pgstore.MigrateDown(ctx, e.pool); err == nil {
 		t.Fatal("unsafe v3 down migration succeeded")
 	}

@@ -11,12 +11,20 @@ and the [release acceptance record](docs/V1_RELEASE_CHECKLIST.md).
   `/v1`, CLI and configuration, and documented metrics. Relay delivery remains
   at least once. Inbox deduplication covers effects committed with the Inbox
   transition in the same PostgreSQL transaction.
-* Keep the Go module path `github.com/emitlane/emitlane` and PostgreSQL schema 4.
+* Keep the Go module path `github.com/emitlane/emitlane`. Add schema migration 5
+  for the pending-unordered claim index; published migrations 1–4 are unchanged.
+  Installation needs a write maintenance window. Returning to v0.9.1 requires
+  removing only migration 5 before starting the previous binaries.
   The minimum Go toolchain for SDK consumers and source builds is now 1.27.2.
   See [upgrade and binary rollback from v0.9.1](docs/UPGRADING.md#v091-to-v100).
 
 ### Performance and reliability
 
+* Probe unfinished recovery work before exact reconciliation, and reuse dated
+  queue/stream snapshots for automatic Relay statistics. Live control reads,
+  explicit operator statistics, final reconciliation and audit criteria remain.
+* Add a partial `(available_at, created_at, id)` index for pending unordered
+  events, retaining the existing claim query, leases and expired-work path.
 * Batch ordered partition lease renewals while retaining owner and epoch fences.
 * Target Inbox lifecycle transitions by the locked event identity while retaining
   lease-token checks and transactional rollback.

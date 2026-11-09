@@ -74,7 +74,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		reg = prometheus.DefaultRegisterer
 	}
 	m := &Metrics{
-		statsInterval:    prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "stats_interval_seconds", Help: "Configured Relay database snapshot interval; zero means disabled or no Relay configured."}),
+		statsInterval:    prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "stats_interval_seconds", Help: "Configured Relay statistics polling interval; zero means disabled or no Relay configured."}),
 		statsLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{Namespace: namespace, Name: "stats_last_success_timestamp_seconds", Help: "Unix time of the last successful Relay database snapshot; zero until the first success."}),
 		statsFailures:    prometheus.NewCounter(prometheus.CounterOpts{Namespace: namespace, Name: "stats_snapshot_failures_total", Help: "Failed Relay database snapshot reads; queue gauges retain their last successful values."}),
 		enqueued: prometheus.NewCounter(prometheus.CounterOpts{
@@ -370,6 +370,7 @@ func (m *Metrics) SetStatsInterval(interval time.Duration) {
 
 // RecordStatsSnapshot marks freshness only after all snapshot gauges are set.
 // Failure leaves the last successful timestamp and queue gauges intact.
+// For a reused observation, completedAt is its original source capture time.
 func (m *Metrics) RecordStatsSnapshot(success bool, completedAt time.Time) {
 	if m == nil {
 		return

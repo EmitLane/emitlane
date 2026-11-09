@@ -44,15 +44,7 @@ func TestMigrationV1ToV3PreservesReleasedData(t *testing.T) {
 		}
 	})
 
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
+	migrationCompatibilityDownTo(t, ctx, e.pool, 1)
 	version, err := pgstore.SchemaVersion(ctx, e.pool)
 	if err != nil {
 		t.Fatal(err)
@@ -135,12 +127,7 @@ func TestMigrationV2ToV3PreservesReleasedData(t *testing.T) {
 		}
 	})
 
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
+	migrationCompatibilityDownTo(t, ctx, e.pool, 2)
 	version, err := pgstore.SchemaVersion(ctx, e.pool)
 	if err != nil {
 		t.Fatal(err)

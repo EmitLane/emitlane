@@ -90,3 +90,51 @@ func TestDisabledStatsIntervalIsObservable(t *testing.T) {
 		}
 	}
 }
+
+type cachedSnapshotStore struct {
+	*memoryStore
+	snapshot   Stats
+	capturedAt time.Time
+	err        error
+}
+
+func (s *cachedSnapshotStore) CachedStatsSnapshotWithPresence(context.Context, time.Duration) (Stats, time.Time, error) {
+	return s.snapshot, s.capturedAt, s.err
+}
+
+func TestCachedStatsDoNotAdvanceCaptureTimeOnPollOrFailure(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics, err := telemetry.NewMetrics(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &cachedSnapshotStore{memoryStore: &memoryStore{}, snapshot: Stats{Pending: 7}, capturedAt: time.Unix(1000, 0)}
+	r := testRelay(t, store, &trackingPublisher{}, func(cfg *Config) { cfg.StatsInterval = time.Second }, WithMetrics(metrics))
+	value := func(name string) float64 {
+		t.Helper()
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, family := range families {
+			if family.GetName() == name {
+				return family.Metric[0].GetGauge().GetValue()
+			}
+		}
+		t.Fatalf("missing gauge %s", name)
+		return 0
+	}
+	for range 2 {
+		r.refreshStats(context.Background())
+	}
+	if value("emitlane_stats_last_success_timestamp_seconds") != 1000 || value("emitlane_pending_events") != 7 {
+		t.Fatal("a cache hit was presented as a new capture or bypassed cached polling")
+	}
+	store.snapshot.Pending, store.capturedAt = 9, time.Unix(1030, 0)
+	r.refreshStats(context.Background())
+	store.snapshot.Pending, store.capturedAt = 0, time.Time{}
+	r.refreshStats(context.Background())
+	if value("emitlane_stats_last_success_timestamp_seconds") != 1030 || value("emitlane_pending_events") != 9 {
+		t.Fatal("an undated observation replaced the last complete snapshot")
+	}
+}

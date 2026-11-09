@@ -122,7 +122,7 @@ var requiredTables = []string{
 }
 
 var requiredIndexes = []string{
-	"outbox_pending_idx", "outbox_inflight_lease_idx", "outbox_dead_idx",
+	"outbox_pending_idx", "outbox_unordered_pending_idx", "outbox_inflight_lease_idx", "outbox_dead_idx",
 	"outbox_created_idx", "outbox_status_created_idx", "outbox_destination_type_created_idx",
 	"outbox_replay_batch_idx", "admin_audit_created_idx", "outbox_ordering_sequence_unique_idx",
 	"outbox_ordered_claim_idx", "ordering_stream_partition_idx",
@@ -158,7 +158,7 @@ WHERE table_schema='emitlane'`)
 	for _, table := range requiredTables {
 		if !tables[table] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v4 table is missing", Expected: table, Observed: "missing"})
+				Message: "required schema table is missing", Expected: table, Observed: "missing"})
 			runtimeReady = false
 		}
 	}
@@ -167,9 +167,9 @@ WHERE table_schema='emitlane'`)
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM emitlane.schema_migrations`).Scan(&version); err != nil {
 			return false, fmt.Errorf("integrity: inspect schema version: %w", err)
 		}
-		if version != 4 {
+		if version != 5 {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "applied migration version does not match this binary", Expected: 4, Observed: version})
+				Message: "applied migration version does not match this binary", Expected: 5, Observed: version})
 		}
 	}
 
@@ -180,7 +180,7 @@ WHERE table_schema='emitlane'`)
 	for _, index := range requiredIndexes {
 		if !indexes[index] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v4 index is missing", Expected: index, Observed: "missing"})
+				Message: "required schema index is missing", Expected: index, Observed: "missing"})
 		}
 	}
 
@@ -196,7 +196,7 @@ WHERE namespace.nspname='emitlane'`)
 	for _, constraint := range requiredConstraints {
 		if !constraints[constraint] {
 			acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-				Message: "required v4 constraint is missing", Expected: constraint, Observed: "missing"})
+				Message: "required schema constraint is missing", Expected: constraint, Observed: "missing"})
 		}
 	}
 
@@ -227,7 +227,7 @@ WHERE table_schema='emitlane'`)
 		for _, column := range names {
 			if !columns[table][column] {
 				acc.add(Finding{Code: CodeSchemaVersionMismatch, Severity: SeverityViolation,
-					Message: "required v4 column is missing", Expected: table + "." + column, Observed: "missing"})
+					Message: "required schema column is missing", Expected: table + "." + column, Observed: "missing"})
 				runtimeReady = false
 			}
 		}

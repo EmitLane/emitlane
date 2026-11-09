@@ -47,10 +47,37 @@ func (s *Store) ClaimOrdered(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Resolve one exact sequence per owned stream before considering a batch.
+	// MATERIALIZED and the lateral LIMIT keep this lookup separate from the
+	// locking query, rather than joining every pending event to its stream.
+	// Do not apply the batch limit or row locks during discovery: picked must
+	// fill its batch past locked/ineligible heads and recheck the live event row.
 	const query = `
-WITH picked AS (
+WITH stream_heads AS MATERIALIZED (
+    SELECT head.id
+    FROM emitlane.ordering_streams AS stream
+    JOIN emitlane.ordering_partitions AS partition
+      ON partition.partition_id = stream.partition_id
+    CROSS JOIN LATERAL (
+        SELECT event.id
+        FROM emitlane.outbox_events AS event
+        WHERE event.destination = stream.destination
+          AND event.ordering_key = stream.ordering_key
+          AND event.ordering_sequence = stream.next_sequence
+          AND event.ordering_key IS NOT NULL
+        LIMIT 1
+    ) AS head
+    WHERE partition.lease_owner = $2
+      AND partition.lease_until >= NOW() + ($4 * INTERVAL '1 millisecond')
+      AND COALESCE(partition.handoff_not_before, '-infinity'::timestamptz) <= NOW()
+      AND EXISTS (
+          SELECT 1 FROM emitlane.runtime_control
+          WHERE singleton = TRUE AND paused = FALSE
+      )
+), picked AS (
     SELECT e.id, partition.epoch
-    FROM emitlane.outbox_events AS e
+    FROM stream_heads AS head
+    JOIN emitlane.outbox_events AS e ON e.id = head.id
     JOIN emitlane.ordering_streams AS stream
       ON stream.destination = e.destination
      AND stream.ordering_key = e.ordering_key

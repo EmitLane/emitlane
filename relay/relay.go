@@ -722,10 +722,16 @@ func (r *Relay) statsLoop(ctx context.Context) {
 
 func (r *Relay) refreshStats(ctx context.Context) {
 	var (
-		st  Stats
-		err error
+		st         Stats
+		capturedAt time.Time
+		err        error
 	)
-	if store, ok := r.store.(StatsWithPresence); ok {
+	if store, ok := r.store.(CachedStatsWithPresence); ok {
+		st, capturedAt, err = store.CachedStatsSnapshotWithPresence(ctx, r.cfg.PresenceStaleAfter)
+		if err == nil && capturedAt.IsZero() {
+			err = errors.New("cached stats returned no capture time")
+		}
+	} else if store, ok := r.store.(StatsWithPresence); ok {
 		st, err = store.StatsSnapshotWithPresence(ctx, r.cfg.PresenceStaleAfter)
 	} else {
 		st, err = r.store.StatsSnapshot(ctx)
@@ -744,7 +750,10 @@ func (r *Relay) refreshStats(ctx context.Context) {
 		float64(st.GapStreams), float64(st.DeadBlockedStreams),
 		float64(st.OwnedPartitions), float64(st.HandoffPartitions), st.MaxGapAgeSeconds,
 	)
-	r.metrics.RecordStatsSnapshot(true, r.clock.Now())
+	if capturedAt.IsZero() {
+		capturedAt = r.clock.Now()
+	}
+	r.metrics.RecordStatsSnapshot(true, capturedAt)
 }
 
 func (r *Relay) heartbeatLoop(ctx context.Context, store PresenceStore) {

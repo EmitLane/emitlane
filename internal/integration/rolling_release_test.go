@@ -15,14 +15,17 @@ import (
 
 	managed "github.com/emitlane/emitlane/consumer"
 	"github.com/emitlane/emitlane/integrity"
+	pgstore "github.com/emitlane/emitlane/storage/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 const rollingPreviousCommit = "5679ce24da54ecbe319896d6749d884575aab0e2"
 
-// Real standalone processes share schema4 and ordered leases during upgrade and
-// binary rollback. The previous source is rebuilt with a patched Go toolchain.
+// The previous process starts on schema 4; the current process starts on schema
+// 5. Mixed ownership still must work for an already-running previous process
+// across the additive index installation. Rollback restores schema 4 before
+// restarting the previous binary. This does not claim old startup on schema 5.
 func TestRelayRollingUpgradeAndRollbackFromV091(t *testing.T) {
 	oldPath, newPath := os.Getenv("EMITLANE_PREVIOUS_RELAY_BINARY"), os.Getenv("EMITLANE_CURRENT_RELAY_BINARY")
 	if oldPath == "" && newPath == "" {
@@ -64,6 +67,7 @@ func TestRelayRollingUpgradeAndRollbackFromV091(t *testing.T) {
 	write(map[string]any{"kind": "start", "time": time.Now().UTC(), "commit": commit, "previous_commit": rollingPreviousCommit, "previous_source_version": "v0.9.1 rebuilt with the patched candidate toolchain; not byte-identical to published artifacts"})
 	t.Setenv("EMITLANE_QUALIFICATION_DURATION", "3m")
 	e := startEnv(t)
+	migrationCompatibilityDownTo(t, ctx, e.pool, 4)
 	_, err = e.pool.Exec(ctx, `CREATE TABLE public.soak_expected(event_id UUID PRIMARY KEY,sequence BIGINT UNIQUE NOT NULL,stream TEXT NOT NULL,stream_sequence BIGINT NOT NULL,poison BOOLEAN NOT NULL,repaired BOOLEAN NOT NULL DEFAULT FALSE);
 CREATE TABLE public.soak_stream_progress(stream TEXT PRIMARY KEY,sequence BIGINT NOT NULL);
 INSERT INTO public.soak_stream_progress SELECT 'stream-'||g,0 FROM generate_series(0,7)g;
@@ -147,6 +151,10 @@ CREATE TABLE public.soak_observed(event_id UUID PRIMARY KEY,records BIGINT NOT N
 	}
 	produce()
 	drain("old-only")
+	if err := pgstore.MigrateUp(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
+	write(map[string]any{"kind": "schema_transition", "from": 4, "to": 5, "phase": "upgrade", "time": time.Now().UTC()})
 	current := launch(newPath, newID, "current-during-upgrade")
 	deadline := time.Now().Add(45 * time.Second)
 	shared := false
@@ -167,12 +175,26 @@ CREATE TABLE public.soak_observed(event_id UUID PRIMARY KEY,records BIGINT NOT N
 	old.stop(t)
 	produce()
 	drain("current-only-after-upgrade")
-	old = launch(oldPath, oldID, "old-during-rollback")
 	current.stop(t)
+	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
+	version, err := pgstore.SchemaVersion(ctx, e.pool)
+	if err != nil || version != 4 {
+		t.Fatalf("previous binary needs schema 4 after rollback, got %d: %v", version, err)
+	}
+	write(map[string]any{"kind": "schema_transition", "from": 5, "to": 4, "phase": "rollback", "time": time.Now().UTC()})
+	old = launch(oldPath, oldID, "old-during-rollback")
 	produce()
 	drain("old-only-after-rollback")
 	old.stop(t)
 	consumer.stop(t)
+	// Audit with the current verifier on its required schema, after separately
+	// proving the previous binary processed the rollback phase on schema 4.
+	if err := pgstore.MigrateUp(ctx, e.pool); err != nil {
+		t.Fatal(err)
+	}
+	write(map[string]any{"kind": "schema_transition", "from": 4, "to": 5, "phase": "final-audit", "time": time.Now().UTC()})
 	records, duplicates := auditQualificationKafka(t, ctx, e, topic, 20261015, 8)
 	mismatch, total, err := qualificationDatabaseIdentityAudit(ctx, e, topic, name)
 	if err != nil || mismatch != 0 || total != seq {

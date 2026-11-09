@@ -69,6 +69,45 @@ All 2,682 result files were verified against SHA-256 checksums.
 Record a result, source identity, configuration, evidence location and
 limitations for each item.
 
+The candidate now adds schema migration 5 for the pending-unordered claim
+index. The schema-4 72-hour result above is inherited evidence. The focused migration/index regression run below passed on an intermediate
+source tree. Final candidate CI, representative deployment acceptance and the
+new multi-Relay soak remain open.
+
+
+### Focused candidate regression evidence — 9 November 2026
+
+These are intermediate dirty-tree results on branch `v1-release-contract`,
+base `5cca8df`; they are not a final-SHA release qualification.
+
+- The ordered-head diagnostic and its focused regressions passed in
+  `v1-checks-pg-heads-20261109-044015-5cca8df`.
+- `v1-checks-unordered-index-20261109-051149-5cca8df`, tree
+  `bcce389dc2a01a5caa301a78c6b0b50dea1e658c`, passed 19 top-level tests
+  and 32 subtests, including embedded/released migration checks, schema
+  4→5→4 rollback and unordered claim. On the synthetic mixed backlog,
+  the unordered pending index returned eight rows with no discarded rows.
+- `v1-checks-sparse-probe-20261109-094314-5cca8df`, tree
+  `f5e4aebf00ee10f0cc80529c1d4736167fffc571`, passed 17 focused tests
+  and the query diagnostic: 24 baseline operations, 30 baseline plans and
+  ten old/new sparse comparisons with ten additional plans. Both probes
+  returned the expected state for pending, inflight, dead, empty and gap
+  cases; the simulated drain was rolled back and original totals verified.
+- The limited status probes used indexes in all sparse plans. They still
+  required 442,366 heap visibility checks after the uncommitted synthetic
+  drain when no pending row remained, with client times of 189–320 ms.
+  This does not establish uniformly fast polling on aged data or actual
+  recovery capacity. Cached statistics hits were approximately 0.75 ms;
+  full observation and operator reads remain separate exact queries.
+
+The fixture was PostgreSQL 16.15 with 670,175 events, 442,365 pending,
+3,500 streams and durable writes, using the explicitly authorized full
+resource profile. Each run finished with test/supervisor exit zero and actual
+terminal service success. Full result copies were SHA-256 verified. No new
+multi-Relay recovery, sustained input-rate, PITR or independent-pilot PASS is
+inferred from these focused runs. A previous failed migration attempt stays
+recorded separately; it is not relabelled as a pass.
+
 - [x] Select the qualified base and document the initial contract and support
   matrix. Confirm the final release notes against these boundaries at sign-off.
 - [x] Review the 72-hour managed qualification, memory/storage observations
@@ -78,6 +117,10 @@ limitations for each item.
 - [ ] Freeze the final runtime, dependencies, migrations and build inputs.
   Record how the final merge and release commits map to the qualified source.
   Review any delta and qualify the affected guarantees.
+- [ ] Validate migration 4→5 and rollback 5→4 on representative retained data,
+  including preservation of unfinished Inbox work, event leases and ordered
+  cursors. Recheck unordered-claim plans on the mixed backlog. Retain the
+  existing timeouts and audit acceptance requirements.
 - [ ] Pass the required GitHub CI and release container smoke on the final
   checkout SHA. Record the runs and actual toolchains. See the
   [final candidate plan](V1_FINAL_SHA_CHECKS.md).

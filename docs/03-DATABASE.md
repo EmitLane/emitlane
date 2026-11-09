@@ -202,3 +202,28 @@ There is no automatic Inbox deletion. Removing a processed marker permits a
 later Kafka replay to execute the handler again, so any future explicit pruning
 must be aligned with the replay and retention horizon. The v4 down migration
 refuses while active managed lifecycle rows exist.
+
+## Schema version 5
+
+Migration `000005_unordered_claim_index` adds the access path for the existing
+pending unordered claim:
+
+```sql
+CREATE INDEX outbox_unordered_pending_idx
+ON emitlane.outbox_events (available_at, created_at, id)
+WHERE status = 'pending' AND ordering_key IS NULL;
+```
+
+The pending branch retains its due-time check, ordering, batch limit, pause
+gate and `FOR UPDATE SKIP LOCKED`. Ordered pending rows are outside this index;
+the general pending index remains for other queries. The separate
+expired-inflight branch, leases, attempts and delivery transitions are unchanged.
+Doctor and integrity require schema 5 and the new index.
+
+The existing migration runner builds the index transactionally, without
+`CONCURRENTLY`; plan a write maintenance window within the existing migration
+deadline. Cancellation or failure rolls back both index and history changes.
+Migration 5 down drops only this index and its version record, returning to
+schema 4 without changing event or Inbox data, stream cursors or leases.
+See [the decision](decisions/README.md#pending-unordered-claims-have-a-dedicated-partial-index-in-schema-5)
+and [upgrade and rollback](UPGRADING.md#v091-to-v100).

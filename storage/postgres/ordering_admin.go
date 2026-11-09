@@ -223,7 +223,46 @@ type orderingStats struct {
 }
 
 func (s *Store) readOrderingStats(ctx context.Context) (orderingStats, error) {
-	query := `WITH stream_state AS (` + orderingStateSelect + `)
+	return readOrderingStatsFrom(ctx, s.pool)
+}
+
+func readOrderingStatsFrom(ctx context.Context, source statsQuerier) (orderingStats, error) {
+	// Aggregate statistics need the future sequence only for a missing head.
+	// Keep the public list/detail projection unchanged: its lowest-future and
+	// gap-size fields are populated even when the expected head exists.
+	query := `WITH stream_state AS (
+SELECT
+    CASE
+        WHEN next_event.status = 'dead' THEN 'dead_blocked'
+        WHEN next_event.status = 'inflight' THEN 'inflight'
+        WHEN next_event.status = 'pending' AND next_event.available_at > NOW() THEN 'retry_wait'
+        WHEN next_event.id IS NOT NULL THEN 'ready'
+        WHEN future.created_at IS NOT NULL THEN 'gap'
+        ELSE 'ready'
+    END AS state,
+    CASE WHEN next_event.id IS NULL AND future.created_at IS NOT NULL
+         THEN GREATEST(0, EXTRACT(EPOCH FROM (NOW() - future.created_at))) ELSE 0 END AS gap_age
+FROM emitlane.ordering_streams AS stream
+LEFT JOIN LATERAL (
+    SELECT event.id, event.status, event.available_at
+    FROM emitlane.outbox_events AS event
+    WHERE event.destination = stream.destination
+      AND event.ordering_key = stream.ordering_key
+      AND event.ordering_key IS NOT NULL
+      AND event.ordering_sequence = stream.next_sequence
+    LIMIT 1
+) AS next_event ON TRUE
+LEFT JOIN LATERAL (
+    SELECT event.created_at
+    FROM emitlane.outbox_events AS event
+    WHERE next_event.id IS NULL
+      AND event.destination = stream.destination
+      AND event.ordering_key = stream.ordering_key
+      AND event.ordering_key IS NOT NULL
+      AND event.ordering_sequence > stream.next_sequence
+    ORDER BY event.ordering_sequence
+    LIMIT 1
+) AS future ON TRUE)
 SELECT
     (SELECT COUNT(*) FROM stream_state),
     (SELECT COUNT(*) FROM stream_state WHERE state IN ('retry_wait', 'gap', 'dead_blocked')),
@@ -237,7 +276,7 @@ SELECT
        AND handoff_not_before > NOW()),
     COALESCE((SELECT MAX(gap_age) FROM stream_state WHERE state='gap'), 0)`
 	var stats orderingStats
-	if err := s.pool.QueryRow(ctx, query).Scan(&stats.streams, &stats.blocked, &stats.gaps,
+	if err := source.QueryRow(ctx, query).Scan(&stats.streams, &stats.blocked, &stats.gaps,
 		&stats.deadBlocked, &stats.owned, &stats.handoff, &stats.maxGapAge); err != nil {
 		return orderingStats{}, fmt.Errorf("ordering stats: %w", err)
 	}

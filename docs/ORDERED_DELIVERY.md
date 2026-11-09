@@ -198,6 +198,15 @@ recoverable inflight; its sequence equals `ordering_streams.next_sequence`; its
 partition is owned by the Relay at a valid epoch; the handoff barrier has
 passed; and durable pause is false. Claim commits before broker I/O.
 
+Claim first resolves the exact `next_sequence` event for each stream in an
+owned, eligible partition, using the existing unique sequence index. A
+materialized set of head IDs separates those lookups from batch selection, so
+future sequences do not expand the candidate set. The locking query rechecks
+event eligibility and ownership, orders by `available_at`, `created_at`, then
+event ID, and applies `FOR UPDATE SKIP LOCKED` before filling the batch limit.
+Heads are neither locked nor batch-limited during discovery. The existing
+begin-attempt and result-transition fences remain authoritative.
+
 The Relay adds authoritative broker headers:
 
 ```text

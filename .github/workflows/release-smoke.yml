@@ -8,6 +8,7 @@ on:
       - .github/workflows/release-smoke.yml
       - .goreleaser.yaml
       - Dockerfile.release
+      - deploy/release/**
       - go.mod
       - go.sum
   workflow_dispatch:
@@ -77,3 +78,69 @@ jobs:
           [[ "$actual" == *"$(git rev-parse HEAD)"* ]]
           docker run --rm --network=none --platform "linux/$SMOKE_ARCH" \
             emitlane-release-smoke:local help
+
+  snapshot:
+    name: release snapshot artifacts
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record candidate and toolchain
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Install pinned GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.18.0
+          install-only: true
+
+      - name: Build snapshot without publishing
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          test -z "$(git status --porcelain)"
+          go version
+          goreleaser check
+          goreleaser release --snapshot --clean
+
+      - name: Check source and packaged artifacts
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/emitlane-release-tools" go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          "$RUNNER_TEMP/emitlane-release-tools/govulncheck" -version
+          "$RUNNER_TEMP/emitlane-release-tools/govulncheck" ./... | tee "$RUNNER_TEMP/emitlane-source-vulnerability.txt"
+          python3 deploy/release/check-snapshot.py \
+            --output "$RUNNER_TEMP/emitlane-snapshot-review" \
+            --govulncheck "$RUNNER_TEMP/emitlane-release-tools/govulncheck"
+
+      - name: Save snapshot evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emitlane-snapshot-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.json
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+            ${{ runner.temp }}/emitlane-source-vulnerability.txt
+            ${{ runner.temp }}/emitlane-snapshot-review/

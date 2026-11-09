@@ -23,8 +23,10 @@ const notifyChannel = "emitlane_events"
 const maxErrorBytes = 4096
 
 // Store is the PostgreSQL outbox/inbox store used by the relay.
+// It must not be copied after first use.
 type Store struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	statsCache statsSnapshotCache
 }
 
 // NewStore returns a Store backed by pool.
@@ -220,6 +222,8 @@ func (s *Store) Claim(ctx context.Context, owner string, limit int, lease time.D
 	// Up to limit candidates from each is sufficient to select the globally earliest
 	// rows after the small merge. Both branches retain SKIP LOCKED and the durable
 	// pause gate, so recovery and concurrent-claimer behavior are unchanged.
+	// The pending branch matches outbox_unordered_pending_idx (schema 5), so
+	// ordered pending events do not have to be filtered out of that index scan.
 	const sql = `
 WITH pending AS (
     SELECT id, available_at, created_at
@@ -504,8 +508,13 @@ func (s *Store) StatsSnapshot(ctx context.Context) (relay.Stats, error) {
 }
 
 // StatsSnapshotWithPresence uses the configured stale threshold when
-// classifying relay heartbeats.
+// classifying relay heartbeats. This explicit snapshot always reads the
+// database; automatic polling can use CachedStatsSnapshotWithPresence.
 func (s *Store) StatsSnapshotWithPresence(ctx context.Context, staleAfter time.Duration) (relay.Stats, error) {
+	return readStatsSnapshotFrom(ctx, s.pool, staleAfter)
+}
+
+func readStatsSnapshotFrom(ctx context.Context, source statsQuerier, staleAfter time.Duration) (relay.Stats, error) {
 	const sql = `
 WITH queue AS (
 SELECT
@@ -527,11 +536,11 @@ SELECT queue.pending, queue.inflight, queue.dead, queue.oldest_pending_seconds,
 FROM queue, relays, emitlane.runtime_control AS control
 WHERE control.singleton = TRUE`
 	var st relay.Stats
-	if err := s.pool.QueryRow(ctx, sql, intervalMS(staleAfter)).Scan(&st.Pending, &st.Inflight, &st.Dead, &st.OldestPendingSeconds,
+	if err := source.QueryRow(ctx, sql, intervalMS(staleAfter)).Scan(&st.Pending, &st.Inflight, &st.Dead, &st.OldestPendingSeconds,
 		&st.Paused, &st.RelaysActive, &st.RelaysStale); err != nil {
 		return relay.Stats{}, fmt.Errorf("stats: %w", err)
 	}
-	ordering, err := s.readOrderingStats(ctx)
+	ordering, err := readOrderingStatsFrom(ctx, source)
 	if err != nil {
 		return relay.Stats{}, err
 	}

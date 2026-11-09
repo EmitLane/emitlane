@@ -9,7 +9,7 @@ the synthetic qualification harness.
 
 Run in dedicated staging within the [initial v1 support matrix](V1_CONTRACT.md#initial-support-matrix).
 Use the candidate binaries or images with exact SHA and digests, PostgreSQL 16
-with durable writes and schema 4, and Kafka 4.3.1 with the production-intended
+with durable writes and schema 5, and Kafka 4.3.1 with the production-intended
 TLS and authentication mode. Isolate database, topics, groups, secrets and
 downstream endpoints from production. Restrict fault controls to pilot-owned
 resources.
@@ -25,7 +25,7 @@ be compared with a pre-agreed limit.
 | Business coverage | Transaction path, stable identity resolver and Inbox consumer name, expected local effects, external-effect idempotency, ordered streams and poison-work procedure. |
 | Workload | Agreed normal and peak admitted rates, payload and key distribution, retained-row volume and observation period covering a representative retention/vacuum cycle. |
 | Pass limits | Allowed p95/p99 latency, queue age, per-partition lag and catch-up time for each load phase. Set RPO and RTO for the separate restore drill and an alert/response budget for each fault. |
-| Recovery and compatibility | Kafka retention and Inbox marker horizons, backup tool, v0.9.1 upgrade and binary rollback path on schema 4, and the operator allowed to stop or roll back staging. |
+| Recovery and compatibility | Kafka retention and Inbox marker horizons, backup tool, schema-4-to-5 maintenance upgrade and index-only rollback to schema 4 before v0.9.1 restart, and the operator allowed to stop or roll back staging. |
 
 Use an independent application ledger to record committed business and Outbox
 IDs, expected key/payload digests and expected protected effects. Capture Kafka
@@ -37,7 +37,7 @@ idempotency keys or staging substitutes with observable outcomes.
 
 | Phase | Activity and evidence |
 | --- | --- |
-| Baseline and rollout | Capture health, offsets and application ledger before changing binaries. Verify schema 4 and readiness. On the selected v0.9.1 path, roll out the candidate one Relay at a time and compare effects and cursor progress through the transition. Verify binary rollback with the selected artifacts and schema 4. Keep the application deployment steps and their results separate. |
+| Baseline and rollout | Capture health, offsets and application ledger before changing binaries. Qualify the schema-4-to-5 maintenance installation and verify schema 5 and readiness before resuming the candidate. Compare effects and cursor progress through the transition. Qualify the index-only schema-5-to-4 rollback before restarting v0.9.1 with the selected artifacts. Keep the application deployment steps and their results separate. |
 | Normal and peak load | Run the agreed application workload and include the planned retention/vacuum observation. Measure actual committed input, end-to-end latency, Outbox age, and Kafka lag per partition. Capture pool waits, query plans and costs for representative Inbox lifecycle transitions, table/index growth, memory, goroutines and OOM counters. |
 | Faults and operator response | In staging, exercise a Relay restart, consumer restart and rebalance, PostgreSQL interruption, and restart of the dedicated Kafka broker. Verify retry and lease recovery, duplicate handling and preservation of ordering. Drive one poison input to the documented blocked/dead state, then perform audited retry and prove progress. Record alert arrival, operator response and catch-up time for each fault. |
 | Restore and resumption | Perform the separate [PostgreSQL PITR and Kafka offset drill](V1_PITR_DRILL.md) with the application's backup tooling and representative state. Link its exact cut proof, offset plan/read-back, resumption reconciliation and measured RPO/RTO. |

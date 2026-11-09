@@ -250,6 +250,13 @@ SET lease_owner = NULL, lease_until = NULL, epoch = 0,
 	if err := reset(); err != nil {
 		t.Fatalf("reset integration database: %v", err)
 	}
+	// Store now retains polling observations. A reset fixture needs a new cache;
+	// a previous test's captured counts must not become this test's baseline.
+	store, err := pgstore.NewStore(shared.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared.store = store
 	t.Cleanup(func() {
 		if err := reset(); err != nil {
 			t.Errorf("clean integration database: %v", err)
@@ -263,9 +270,7 @@ func TestSharedIntegrationEnvironmentRestoresCurrentSchema(t *testing.T) {
 		e := startEnv(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-			t.Fatal(err)
-		}
+		migrationCompatibilityDownTo(t, ctx, e.pool, 3)
 		version, err := pgstore.SchemaVersion(ctx, e.pool)
 		if err != nil || version != 3 {
 			t.Fatalf("released schema=%d: %v", version, err)
@@ -951,18 +956,7 @@ func TestMigrationRoundTrip(t *testing.T) {
 			t.Errorf("drop migration test sentinel: %v", err)
 		}
 	})
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
-	if err := pgstore.MigrateDown(ctx, e.pool); err != nil {
-		t.Fatal(err)
-	}
+	migrationCompatibilityDownTo(t, ctx, e.pool, 0)
 	version, err := pgstore.SchemaVersion(ctx, e.pool)
 	if err != nil {
 		t.Fatal(err)

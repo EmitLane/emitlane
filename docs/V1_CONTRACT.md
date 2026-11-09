@@ -55,11 +55,12 @@ W3C headers. Span names, logs and human-readable error text are diagnostic.
   the current one. Gaps and dead expected events require visible recovery.
 - Lease tokens/epochs fence stale transitions. Expiry and durable retry recover
   interrupted work; exhausted poison work remains visible for operator repair.
-- The initial release uses schema 4 and keeps the published migration bytes
-  immutable. Schema, HTTP API, event schema and Go module versions are distinct.
-  The planned binary rollback to v0.9.1 keeps schema 4. Validate the exact
-  binaries before approving that path. A schema downgrade is a separate
-  guarded operation.
+- The candidate uses schema 5 for the pending-unordered claim index and keeps
+  published migrations 1–4 immutable. Schema, HTTP API, event schema and Go
+  module versions are distinct. v0.9.1 requires schema 4: rollback stops the
+  candidate processes and removes only migration 5 before starting the previous
+  binaries. Validate the exact maintenance upgrade and rollback procedure.
+  State-removing schema downgrades remain separate guarded operations.
 - Kafka and Inbox retention must cover supported redelivery/replay/restore windows.
   Deleting deduplication state shortens that guarantee.
 
@@ -80,10 +81,10 @@ recovery procedures and application workload.
 | Surface | Initial v1 scope | Evidence and remaining qualification |
 | --- | --- | --- |
 | Platform and compiler | Linux/amd64 runtime. Go 1.27.2 is the candidate build toolchain and the module's minimum Go version. | The managed 72-hour fixture ran on Linux/amd64 with Go 1.27.2. Other runtime platforms need separate evidence. |
-| PostgreSQL | PostgreSQL 16, one writable instance, schema 4, durable writes. | The 72-hour fixture used `postgres:16-alpine` with `fsync`, `synchronous_commit` and `full_page_writes` enabled. PostgreSQL HA, managed services and other major versions are outside the initial scope. |
+| PostgreSQL | PostgreSQL 16, one writable instance, schema 5, durable writes. | The 72-hour fixture used schema 4 with `postgres:16-alpine`, `fsync`, `synchronous_commit` and `full_page_writes` enabled. Migration 5 and its query plans require candidate qualification. PostgreSQL HA, managed services and other major versions are outside the initial scope. |
 | Kafka | Apache Kafka 4.3.1, one KRaft broker. | The 72-hour fixture exercised actual broker restart with eight topic partitions. Multi-broker deployment, other Kafka versions and managed services are outside the initial scope. |
 | Kafka transport | Production Kafka connections use TLS with broker identity verification. Qualify the exact listener and authentication mode before listing it in the release notes. | The 72-hour fixture used plaintext on loopback. TLS, mTLS, SASL over TLS and credential rotation need separate evidence for any advertised deployment. See [Kafka connection security](KAFKA_SECURITY.md). |
-| Upgrade and rollback | Initial path is v0.9.1 to v1.0.0 and binary rollback to v0.9.1 on schema 4. | Published migrations are unchanged. Earlier standalone Relay rolling tests are historical. Validate the final binaries and the planned application rollout before accepting the path. |
+| Upgrade and rollback | Maintenance upgrade from v0.9.1/schema 4 to v1.0.0/schema 5; rollback removes only the new index migration before returning to v0.9.1/schema 4. | Published migrations 1–4 are unchanged. Earlier schema-4 rolling tests are historical. Qualify the final artifacts, index installation on retained data and exact schema-5-to-4 rollback before accepting the path. |
 | Recovery | Operator-led PostgreSQL restore/PITR, with Kafka retention and group offset reconciliation before resumption. | The 72-hour run demonstrated recovery from faults in a live fixture. Production-representative restore and resumption remain open. See [Backup and restore](BACKUP_RESTORE.md). |
 | Release artifacts | Verify the release archives and Linux/amd64 and Linux/arm64 image builds and startup. | Exact-release artifact checks are open. An arm64 image smoke test covers image startup. Runtime support requires its own deployment evidence. |
 

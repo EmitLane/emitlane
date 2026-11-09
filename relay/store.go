@@ -99,6 +99,14 @@ type StatsWithPresence interface {
 	StatsSnapshotWithPresence(ctx context.Context, staleAfter time.Duration) (Stats, error)
 }
 
+// CachedStatsWithPresence is an optional polling capability. The timestamp
+// identifies the captured queue/stream counts, not the time of a cache hit.
+// Implementations must return errors rather than present expired/failed reads
+// as fresh zeros. Exact StatsSnapshot methods remain available to operators.
+type CachedStatsWithPresence interface {
+	CachedStatsSnapshotWithPresence(ctx context.Context, staleAfter time.Duration) (Stats, time.Time, error)
+}
+
 // PresenceStore is an optional visibility capability. Presence failures must
 // never stop delivery because relay_instances is not delivery state.
 type PresenceStore interface {

@@ -21,6 +21,11 @@ evidence on that SHA. Record earlier results with their original scope. The
 72-hour managed qualification and the older multi-Relay soak are different
 gates.
 
+The candidate's schema-5 index migration is outside the schema-4 72-hour
+evidence. Qualify the schema-4-to-5 maintenance upgrade, index installation
+within the existing migration deadline, and index-only rollback to schema 4
+before starting v0.9.1 artifacts. Do not infer this path from older rolling runs.
+
 Keep `RELEASES_ENABLED` closed during verification. Before any publication
 approval, confirm the release flow can promote the approved SHA without
 creating a tag or starting publication on an unchecked SHA. An automatic
@@ -86,7 +91,7 @@ with the same parameters as the reviewed historical run.
 | Load, warmup and recovery budget | 60 min, 15 s and 10 min |
 | Relay topology and workload | Four Relays, 3,500 ordered streams, 80% ordered, 512-byte payloads, configured target 250/s |
 | Fault schedule | Seed 20261005 and one-minute fault interval |
-| Fixture | PostgreSQL 16 with durable writes and at least 512 MiB shared memory, one Kafka 4.3.1 broker, dedicated loopback endpoints |
+| Fixture | PostgreSQL 16 with durable writes and at least 512 MiB shared memory, one JVM Kafka 4.3.1 broker pinned by image digest, dedicated loopback endpoints |
 | Supervision | One foreground run under a dedicated supervisor. Two-hour outer deadline, including build, recovery and audits. |
 
 Use an approved isolated Linux test environment with a verified resource
@@ -114,7 +119,97 @@ full integrity report and classify warnings. Count allowed Kafka duplicates
 separately and report the observed rate for this fixture. A failure or
 incomplete audit stays visible with its first failure evidence.
 
+### PostgreSQL backlog diagnosis
+
+The opt-in `TestPostgreSQLBacklogDiagnostics` is prepared for a separately
+authorized short server run. It starts one private, durable PostgreSQL fixture
+with the candidate's embedded migrations and indexes.
+
+The synthetic fixture has 670,175 events with 512-byte payloads, 3,500 ordered
+streams and four partition owners. It contains 442,365 pending events
+(412,357 ordered and 30,008 unordered) and 227,810 delivered events. Each
+stream's cursor follows its delivered prefix. Earlier ordered pending rows
+precede the unordered pending tail to expose filtering cost on a mixed queue.
+These logical counts match the failed run's final counters. Historical WAL,
+retry churn and physical index state require separate evidence.
+
+Four serial rounds rotate through the partition owners. Each round measures
+six operations: production `ClaimOrdered`, unordered `Claim`, the lightweight
+recovery work probe, exact `queueState`, exact Relay statistics and cached Relay
+polling. Claim size is eight, event and partition leases
+are four seconds, partition renewal is 250 ms, and the ordered minimum lease
+is 1.25 seconds. The pgx tracer captures the SQL and parameters actually used.
+Exact Relay statistics contribute separate queue and ordering statements.
+Cached polling records its source capture time and whether a refresh occurred:
+a cold/expired cache contributes those two statements plus the small live-control
+query; a cache hit contributes only the live-control query. Preserve all 24
+operations and derive the plan count from the captured queries rather than
+expecting the previous 20-plan layout. The initial full observation is not a
+warm-cache polling result. Record cold refreshes and hits separately.
+
+For every statement, the fresh JSONL output records client time and
+`EXPLAIN (ANALYZE, BUFFERS, WAL, SETTINGS, FORMAT JSON)`, including server
+execution/planning time, rows, loops, filtering, buffer hits/reads and spill
+information. The measurement connections enable I/O timing. Successful method
+claims are rearmed, and EXPLAIN writes are rolled back. Final counts must match
+the initial logical fixture. Errors and incomplete termination remain visible.
+
+After the comparable four-round series, a rolled-back synthetic drain compares
+the former bare `EXISTS` query with the materialized, ordered status probes.
+Preserve all ten sparse operation records and ten sparse plans. Cases retain
+one pending, inflight or dead row, no active rows, and a delivered-only gap.
+Planner statistics retain the pre-drain distribution; the uncommitted versions
+cannot be vacuumed. Record this MVCC limitation explicitly and review heap
+visibility fetches as well as sequential scans. A limited index query alone
+does not prove constant-cost recovery polling. Verify rollback restores the
+original totals. Existing recovery and audit deadlines remain unchanged.
+
+Seeding and preceding measurements populate caches. Record the round order
+when interpreting repetitions. This serial diagnostic establishes individual
+query costs; production contention and the observer's total CPU share still
+need concurrent evidence.
+
+After authorization, use the shared remote-testing resource boundary and
+exclusive runner lock. Supply a fresh absolute output file with an existing
+parent directory. The diagnostic shares a ten-minute budget for fixture setup
+and measurements, using the existing release recovery duration. Existing
+soak timeouts, query settings and acceptance criteria retain their definitions.
+
+```sh
+GOMAXPROCS=2 \
+EMITLANE_SOAK_BACKLOG_RUN_ID=backlog-diagnostic-UNIQUE \
+EMITLANE_SOAK_BACKLOG_OUTPUT=/absolute/fresh-results/backlog.jsonl \
+go test -mod=readonly -p=2 -parallel=2 -count=1 -timeout=12m \
+  -run '^TestPostgreSQLBacklogDiagnostics$' ./cmd/emitlane-soak
+```
+
+Preserve source identity, stdout, the complete JSONL and terminal supervisor
+status. A complete diagnostic means all measurements were captured. Release
+acceptance continues to require the full multi-Relay profile and audits.
+
+Prepared regressions cover cache reuse/expiry, canceled waiters, failed refresh
+and timestamp preservation, plus live pause/presence/partition fields and
+unchanged public stream details. `TestQueueWorkProbePostgreSQL` is separately
+opt-in with `EMITLANE_SOAK_QUEUE_PROBE_RUN_ID`; its private PostgreSQL fixture
+checks empty, scheduled, inflight, dead and delivered queues, missing-head gaps,
+and query-error handling against the unchanged exact reconciliation. These
+focused changes passed on the intermediate trees recorded in the acceptance
+record. They still need final-candidate CI and the separate multi-Relay run.
+
+`TestCachedStatsUseOneDatabaseSnapshotAcrossAggregations` holds the statistics
+reader after its queue aggregate, commits a new pending stream from another
+connection, and requires both cached aggregates to retain the original snapshot.
+The explicit uncached read must then observe the newly committed row and gap.
+
 ## 5. Package and inspect without publishing
+
+Dispatch [Release container smoke](../.github/workflows/release-smoke.yml)
+against the branch fixed at `S`. Its manual-only `release snapshot artifacts`
+job builds the private snapshot and runs
+[`check-snapshot.py`](../deploy/release/check-snapshot.py), saving all archives,
+checksums, binary scans, image metadata and runtime startup evidence as a CI
+artifact. The job has read-only repository permissions, performs no registry
+login and uses snapshot mode. The publication workflow remains separate.
 
 On a fresh isolated runner at `S`, use GoReleaser v2.18.0, as pinned in
 [Release](../.github/workflows/release.yml), with the candidate's
